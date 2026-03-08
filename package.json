@@ -1,6 +1,6 @@
 {
   "name": "mongoshield",
-  "version": "1.0.0",
+  "version": "1.0.1-alpha.0",
   "description": "MongoShield is a revolutionary, self-contained MongoDB data protection utility built specifically for modern Node.js and TypeScript ecosystems. It eliminates the need for native OS binaries like mongodump and mongorestore. This makes it ideal for constrained environments like Serverless Functions, AWS Lambda, minimal Docker containers, or PaaS platforms like Heroku, where system-level installations are restricted.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
