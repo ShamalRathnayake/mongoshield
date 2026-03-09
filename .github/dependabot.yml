@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: "npm" # using pnpm but GitHub expects npm here usually, or pnpm in newer versions
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"

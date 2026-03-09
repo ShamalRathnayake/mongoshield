@@ -1,6 +1,9 @@
 {
   "name": "mongoshield",
   "version": "1.0.1-alpha.0",
+  "engines": {
+    "node": ">= 20.x"
+  },
   "description": "MongoShield is a revolutionary, self-contained MongoDB data protection utility built specifically for modern Node.js and TypeScript ecosystems. It eliminates the need for native OS binaries like mongodump and mongorestore. This makes it ideal for constrained environments like Serverless Functions, AWS Lambda, minimal Docker containers, or PaaS platforms like Heroku, where system-level installations are restricted.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -13,10 +16,16 @@
     }
   },
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "pnpm -r run build",
+    "dev": "pnpm -r run dev",
     "test": "vitest run",
-    "prepublishOnly": "npm run build && npm run test"
+    "prepublishOnly": "npm run build && npm run test",
+    "docs": "typedoc",
+    "commit": "git-cz",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*": "biome check --write"
   },
   "keywords": [
     "mongodb",
@@ -31,13 +40,37 @@
   "author": "ShamalRathnayake",
   "license": "MIT",
   "devDependencies": {
+    "@biomejs/biome": "^2.4.6",
+    "@changesets/cli": "^2.30.0",
+    "@commitlint/cli": "^20.4.3",
+    "@commitlint/config-conventional": "^20.4.3",
+    "@testcontainers/mongodb": "^11.12.0",
     "@types/node": "^25.3.5",
+    "commitizen": "^4.3.1",
+    "cz-conventional-changelog": "^3.3.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.3.2",
+    "testcontainers": "^11.12.0",
     "tsup": "^8.5.1",
+    "typedoc": "^0.28.17",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   },
   "dependencies": {
     "pino": "^10.3.1",
     "zod": "^4.3.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShamalRathnayake/mongoshield.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ShamalRathnayake/mongoshield/issues"
+  },
+  "homepage": "https://github.com/ShamalRathnayake/mongoshield#readme",
+  "config": {
+    "commitizen": {
+      "path": "cz-conventional-changelog"
+    }
   }
 }

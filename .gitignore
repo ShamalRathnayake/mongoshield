@@ -4,3 +4,5 @@ dist/
 .DS_Store
 coverage/
 *.resolved
+mongoshield_*
+setup_roadmap.md
