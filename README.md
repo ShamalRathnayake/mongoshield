@@ -37,4 +37,4 @@ await shield.backup();
 ```
 
 ## License
-ISC
+MIT

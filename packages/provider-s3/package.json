@@ -1,0 +1,25 @@
+{
+  "name": "@mongoshield/provider-s3",
+  "version": "0.0.1",
+  "description": "AWS S3 and compatible storage provider for MongoShield.",
+  "engines": {
+    "node": ">= 20.x"
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mongoshield/core": "workspace:*"
+  }
+}
