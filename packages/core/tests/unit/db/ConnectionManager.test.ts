@@ -9,14 +9,11 @@ const { mockConnect, mockClose } = vi.hoisted(() => ({
 
 vi.mock("mongodb", () => {
   return {
-    // biome-ignore lint/suspicious/noExplicitAny: Mock implementation needs any for constructor binding
-    MongoClient: vi.fn().mockImplementation(function (this: any) {
-      return {
-        connect: mockConnect,
-        close: mockClose,
-        db: vi.fn().mockReturnValue({}),
-      };
-    }),
+    MongoClient: vi.fn().mockImplementation(() => ({
+      connect: mockConnect,
+      close: mockClose,
+      db: vi.fn().mockReturnValue({}),
+    })),
   };
 });
 
