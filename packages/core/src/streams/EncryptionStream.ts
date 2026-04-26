@@ -193,7 +193,7 @@ export class DecryptionTransform extends Transform {
         return;
       }
 
-      this.decipher.setAuthTag(this.tailBuffer);
+      (this.decipher as any).setAuthTag(this.tailBuffer);
 
       const finalChunk = this.decipher.final();
       if (finalChunk.length > 0) {

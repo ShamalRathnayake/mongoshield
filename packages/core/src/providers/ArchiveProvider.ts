@@ -95,4 +95,24 @@ export class ArchiveProvider extends AbstractStorageProvider {
     // Atomic rename from .tmp to final path
     await rename(this.tmpPath, this.archivePath);
   }
+
+  protected async _listContents(): Promise<
+    Array<{ dbName: string; collectionName: string }>
+  > {
+    throw new Error(
+      "ArchiveProvider: Restoration from MSAF archives is not yet implemented in this provider.",
+    );
+  }
+
+  protected async _createBsonReadStream(): Promise<any> {
+    throw new Error(
+      "ArchiveProvider: Restoration from MSAF archives is not yet implemented in this provider.",
+    );
+  }
+
+  protected async _createMetadataReadStream(): Promise<any> {
+    throw new Error(
+      "ArchiveProvider: Restoration from MSAF archives is not yet implemented in this provider.",
+    );
+  }
 }
