@@ -9,11 +9,13 @@ const { mockConnect, mockClose } = vi.hoisted(() => ({
 
 vi.mock("mongodb", () => {
   return {
-    MongoClient: vi.fn().mockImplementation(() => ({
-      connect: mockConnect,
-      close: mockClose,
-      db: vi.fn().mockReturnValue({}),
-    })),
+    MongoClient: vi.fn().mockImplementation(function () {
+      return {
+        connect: mockConnect,
+        close: mockClose,
+        db: vi.fn().mockReturnValue({}),
+      };
+    }),
   };
 });
 
