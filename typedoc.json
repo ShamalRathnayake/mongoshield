@@ -3,7 +3,7 @@
     "packages/core/src/index.ts",
     "packages/provider-s3/src/index.ts"
   ],
-  "out": "docs",
+  "out": "docs/api",
   "name": "MongoShield Documentation",
   "readme": "README.md",
   "excludePrivate": true,
