@@ -18,10 +18,15 @@ export class MultiplexWriteStream extends Writable {
   ) {
     super({ decodeStrings: false });
     this.nameBuffer = Buffer.from(name, "utf8");
+
+    // Forward errors from the shared destination to this stream
+    this.destination.on("error", (err) => {
+      this.destroy(err);
+    });
   }
 
   public override _write(
-    chunk: any,
+    chunk: Buffer | string,
     encoding: BufferEncoding,
     callback: (error?: Error | null) => void,
   ): void {

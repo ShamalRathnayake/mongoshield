@@ -1,4 +1,9 @@
-import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  hkdfSync,
+  randomBytes,
+} from "node:crypto";
 import { Transform, type TransformCallback } from "node:stream";
 
 /**
@@ -54,7 +59,7 @@ export class EncryptionTransform extends Transform {
 
   public override _transform(
     chunk: any,
-    encoding: BufferEncoding,
+    _encoding: BufferEncoding,
     callback: TransformCallback,
   ): void {
     try {
@@ -91,6 +96,113 @@ export class EncryptionTransform extends Transform {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       callback(new Error(`Encryption finalization failed: ${message}`));
+    }
+  }
+}
+
+/**
+ * Reverses the AES-256-GCM encryption applied by EncryptionTransform.
+ * Expects [Salt (32)] + [IV (12)] + [Encrypted Data] + [AuthTag (16)].
+ */
+export class DecryptionTransform extends Transform {
+  private decipher: ReturnType<typeof createDecipheriv> | null = null;
+  private masterKeyBuffer: Buffer;
+  private headerBuffer: Buffer = Buffer.alloc(0);
+  private tailBuffer: Buffer = Buffer.alloc(0);
+
+  constructor(masterKeyHex: string) {
+    super();
+    this.masterKeyBuffer = Buffer.from(masterKeyHex, "hex");
+    if (this.masterKeyBuffer.length !== 32) {
+      throw new Error("Master encryption key must be exactly 32 bytes.");
+    }
+  }
+
+  public override _transform(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: TransformCallback,
+  ): void {
+    try {
+      let data = Buffer.concat([this.tailBuffer, chunk]);
+
+      // 1. Extract Header (Salt + IV) if not already done
+      if (!this.decipher) {
+        const headerSize = 32 + 12;
+        const currentTotalHeader = Buffer.concat([this.headerBuffer, data]);
+
+        if (currentTotalHeader.length < headerSize) {
+          this.headerBuffer = currentTotalHeader;
+          callback();
+          return;
+        }
+
+        const salt = currentTotalHeader.subarray(0, 32);
+        const iv = currentTotalHeader.subarray(32, 44);
+        data = currentTotalHeader.subarray(44);
+
+        const streamKey = hkdfSync(
+          "sha256",
+          this.masterKeyBuffer,
+          salt,
+          "mongoshield-stream-key",
+          32,
+        );
+
+        this.decipher = createDecipheriv(
+          "aes-256-gcm",
+          Buffer.from(streamKey),
+          iv,
+        );
+      }
+
+      // 2. We must always keep the last 16 bytes in a tail buffer,
+      // because they contain the GCM Auth Tag which we need for decipher.setAuthTag() at the end.
+      const authTagSize = 16;
+      if (data.length > authTagSize) {
+        const toDecrypt = data.subarray(0, data.length - authTagSize);
+        this.tailBuffer = data.subarray(data.length - authTagSize);
+
+        const decrypted = this.decipher.update(toDecrypt);
+        if (decrypted.length > 0) {
+          this.push(decrypted);
+        }
+      } else {
+        this.tailBuffer = data;
+      }
+
+      callback();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      callback(new Error(`Decryption failed: ${message}`));
+    }
+  }
+
+  public override _flush(callback: TransformCallback): void {
+    try {
+      if (!this.decipher) {
+        callback(new Error("Decryption failed: Stream too short (no header)"));
+        return;
+      }
+
+      // The tail buffer now contains exactly the 16-byte Auth Tag
+      if (this.tailBuffer.length !== 16) {
+        callback(
+          new Error("Decryption failed: Stream truncated (no auth tag)"),
+        );
+        return;
+      }
+
+      this.decipher.setAuthTag(this.tailBuffer);
+
+      const finalChunk = this.decipher.final();
+      if (finalChunk.length > 0) {
+        this.push(finalChunk);
+      }
+      callback();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      callback(new Error(`Decryption integrity check failed: ${message}`));
     }
   }
 }

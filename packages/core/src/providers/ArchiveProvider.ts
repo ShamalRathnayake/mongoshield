@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Writable } from "node:stream";
 import {
@@ -15,6 +15,7 @@ export const MSAF_VERSION = Buffer.from([0x01]);
 
 export class ArchiveProvider extends AbstractStorageProvider {
   private archiveStream: Writable | null = null;
+  private tmpPath: string | null = null;
 
   constructor(
     private archivePath: string,
@@ -24,12 +25,14 @@ export class ArchiveProvider extends AbstractStorageProvider {
   }
 
   protected async _initialize(): Promise<void> {
-    // Ensure directory exists
+    // Ensure directory exists with secure permissions (0700)
     const dir = dirname(this.archivePath);
-    await mkdir(dir, { recursive: true });
+    await mkdir(dir, { recursive: true, mode: 0o700 });
 
-    // Open the shared archive write stream
-    this.archiveStream = createWriteStream(this.archivePath);
+    this.tmpPath = `${this.archivePath}.tmp`;
+
+    // Open the shared archive write stream with secure permissions (0600)
+    this.archiveStream = createWriteStream(this.tmpPath, { mode: 0o600 });
 
     // Wait for the stream to open
     await new Promise<void>((resolve, reject) => {
@@ -73,7 +76,7 @@ export class ArchiveProvider extends AbstractStorageProvider {
   }
 
   protected async _finalize(): Promise<void> {
-    if (!this.archiveStream) {
+    if (!this.archiveStream || !this.tmpPath) {
       throw new Error("ArchiveProvider not initialized");
     }
 
@@ -88,5 +91,8 @@ export class ArchiveProvider extends AbstractStorageProvider {
         resolve();
       });
     });
+
+    // Atomic rename from .tmp to final path
+    await rename(this.tmpPath, this.archivePath);
   }
 }

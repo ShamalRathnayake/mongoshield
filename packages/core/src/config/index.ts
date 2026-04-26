@@ -76,11 +76,44 @@ export const BackupConfigSchema = z.object({
   }),
 });
 
+export const RestoreOptionsSchema = z.object({
+  dbName: z.string().optional(),
+  collections: z.array(z.string()).optional(),
+  drop: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  numParallelCollections: z.number().int().positive().default(4),
+  encryptionKey: z
+    .string()
+    .length(64, "Encryption key must be exactly 64 characters long")
+    .regex(/^[0-9a-fA-F]+$/, "Encryption key must be a valid hex string")
+    .optional(),
+  gzip: z.boolean().default(false),
+});
+
+export const RestoreConfigSchema = z.object({
+  connection: ConnectionOptionsSchema.default({
+    host: "127.0.0.1",
+    port: 27017,
+  }),
+  input: RestoreOptionsSchema.default({
+    drop: false,
+    dryRun: false,
+    numParallelCollections: 4,
+    gzip: false,
+  }),
+});
+
 export type ConnectionOptions = z.infer<typeof ConnectionOptionsSchema>;
 export type TargetOptions = z.infer<typeof TargetOptionsSchema>;
 export type OutputOptions = z.infer<typeof OutputOptionsSchema>;
 export type BackupConfig = z.infer<typeof BackupConfigSchema>;
+export type RestoreOptions = z.infer<typeof RestoreOptionsSchema>;
+export type RestoreConfig = z.infer<typeof RestoreConfigSchema>;
 
 export function validateConfig(config: unknown): BackupConfig {
   return BackupConfigSchema.parse(config);
+}
+
+export function validateRestoreConfig(config: unknown): RestoreConfig {
+  return RestoreConfigSchema.parse(config);
 }

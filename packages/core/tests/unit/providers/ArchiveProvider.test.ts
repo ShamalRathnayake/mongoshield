@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import { Writable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -45,8 +45,13 @@ describe("ArchiveProvider", () => {
 
     await initPromise;
 
-    expect(mkdir).toHaveBeenCalledWith("/path/to", { recursive: true });
-    expect(createWriteStream).toHaveBeenCalledWith(archivePath);
+    expect(mkdir).toHaveBeenCalledWith("/path/to", {
+      recursive: true,
+      mode: 0o700,
+    });
+    expect(createWriteStream).toHaveBeenCalledWith(`${archivePath}.tmp`, {
+      mode: 0o600,
+    });
 
     const expectedHeader = Buffer.concat([MSAF_MAGIC, MSAF_VERSION]);
     expect(mockStream.write).toHaveBeenCalledWith(
@@ -177,6 +182,9 @@ describe("ArchiveProvider", () => {
       expectedEof,
       expect.any(Function),
     );
+
+    // Verify atomic rename
+    expect(rename).toHaveBeenCalledWith(`${archivePath}.tmp`, archivePath);
   });
 
   it("throws if finalize called before initialization", async () => {

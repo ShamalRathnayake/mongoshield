@@ -9,11 +9,14 @@ const { mockConnect, mockClose } = vi.hoisted(() => ({
 
 vi.mock("mongodb", () => {
   return {
-    MongoClient: vi.fn().mockImplementation(() => ({
-      connect: mockConnect,
-      close: mockClose,
-      db: vi.fn().mockReturnValue({}),
-    })),
+    // biome-ignore lint/suspicious/noExplicitAny: Mock implementation needs any for constructor binding
+    MongoClient: vi.fn().mockImplementation(function (this: any) {
+      return {
+        connect: mockConnect,
+        close: mockClose,
+        db: vi.fn().mockReturnValue({}),
+      };
+    }),
   };
 });
 
@@ -71,6 +74,7 @@ describe("ConnectionManager", () => {
     const manager = new ConnectionManager(config);
     await manager.connect();
 
+    // biome-ignore lint/suspicious/noExplicitAny: Mock inspection
     const uri = (MongoClient as any).mock.calls[0][0];
     expect(uri).toContain("authSource=admin");
     expect(uri).toContain("authMechanism=SCRAM-SHA-256");
@@ -88,6 +92,7 @@ describe("ConnectionManager", () => {
     const manager = new ConnectionManager(config);
     await manager.connect();
 
+    // biome-ignore lint/suspicious/noExplicitAny: Mock inspection
     const options = (MongoClient as any).mock.calls[0][1];
     expect(options.tls).toBe(true);
     expect(options.tlsCAFile).toBe("/ca.pem");
@@ -104,6 +109,7 @@ describe("ConnectionManager", () => {
     const manager = new ConnectionManager(config);
     await manager.connect();
 
+    // biome-ignore lint/suspicious/noExplicitAny: Mock inspection
     const options = (MongoClient as any).mock.calls[0][1];
     expect(options.tlsCertificateKeyFilePassword).toBe("secretpassword");
   });
