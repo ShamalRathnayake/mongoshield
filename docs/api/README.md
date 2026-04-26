@@ -1,3 +1,7 @@
+**MongoShield Documentation**
+
+***
+
 # MongoShield 🛡️
 
 **Status:** ✅ PHASE 1 (CORE ENGINE) COMPLETE | 🚧 PHASE 2 (MVP) ACTIVE 🚧
@@ -14,9 +18,9 @@ The core motivation behind MongoShield is to solve the glaring flaws present in 
 
 For deep technical details, roadmaps, and setup instructions, please refer to our `docs/` directory:
 
-- 🗺️ [**Project Plan & Roadmap**](./docs/project/PROJECT_PLAN.md): Vision, core ideas, and phased roadmap.
-- 🛠️ [**Developer Guide**](./docs/developer/DEVELOPER_GUIDE.md): Deep dive into the streaming engine, monorepo setup, CI/CD, and local testing.
-- 🤖 [**Agent Context**](./docs/agent/AGENT_CONTEXT.md): System prompt and strict rulebook for AI Agents modifying this codebase.
+- 🗺️ [**Project Plan & Roadmap**](_media/PROJECT_PLAN.md): Vision, core ideas, and phased roadmap.
+- 🛠️ [**Developer Guide**](_media/DEVELOPER_GUIDE.md): Deep dive into the streaming engine, monorepo setup, CI/CD, and local testing.
+- 🤖 [**Agent Context**](_media/AGENT_CONTEXT.md): System prompt and strict rulebook for AI Agents modifying this codebase.
 
 ### Usage Example
 
