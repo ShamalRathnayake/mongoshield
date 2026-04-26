@@ -40,21 +40,22 @@
   "author": "ShamalRathnayake",
   "license": "MIT",
   "devDependencies": {
-    "@biomejs/biome": "^2.4.6",
-    "@changesets/cli": "^2.30.0",
-    "@commitlint/cli": "^20.4.3",
-    "@commitlint/config-conventional": "^20.4.3",
-    "@testcontainers/mongodb": "^11.12.0",
-    "@types/node": "^25.3.5",
+    "@biomejs/biome": "^2.4.13",
+    "@changesets/cli": "^2.31.0",
+    "@commitlint/cli": "^20.5.2",
+    "@commitlint/config-conventional": "^20.5.0",
+    "@testcontainers/mongodb": "^11.14.0",
+    "@types/node": "^25.6.0",
     "commitizen": "^4.3.1",
     "cz-conventional-changelog": "^3.3.0",
     "husky": "^9.1.7",
-    "lint-staged": "^16.3.2",
-    "testcontainers": "^11.12.0",
+    "lint-staged": "^16.4.0",
+    "testcontainers": "^11.14.0",
     "tsup": "^8.5.1",
-    "typedoc": "^0.28.17",
+    "typedoc": "^0.28.19",
+    "typedoc-plugin-markdown": "^4.11.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.5"
   },
   "dependencies": {
     "pino": "^10.3.1",
@@ -71,6 +72,14 @@
   "config": {
     "commitizen": {
       "path": "cz-conventional-changelog"
+    }
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "7.3.2",
+      "lodash": ">=4.18.0",
+      "uuid": ">=14.0.0",
+      "tmp": ">=0.2.4"
     }
   }
 }
