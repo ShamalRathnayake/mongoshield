@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { PassThrough, type Writable } from "node:stream";
+import { PassThrough, type Readable, type Writable } from "node:stream";
 import type { StorageProvider } from "./StorageProvider";
 
 /**
@@ -7,7 +7,7 @@ import type { StorageProvider } from "./StorageProvider";
  *
  * It provides:
  * 1. Strict Path Sanitization: Blocks path traversal attacks (`../`, `/`) natively.
- * 2. Automatic Telemetry: Wraps created write streams in a PassThrough interceptor to emit `progress` events automatically.
+ * 2. Automatic Telemetry: Wraps created streams in a PassThrough interceptor to emit `progress` events automatically.
  */
 export abstract class AbstractStorageProvider
   extends EventEmitter
@@ -40,6 +40,34 @@ export abstract class AbstractStorageProvider
       collectionName,
     );
     return this.wrapWithTelemetry(stream);
+  }
+
+  public async listContents(): Promise<
+    Array<{ dbName: string; collectionName: string }>
+  > {
+    return this._listContents();
+  }
+
+  public async createBsonReadStream(
+    dbName: string,
+    collectionName: string,
+  ): Promise<Readable> {
+    this.sanitizePath(dbName);
+    this.sanitizePath(collectionName);
+
+    const stream = await this._createBsonReadStream(dbName, collectionName);
+    return this.wrapWithReadTelemetry(stream);
+  }
+
+  public async createMetadataReadStream(
+    dbName: string,
+    collectionName: string,
+  ): Promise<Readable> {
+    this.sanitizePath(dbName);
+    this.sanitizePath(collectionName);
+
+    const stream = await this._createMetadataReadStream(dbName, collectionName);
+    return this.wrapWithReadTelemetry(stream);
   }
 
   public async finalize(): Promise<void> {
@@ -77,7 +105,35 @@ export abstract class AbstractStorageProvider
       this.emit("error", err);
     });
 
+    // CRITICAL: Propagate errors from the actual destination (e.g., disk full, EACCES)
+    // back to the PassThrough stream so that the Engine (pipeline) detects it.
+    destination.on("error", (err) => {
+      passThrough.destroy(err);
+      this.emit("error", err);
+    });
+
     passThrough.pipe(destination);
+
+    return passThrough;
+  }
+
+  /**
+   * Wraps an underlying Readable stream with a PassThrough stream that intercepts data events
+   * for telemetry.
+   */
+  private wrapWithReadTelemetry(source: Readable): Readable {
+    const passThrough = new PassThrough();
+
+    source.on("data", (chunk: Buffer) => {
+      this.emit("progress", chunk.length);
+    });
+
+    source.on("error", (err) => {
+      passThrough.destroy(err);
+      this.emit("error", err);
+    });
+
+    source.pipe(passThrough);
 
     return passThrough;
   }
@@ -86,13 +142,30 @@ export abstract class AbstractStorageProvider
    * Child classes must implement these specific methods instead of the public interface.
    */
   protected abstract _initialize(): Promise<void>;
+
   protected abstract _createBsonWriteStream(
     dbName: string,
     collectionName: string,
   ): Promise<Writable>;
+
   protected abstract _createMetadataWriteStream(
     dbName: string,
     collectionName: string,
   ): Promise<Writable>;
+
+  protected abstract _listContents(): Promise<
+    Array<{ dbName: string; collectionName: string }>
+  >;
+
+  protected abstract _createBsonReadStream(
+    dbName: string,
+    collectionName: string,
+  ): Promise<Readable>;
+
+  protected abstract _createMetadataReadStream(
+    dbName: string,
+    collectionName: string,
+  ): Promise<Readable>;
+
   protected abstract _finalize(): Promise<void>;
 }
