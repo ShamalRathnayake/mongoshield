@@ -2,6 +2,9 @@
   "name": "@mongoshield/core",
   "version": "0.0.1",
   "description": "Core streaming, validation, and encryption logic for MongoShield.",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">= 20.x"
   },
