@@ -5,6 +5,11 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ShamalRathnayake/mongoshield.git",
+    "directory": "packages/provider-s3"
+  },
   "engines": {
     "node": ">= 20.x"
   },
