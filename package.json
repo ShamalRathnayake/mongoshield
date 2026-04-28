@@ -14,7 +14,7 @@
     "prepare": "husky"
   },
   "lint-staged": {
-    "*": "biome check --write"
+    "*.{js,ts,cjs,mjs,cts,mts,jsx,tsx,json,jsonc}": "biome check --write"
   },
   "author": "ShamalRathnayake",
   "license": "MIT",
