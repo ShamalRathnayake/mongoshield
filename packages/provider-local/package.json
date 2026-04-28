@@ -1,6 +1,6 @@
 {
   "name": "@mongoshield/provider-local",
-  "version": "0.0.1",
+  "version": "0.0.2-alpha.0",
   "description": "Local file system storage provider for MongoShield.",
   "publishConfig": {
     "access": "public"

@@ -1,6 +1,6 @@
 {
   "name": "@mongoshield/provider-s3",
-  "version": "0.0.1",
+  "version": "0.0.2-alpha.0",
   "description": "AWS S3 and compatible storage provider for MongoShield.",
   "publishConfig": {
     "access": "public"
