@@ -14,20 +14,24 @@ The core motivation behind MongoShield is to solve the glaring flaws present in 
 
 ```bash
 npm install mongoshield
+# or
+pnpm add mongoshield
+# or
+yarn add mongoshield
 ```
 
 ## Packages
 
-This is a monorepo containing the following packages:
+MongoShield is a modular ecosystem. The main `mongoshield` package includes the core engine and high-level API. For specific storage providers, install the corresponding package:
 
-| Package | npm | Description |
-|---|---|---|
-| [`mongoshield`](./packages/mongoshield) | [![npm](https://img.shields.io/npm/v/mongoshield)](https://www.npmjs.com/package/mongoshield) | **Main package** — high-level API + core re-exports. Start here. |
-| [`@mongoshield/core`](./packages/core) | [![npm](https://img.shields.io/npm/v/@mongoshield/core)](https://www.npmjs.com/package/@mongoshield/core) | Low-level streaming engine, providers, and encryption. |
-| [`@mongoshield/provider-local`](./packages/provider-local) | [![npm](https://img.shields.io/npm/v/@mongoshield/provider-local)](https://www.npmjs.com/package/@mongoshield/provider-local) | Local filesystem storage provider. |
-| [`@mongoshield/provider-s3`](./packages/provider-s3) | [![npm](https://img.shields.io/npm/v/@mongoshield/provider-s3)](https://www.npmjs.com/package/@mongoshield/provider-s3) | AWS S3 and S3-compatible storage provider. |
+| Package | Description |
+|---|---|
+| [`mongoshield`](https://www.npmjs.com/package/mongoshield) | **Main package** — high-level API + core engine. Start here. |
+| [`@mongoshield/core`](https://www.npmjs.com/package/@mongoshield/core) | Low-level streaming engine, providers, and encryption. |
+| [`@mongoshield/provider-local`](https://www.npmjs.com/package/@mongoshield/provider-local) | Local filesystem storage provider. |
+| [`@mongoshield/provider-s3`](https://www.npmjs.com/package/@mongoshield/provider-s3) | AWS S3 and S3-compatible storage provider. |
 
-## Usage Example
+## Quick Start
 
 ```typescript
 import { BackupEngine, ArchiveProvider } from 'mongoshield';
@@ -58,22 +62,9 @@ console.log('Backup completed successfully!');
 
 For deep technical details, roadmaps, and setup instructions, please refer to our `docs/` directory:
 
-- 🗺️ [**Project Plan & Roadmap**](./docs/project/PROJECT_PLAN.md): Vision, core ideas, and phased roadmap.
-- 🛠️ [**Developer Guide**](./docs/developer/DEVELOPER_GUIDE.md): Deep dive into the streaming engine, monorepo setup, CI/CD, and local testing.
-- 🤖 [**Agent Context**](./docs/agent/AGENT_CONTEXT.md): System prompt and strict rulebook for AI Agents modifying this codebase.
-
-## Development
-
-```bash
-# Install dependencies
-pnpm install
-
-# Build all packages
-pnpm build
-
-# Run all tests
-pnpm test
-```
+- 🗺️ [**Project Plan & Roadmap**](https://github.com/ShamalRathnayake/mongoshield/blob/main/docs/project/PROJECT_PLAN.md): Vision, core ideas, and phased roadmap.
+- 🛠️ [**Developer Guide**](https://github.com/ShamalRathnayake/mongoshield/blob/main/docs/developer/DEVELOPER_GUIDE.md): Deep dive into the streaming engine, monorepo setup, CI/CD, and local testing.
+- 🤖 [**Agent Context**](https://github.com/ShamalRathnayake/mongoshield/blob/main/docs/agent/AGENT_CONTEXT.md): System prompt and strict rulebook for AI Agents modifying this codebase.
 
 ## License
 

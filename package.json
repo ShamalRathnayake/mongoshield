@@ -1,43 +1,21 @@
 {
-  "name": "mongoshield",
-  "version": "1.0.1-alpha.0",
+  "name": "mongoshield-monorepo",
+  "private": true,
   "engines": {
     "node": ">= 20.x"
-  },
-  "description": "MongoShield is a revolutionary, self-contained MongoDB data protection utility built specifically for modern Node.js and TypeScript ecosystems. It eliminates the need for native OS binaries like mongodump and mongorestore. This makes it ideal for constrained environments like Serverless Functions, AWS Lambda, minimal Docker containers, or PaaS platforms like Heroku, where system-level installations are restricted.",
-  "main": "./dist/index.js",
-  "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
-    }
   },
   "scripts": {
     "build": "pnpm -r run build",
     "dev": "pnpm -r run dev",
     "test": "vitest run",
     "release": "changeset publish",
-    "prepublishOnly": "npm run build && npm run test",
     "docs": "typedoc",
     "commit": "git-cz",
     "prepare": "husky"
   },
   "lint-staged": {
-    "*": "biome check --write"
+    "*.{js,ts,cjs,mjs,cts,mts,jsx,tsx,json,jsonc}": "biome check --write"
   },
-  "keywords": [
-    "mongodb",
-    "backup",
-    "restore",
-    "stream",
-    "encryption",
-    "s3",
-    "gdrive",
-    "security"
-  ],
   "author": "ShamalRathnayake",
   "license": "MIT",
   "devDependencies": {
@@ -57,10 +35,6 @@
     "typedoc-plugin-markdown": "^4.11.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.5"
-  },
-  "dependencies": {
-    "pino": "^10.3.1",
-    "zod": "^4.3.6"
   },
   "repository": {
     "type": "git",

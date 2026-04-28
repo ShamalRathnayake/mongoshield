@@ -1,6 +1,8 @@
 {
   "entryPoints": [
+    "packages/mongoshield/src/index.ts",
     "packages/core/src/index.ts",
+    "packages/provider-local/src/index.ts",
     "packages/provider-s3/src/index.ts"
   ],
   "out": "docs/api",
