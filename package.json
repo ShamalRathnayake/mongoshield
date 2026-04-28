@@ -19,6 +19,7 @@
     "build": "pnpm -r run build",
     "dev": "pnpm -r run dev",
     "test": "vitest run",
+    "release": "changeset publish",
     "prepublishOnly": "npm run build && npm run test",
     "docs": "typedoc",
     "commit": "git-cz",
