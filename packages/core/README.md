@@ -35,6 +35,7 @@ export class MyCustomProvider extends AbstractStorageProvider {
   protected async _createBsonWriteStream(dbName: string, collName: string) { /* ... */ }
   protected async _createMetadataWriteStream(dbName: string, collName: string) { /* ... */ }
   protected async _finalize(): Promise<void> { /* ... */ }
+  protected async _prune(policy: any): Promise<any> { /* ... */ }
 }
 ```
 

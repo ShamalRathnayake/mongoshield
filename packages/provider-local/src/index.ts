@@ -1,1 +1,4 @@
-export { FileSystemProvider } from "./FileSystemProvider";
+export {
+  FileSystemProvider,
+  type FileSystemProviderOptions,
+} from "./FileSystemProvider";
