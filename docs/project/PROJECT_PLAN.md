@@ -32,11 +32,18 @@ To ensure safe, test-driven delivery, the complete feature set is structured int
 **Goal:** Achieve feature-parity with deprecated tools but on our superior architecture. This is the first version recommended for general public use.
 * **Runtime Validation (Completed):** Implement `zod` to strictly validate configuration URIs and credentials.
 * **Lifecycle Hooks (Completed):** Implement native event emitters (`progress`, `error`) so developers can build custom logging.
-* **Cloud Providers:** Build `@mongoshield/provider-s3` for reliable, resumable multi-part streaming uploads to AWS S3, DigitalOcean, and Cloudflare R2.
+* **Cloud Providers (Modular Ecosystem):** To maintain absolute portability and minimal package size, cloud providers are organized into "Ecosystem" packages. This allows users to only install the dependencies required for their target platform. See [Provider Architecture](./PROVIDER_ARCHITECTURE.md) for details.
+    * `@mongoshield/provider-local` (Filesystem, NFS, SMB)
+    * `@mongoshield/provider-s3` (AWS, DigitalOcean, R2, B2)
+    * `@mongoshield/provider-google` (GCS, Drive)
+    * `@mongoshield/provider-microsoft` (Azure, OneDrive)
+    * `@mongoshield/provider-network` (SFTP, WebDAV)
+* **Automated Pruning:** Every provider must implement a mandatory `prune()` interface to support automated old record deletion (by count or by age).
 
 ### Phase 3: The "Pro" Defenses
 **Goal:** Transform MongoShield from a one-way backup script into a robust, two-way, programmable data utility.
 * **Native Restore Engine (`.restore()`):** The exact opposite of the backup. Fetch a remote archive, decompress it, and pump data back into a target database via massive parallel bulk operations.
+* **Built-In Scheduler:** A production-grade backup scheduler (cron) with overlap prevention, exponential backoff retries, and detailed audit logging (persisting last 100 runs). See [Scheduler Plan](./SCHEDULER_PLAN.md) for details.
 * **General File Archiving:** Allow developers to specify static server directories (like user uploads) to be tarballed and uploaded alongside the database.
 * **Remote Pruning Policies:** APIs to automatically delete old backups in the cloud to save costs.
 * **Integrated Webhooks:** Easily send success/failure notifications to Slack, Discord, or Email.

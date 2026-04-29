@@ -1,6 +1,10 @@
 import { EventEmitter } from "node:events";
 import { PassThrough, type Writable } from "node:stream";
-import type { StorageProvider } from "./StorageProvider";
+import type {
+  PruningPolicy,
+  PruningResult,
+  StorageProvider,
+} from "./StorageProvider";
 
 /**
  * AbstractStorageProvider serves as the secure, robust foundation for all storage adapters.
@@ -46,6 +50,10 @@ export abstract class AbstractStorageProvider
     await this._finalize();
   }
 
+  public async prune(policy: PruningPolicy): Promise<PruningResult> {
+    return this._prune(policy);
+  }
+
   /**
    * Sanitizes input to prevent severe Path Traversal vulnerabilities when constructing local paths or remote object keys.
    */
@@ -77,6 +85,13 @@ export abstract class AbstractStorageProvider
       this.emit("error", err);
     });
 
+    // CRITICAL: Propagate errors from the actual destination (e.g., disk full)
+    // back to the PassThrough stream so the Engine detects it immediately.
+    destination.on("error", (err) => {
+      passThrough.destroy(err);
+      this.emit("error", err);
+    });
+
     passThrough.pipe(destination);
 
     return passThrough;
@@ -95,4 +110,5 @@ export abstract class AbstractStorageProvider
     collectionName: string,
   ): Promise<Writable>;
   protected abstract _finalize(): Promise<void>;
+  protected abstract _prune(policy: PruningPolicy): Promise<PruningResult>;
 }
