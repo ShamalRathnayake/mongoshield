@@ -9,6 +9,7 @@ import {
   MultiplexWriteStream,
 } from "../streams/MultiplexWriteStream";
 import { AbstractStorageProvider } from "./AbstractStorageProvider";
+import type { PruningPolicy, PruningResult } from "./StorageProvider";
 
 export const MSAF_MAGIC = Buffer.from("MSHLDARC", "utf8");
 export const MSAF_VERSION = Buffer.from([0x01]);
@@ -88,5 +89,13 @@ export class ArchiveProvider extends AbstractStorageProvider {
         resolve();
       });
     });
+  }
+
+  protected async _prune(policy: PruningPolicy): Promise<PruningResult> {
+    // ArchiveProvider natively creates single file archives (.msaf)
+    // Pruning in this context would mean deleting old .msaf files.
+    // Usually, the higher-level scheduler or file system provider manages this.
+    // For now, this is a no-op stub for the standalone archive stream.
+    return { deletedCount: 0, deletedPaths: [] };
   }
 }

@@ -1,5 +1,16 @@
 import type { Writable } from "node:stream";
 
+export interface PruningPolicy {
+  maxCount?: number;
+  maxDays?: number;
+  strategy: "count" | "age" | "both";
+}
+
+export interface PruningResult {
+  deletedCount: number;
+  deletedPaths: string[];
+}
+
 /**
  * StorageProvider abstracts the destination logic for the backup stream.
  * It provides a standardized contract so the BackupEngine can write to Local Disk, AWS S3, or any other cloud provider agnostically.
@@ -43,6 +54,12 @@ export interface StorageProvider {
    * Useful for uploading final manifests or closing multiplexed archive files.
    */
   finalize(): Promise<void>;
+
+  /**
+   * Automatically cleans up old backups based on a user-defined policy.
+   * @param policy The pruning policy defining retention rules.
+   */
+  prune(policy: PruningPolicy): Promise<PruningResult>;
 
   /**
    * Telemetry Event: Emitted as data chunks are written to the underlying storage.
