@@ -1,42 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { MongoShield, MongoShieldConfigSchema, VERSION } from "../src/index";
+import { MongoShield, VERSION } from "../src/index";
 
 describe("mongoshield wrapper package", () => {
+  const mockStorage = {
+    initialize: async () => { },
+    createBsonWriteStream: async () => ({} as any),
+    createMetadataWriteStream: async () => ({} as any),
+    finalize: async () => { },
+    prune: async () => ({ deletedCount: 0, deletedPaths: [] }),
+    on: () => mockStorage as any,
+  };
+
   describe("MongoShield class", () => {
-    it("should instantiate successfully with a valid URI", () => {
+    it("should instantiate successfully with valid options", () => {
       const shield = new MongoShield({
-        uri: "mongodb://localhost:27017/test",
+        config: {
+          connection: { host: "localhost", port: 27017 },
+          target: { dbName: "test" },
+          output: { outPath: "dump", gzip: false, numParallelCollections: 4, oplog: false }
+        },
+        storage: mockStorage as any
       });
       expect(shield).toBeDefined();
       expect(shield).toBeInstanceOf(MongoShield);
     });
 
-    it("should throw an error with an invalid URI format", () => {
-      expect(() => new MongoShield({ uri: "not-a-uri" })).toThrow();
-    });
-
-    it("should default destination to 'local'", () => {
-      const parsed = MongoShieldConfigSchema.parse({
-        uri: "mongodb://localhost:27017/test",
-      });
-      expect(parsed.destination).toBe("local");
-    });
-
-    it("should accept valid destination values", () => {
-      const parsed = MongoShieldConfigSchema.parse({
-        uri: "mongodb://localhost:27017/test",
-        destination: "s3",
-      });
-      expect(parsed.destination).toBe("s3");
-    });
-
-    it("should reject invalid destination values", () => {
-      expect(() =>
-        MongoShieldConfigSchema.parse({
-          uri: "mongodb://localhost:27017/test",
-          destination: "invalid",
-        }),
-      ).toThrow();
+    it("should throw an error with invalid configuration", () => {
+      expect(() => new MongoShield({
+        // @ts-ignore
+        config: { connection: { host: 123 } },
+        storage: mockStorage as any
+      })).toThrow("MongoShield Configuration Error");
     });
   });
 

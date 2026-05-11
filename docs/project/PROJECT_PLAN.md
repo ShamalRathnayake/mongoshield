@@ -38,7 +38,7 @@ To ensure safe, test-driven delivery, the complete feature set is structured int
     * `@mongoshield/provider-google` (GCS, Drive)
     * `@mongoshield/provider-microsoft` (Azure, OneDrive)
     * `@mongoshield/provider-network` (SFTP, WebDAV)
-* **Automated Pruning:** Every provider must implement a mandatory `prune()` interface to support automated old record deletion (by count or by age).
+* **Automated Pruning (Completed):** Every provider must implement a mandatory `prune()` interface to support automated old record deletion (by count or by age).
 
 ### Phase 3: The "Pro" Defenses
 **Goal:** Transform MongoShield from a one-way backup script into a robust, two-way, programmable data utility.

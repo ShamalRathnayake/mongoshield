@@ -80,6 +80,7 @@ export type ConnectionOptions = z.infer<typeof ConnectionOptionsSchema>;
 export type TargetOptions = z.infer<typeof TargetOptionsSchema>;
 export type OutputOptions = z.infer<typeof OutputOptionsSchema>;
 export type BackupConfig = z.infer<typeof BackupConfigSchema>;
+export type BackupConfigInput = z.input<typeof BackupConfigSchema>;
 
 export function validateConfig(config: unknown): BackupConfig {
   return BackupConfigSchema.parse(config);

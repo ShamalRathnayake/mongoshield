@@ -30,27 +30,33 @@ This is a monorepo containing the following packages:
 ## Usage Example
 
 ```typescript
-import { BackupEngine, ArchiveProvider } from 'mongoshield';
+import { MongoShield } from 'mongoshield';
+import { FileSystemProvider } from '@mongoshield/provider-local';
 
-const provider = new ArchiveProvider('./backups/my_backup.msaf');
+const provider = new FileSystemProvider({
+  outPath: './backups',
+  compress: true
+});
 
-const engine = new BackupEngine({
-  target: {
-    uri: 'mongodb://localhost:27017',
-    dbName: 'production_db',
-    // Optional: filter collections
-    includeCollections: ['users', 'orders']
-  },
-  output: {
-    compression: { enabled: true, level: 9 },
-    encryption: {
-      enabled: true,
-      masterKey: 'your-64-character-hex-master-key'
+const shield = new MongoShield({
+  config: {
+    connection: { host: 'localhost', port: 27017 },
+    target: { 
+      dbName: 'production_db', // Omit for full cluster backup!
+      collections: ['users', 'orders']
+    },
+    output: {
+      outPath: 'dump',
+      gzip: true,
+      encryptionKey: 'your-64-character-hex-master-key'
     }
-  }
-}, provider);
+  },
+  storage: provider
+});
 
-await engine.run();
+shield.on("progress", (bytes) => console.log(`Wrote ${bytes} bytes`));
+
+await shield.backup();
 console.log('Backup completed successfully!');
 ```
 

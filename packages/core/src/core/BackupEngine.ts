@@ -74,34 +74,68 @@ export class BackupEngine {
     const client = await this.connectionManager.connect();
 
     try {
-      const dbName = this.config.target.dbName;
-      if (!dbName) {
-        throw new Error("BackupEngine: target.dbName is currently required.");
+      const targetDbName = this.config.target.dbName;
+      let expectedSizeInBytes = 0;
+
+      try {
+        if (targetDbName) {
+          const stats = await client.db(targetDbName).stats();
+          expectedSizeInBytes += stats.dataSize || 0;
+        } else {
+          const adminDb = client.db().admin();
+          const { databases } = await adminDb.listDatabases();
+          for (const dbInfo of databases) {
+            const name = dbInfo.name;
+            if (name !== "admin" && name !== "config" && name !== "local") {
+              expectedSizeInBytes += dbInfo.sizeOnDisk || 0;
+            }
+          }
+        }
+      } catch (err) {
+        // Fallback to 0 if stats fail (e.g., due to missing clusterMonitor role)
+        expectedSizeInBytes = 0;
       }
 
-      const db = client.db(dbName);
+      await this.storage.initialize(expectedSizeInBytes);
 
-      const collections = await this.getTargetCollections(db);
+      if (targetDbName) {
+        // Backup specific database
+        const db = client.db(targetDbName);
+        await this.backupDatabase(db, targetDbName);
+      } else {
+        // Backup entire cluster (all non-internal databases)
+        const adminDb = client.db().admin();
+        const { databases } = await adminDb.listDatabases();
 
-      await this.storage.initialize();
-
-      // Batch parallel processing loop
-      const concurrencyLimit = this.config.output.numParallelCollections || 4;
-
-      for (let i = 0; i < collections.length; i += concurrencyLimit) {
-        const batch = collections.slice(i, i + concurrencyLimit);
-
-        await Promise.all(
-          batch.map(async (col) => {
-            await this.extractCollectionMetadata(dbName, db, col.name);
-            await this.extractCollectionBSON(dbName, db, col.name);
-          }),
-        );
+        for (const dbInfo of databases) {
+          const name = dbInfo.name;
+          if (name === "admin" || name === "config" || name === "local") {
+            continue; // Skip internal MongoDB databases
+          }
+          const db = client.db(name);
+          await this.backupDatabase(db, name);
+        }
       }
 
       await this.storage.finalize();
     } finally {
       await this.connectionManager.disconnect();
+    }
+  }
+
+  private async backupDatabase(db: Db, dbName: string): Promise<void> {
+    const collections = await this.getTargetCollections(db);
+    const concurrencyLimit = this.config.output.numParallelCollections || 4;
+
+    for (let i = 0; i < collections.length; i += concurrencyLimit) {
+      const batch = collections.slice(i, i + concurrencyLimit);
+
+      await Promise.all(
+        batch.map(async (col) => {
+          await this.extractCollectionMetadata(dbName, db, col.name);
+          await this.extractCollectionBSON(dbName, db, col.name);
+        }),
+      );
     }
   }
 
