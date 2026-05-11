@@ -43,6 +43,10 @@ import { MongoShield } from 'mongoshield';
 import { S3Provider } from '@mongoshield/provider-s3';
 
 const shield = new MongoShield({
+  config: {
+    connection: { host: 'localhost', port: 27017 },
+    output: { encryptionKey: 'some-hex-key' }
+  },
   storage: new S3Provider({
     bucket: 'backups',
     region: 'us-east-1'

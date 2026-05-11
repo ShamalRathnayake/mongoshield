@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, statfs } from "node:fs/promises";
 import { join } from "node:path";
 import type { Writable } from "node:stream";
 import type { PruningPolicy, PruningResult } from "@mongoshield/core";
@@ -16,6 +16,7 @@ export class FileSystemProvider extends AbstractStorageProvider {
   private compress: boolean;
   private disableRotation: boolean;
   private currentRunDir: string = "";
+  private writtenFiles: Set<string> = new Set();
 
   constructor(options: FileSystemProviderOptions | string, compress = false) {
     super();
@@ -30,7 +31,22 @@ export class FileSystemProvider extends AbstractStorageProvider {
     }
   }
 
-  protected override async _initialize(): Promise<void> {
+  protected override async _initialize(expectedSizeInBytes?: number): Promise<void> {
+    this.writtenFiles.clear();
+
+    // Ensure base output path exists first so we can check statfs
+    await mkdir(this.baseOutPath, { recursive: true });
+
+    if (expectedSizeInBytes !== undefined && expectedSizeInBytes > 0) {
+      const stats = await statfs(this.baseOutPath);
+      const freeSpace = stats.bavail * stats.bsize;
+      if (freeSpace < expectedSizeInBytes) {
+        throw new Error(
+          `FileSystemProvider: Insufficient disk space. Required at least ${expectedSizeInBytes} bytes, but only ${freeSpace} bytes are available on the target drive.`,
+        );
+      }
+    }
+
     if (this.disableRotation) {
       this.currentRunDir = this.baseOutPath;
     } else {
@@ -60,6 +76,7 @@ export class FileSystemProvider extends AbstractStorageProvider {
     const dbDir = await this.prepareDbDir(dbName);
     const suffix = this.compress ? ".gz" : "";
     const filepath = join(dbDir, `${collectionName}.bson${suffix}`);
+    this.writtenFiles.add(filepath);
     return createWriteStream(filepath);
   }
 
@@ -70,11 +87,48 @@ export class FileSystemProvider extends AbstractStorageProvider {
     const dbDir = await this.prepareDbDir(dbName);
     const suffix = this.compress ? ".gz" : "";
     const filepath = join(dbDir, `${collectionName}.metadata.json${suffix}`);
+    this.writtenFiles.add(filepath);
     return createWriteStream(filepath);
   }
 
+  private async cleanupStaleFiles(dir: string): Promise<void> {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await this.cleanupStaleFiles(fullPath);
+          // Delete directory if empty
+          try {
+            const children = await readdir(fullPath);
+            if (children.length === 0) {
+              await rm(fullPath, { recursive: true, force: true });
+            }
+          } catch (e) {
+            // Ignore if directory doesn't exist anymore
+          }
+        } else if (entry.isFile()) {
+          // Check if it's a backup file not written in this run
+          if (!this.writtenFiles.has(fullPath)) {
+            // Be safe, only delete .bson or .json or .gz files
+            if (fullPath.includes('.bson') || fullPath.includes('.json') || fullPath.includes('.gz')) {
+              await rm(fullPath, { force: true });
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.code !== "ENOENT") {
+        throw new Error(`FileSystemProvider cleanup failed: ${err.message}`);
+      }
+    }
+  }
+
   protected override async _finalize(): Promise<void> {
-    if (!this.disableRotation && this.currentRunDir.endsWith(".tmp")) {
+    if (this.disableRotation) {
+      // Clean up any stale files from previous runs that were not overwritten
+      await this.cleanupStaleFiles(this.currentRunDir);
+    } else if (this.currentRunDir.endsWith(".tmp")) {
       const finalPath = this.currentRunDir.replace(/\.tmp$/, "");
       try {
         const { rename } = await import("node:fs/promises");
@@ -99,29 +153,31 @@ export class FileSystemProvider extends AbstractStorageProvider {
 
     try {
       const entries = await readdir(this.baseOutPath, { withFileTypes: true });
-      // Filter for directories and EXCLUDE the active run directory
-      const directories = entries.filter((e) => {
+      // Filter for backups (files or directories) and EXCLUDE the active run directory
+      const backups = entries.filter((e) => {
         const fullPath = join(this.baseOutPath, e.name);
-        return e.isDirectory() && fullPath !== this.currentRunDir;
+        // Matches YYYY-MM-DD_HH-mm-ss
+        const isBackupFormat = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/.test(e.name) || e.name.endsWith(".tmp");
+        return isBackupFormat && fullPath !== this.currentRunDir;
       });
 
-      // Get stats for all directories to sort them by creation time
-      const dirStats = await Promise.all(
-        directories.map(async (dir) => {
-          const fullPath = join(this.baseOutPath, dir.name);
+      // Get stats for all backups to sort them by creation time
+      const backupStats = await Promise.all(
+        backups.map(async (entry) => {
+          const fullPath = join(this.baseOutPath, entry.name);
           const stats = await stat(fullPath);
-          return { name: dir.name, path: fullPath, mtimeMs: stats.mtimeMs };
+          return { name: entry.name, path: fullPath, mtimeMs: stats.mtimeMs };
         }),
       );
 
       // Sort by name (alphabetical) - works perfectly for ISO timestamps
-      dirStats.sort((a, b) => a.name.localeCompare(b.name));
+      backupStats.sort((a, b) => a.name.localeCompare(b.name));
 
       const toDelete = new Set<string>();
 
       // Identify completed backups vs stale temporary ones
-      const completedBackups = dirStats.filter((d) => !d.name.endsWith(".tmp"));
-      const staleTempBackups = dirStats.filter((d) => d.name.endsWith(".tmp"));
+      const completedBackups = backupStats.filter((d) => !d.name.endsWith(".tmp"));
+      const staleTempBackups = backupStats.filter((d) => d.name.endsWith(".tmp"));
 
       // 1. Cleanup all stale temporary directories
       for (const stale of staleTempBackups) {

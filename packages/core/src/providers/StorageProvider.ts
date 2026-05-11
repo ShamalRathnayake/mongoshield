@@ -22,8 +22,9 @@ export interface StorageProvider {
   /**
    * Called before backup begins.
    * Useful for creating base directories on a filesystem or allocating/verifying cloud buckets.
+   * @param expectedSizeInBytes Optional size of the target database to check storage limits.
    */
-  initialize(): Promise<void>;
+  initialize(expectedSizeInBytes?: number): Promise<void>;
 
   /**
    * Obtains a writable stream for the BSON data of a specific collection.
