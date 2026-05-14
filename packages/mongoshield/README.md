@@ -34,27 +34,31 @@ MongoShield is a modular ecosystem. The main `mongoshield` package includes the 
 ## Quick Start
 
 ```typescript
-import { BackupEngine, ArchiveProvider } from 'mongoshield';
+import { MongoShield, ArchiveProvider } from 'mongoshield';
+import { FileSystemProvider } from '@mongoshield/provider-local';
 
-const provider = new ArchiveProvider('./backups/my_backup.msaf');
+// 1. Initialize the downstream storage provider
+const localProvider = new FileSystemProvider({ 
+  outPath: './backups', 
+  compress: true 
+});
 
-const engine = new BackupEngine({
-  target: {
-    uri: 'mongodb://localhost:27017',
-    dbName: 'production_db',
-    // Optional: filter collections
-    includeCollections: ['users', 'orders']
-  },
-  output: {
-    compression: { enabled: true, level: 9 },
-    encryption: {
-      enabled: true,
-      masterKey: 'your-64-character-hex-master-key'
+// 2. Wrap it with the ArchiveProvider to create monolithic .msaf files
+const archivePlugin = new ArchiveProvider(localProvider, 'cluster-backup.msaf');
+
+// 3. Initialize MongoShield
+const shield = new MongoShield({
+  config: {
+    connection: { host: 'localhost', port: 27017 },
+    output: {
+      encryptionKey: 'your-64-character-hex-master-key' // Optional
     }
-  }
-}, provider);
+  },
+  storage: archivePlugin
+});
 
-await engine.run();
+// 4. Run the backup!
+await shield.backup();
 console.log('Backup completed successfully!');
 ```
 

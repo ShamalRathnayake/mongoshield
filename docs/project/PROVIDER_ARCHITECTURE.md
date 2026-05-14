@@ -82,4 +82,4 @@ interface PruningPolicy {
 Every provider must implement the `prune(policy: PruningPolicy): Promise<PruningResult>` method.
 - **Local:** Deletes files/directories.
 - **S3/Cloud:** Uses native SDK `DeleteObject` commands.
-- **Archive:** In the case of monolithic archives, this may trigger archive rotation or deletion of the oldest `.msaf` files.
+- **ArchiveProvider (Middleware):** Delegates pruning entirely to its underlying downstream provider (e.g., Local or S3), ensuring monolithic `.msaf` files are cleaned up exactly like native directories.

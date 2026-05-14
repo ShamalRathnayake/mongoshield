@@ -22,7 +22,7 @@
 
 This project is a strict Monorepo managed by `pnpm workspaces`. 
 
-*   **`@mongoshield/core` (`packages/core`)**: The pure engine. It connects to MongoDB, extracts the stream, compresses it, encrypts it, and writes it to a generic `StorageProvider` interface. It includes the `ArchiveProvider` (MSAF) for local file output.
+*   **`@mongoshield/core` (`packages/core`)**: The pure engine. It connects to MongoDB, extracts the stream, compresses it, encrypts it, and writes it to a generic `StorageProvider` interface. It includes the `ArchiveProvider` (MSAF) middleware for monolithic stream multiplexing.
 *   **`@mongoshield/provider-*` (e.g., `packages/provider-s3`)**: Specific cloud adapters. These packages declare `@mongoshield/core` as a dependency and implement the `StorageProvider` interface to pipe the compressed, encrypted data stream to external services (like AWS S3). 
 
 **Rule:** Never add AWS, Google Cloud, or Azure dependencies to `@mongoshield/core`. Cloud integrations MUST be separate provider packages.

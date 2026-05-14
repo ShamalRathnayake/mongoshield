@@ -1,6 +1,3 @@
-import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 import type { Writable } from "node:stream";
 import {
   CHUNK_TYPE_BSON,
@@ -9,7 +6,7 @@ import {
   MultiplexWriteStream,
 } from "../streams/MultiplexWriteStream";
 import { AbstractStorageProvider } from "./AbstractStorageProvider";
-import type { PruningPolicy, PruningResult } from "./StorageProvider";
+import type { PruningPolicy, PruningResult, StorageProvider } from "./StorageProvider";
 
 export const MSAF_MAGIC = Buffer.from("MSHLDARC", "utf8");
 export const MSAF_VERSION = Buffer.from([0x01]);
@@ -18,33 +15,36 @@ export class ArchiveProvider extends AbstractStorageProvider {
   private archiveStream: Writable | null = null;
 
   constructor(
-    private archivePath: string,
-    compress = false,
+    private downstream: StorageProvider,
+    private archiveFilename = "backup.msaf",
   ) {
     super();
   }
 
-  protected async _initialize(): Promise<void> {
-    // Ensure directory exists
-    const dir = dirname(this.archivePath);
-    await mkdir(dir, { recursive: true });
+  protected async _initialize(expectedSizeInBytes?: number): Promise<void> {
+    await this.downstream.initialize(expectedSizeInBytes);
 
-    // Open the shared archive write stream
-    this.archiveStream = createWriteStream(this.archivePath);
+    // Assert that the downstream provider supports monolithic archives
+    // The cast to any is safe here as we are checking for the method's existence
+    if (!(this.downstream as any).createArchiveWriteStream) {
+      throw new Error(
+        "The provided downstream StorageProvider does not support monolithic archive streams (missing createArchiveWriteStream).",
+      );
+    }
 
-    // Wait for the stream to open
-    await new Promise<void>((resolve, reject) => {
-      if (!this.archiveStream)
-        return reject(new Error("Archive stream is null"));
-      this.archiveStream.once("open", () => resolve());
-      this.archiveStream.once("error", reject);
-    });
+    // Request the single archive stream from the downstream provider
+    this.archiveStream = await (this.downstream as any).createArchiveWriteStream(
+      this.archiveFilename,
+    );
 
     // Write the Global Header (Magic Bytes + Version)
     const headerBuffer = Buffer.concat([MSAF_MAGIC, MSAF_VERSION]);
 
     await new Promise<void>((resolve, reject) => {
-      this.archiveStream!.write(headerBuffer, (error) => {
+      if (!this.archiveStream) {
+        return reject(new Error("Archive stream is null"));
+      }
+      this.archiveStream.write(headerBuffer, (error) => {
         if (error) reject(error);
         else resolve();
       });
@@ -89,13 +89,13 @@ export class ArchiveProvider extends AbstractStorageProvider {
         resolve();
       });
     });
+
+    await this.downstream.finalize();
   }
 
   protected async _prune(policy: PruningPolicy): Promise<PruningResult> {
-    // ArchiveProvider natively creates single file archives (.msaf)
-    // Pruning in this context would mean deleting old .msaf files.
-    // Usually, the higher-level scheduler or file system provider manages this.
-    // For now, this is a no-op stub for the standalone archive stream.
-    return { deletedCount: 0, deletedPaths: [] };
+    // Delegate pruning entirely to the downstream provider.
+    // The downstream provider manages the files/objects.
+    return this.downstream.prune(policy);
   }
 }

@@ -2,11 +2,11 @@
 
 ***
 
-[MongoShield Documentation](../../../modules.md) / [core/src](../README.md) / ArchiveProvider
+[MongoShield Documentation](../../../modules.md) / [mongoshield/src](../README.md) / ArchiveProvider
 
 # Class: ArchiveProvider
 
-Defined in: packages/core/src/providers/ArchiveProvider.ts:16
+Defined in: [packages/core/src/providers/ArchiveProvider.ts:14](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/ArchiveProvider.ts#L14)
 
 AbstractStorageProvider serves as the secure, robust foundation for all storage adapters.
 
@@ -22,19 +22,19 @@ It provides:
 
 ### Constructor
 
-> **new ArchiveProvider**(`archivePath`, `compress?`): `ArchiveProvider`
+> **new ArchiveProvider**(`downstream`, `archiveFilename?`): `ArchiveProvider`
 
-Defined in: packages/core/src/providers/ArchiveProvider.ts:19
+Defined in: [packages/core/src/providers/ArchiveProvider.ts:17](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/ArchiveProvider.ts#L17)
 
 #### Parameters
 
-##### archivePath
+##### downstream
 
-`string`
+[`StorageProvider`](../interfaces/StorageProvider.md)
 
-##### compress?
+##### archiveFilename?
 
-`boolean` = `false`
+`string` = `"backup.msaf"`
 
 #### Returns
 
@@ -50,7 +50,7 @@ Defined in: packages/core/src/providers/ArchiveProvider.ts:19
 
 > `optional` **\[captureRejectionSymbol\]**(`error`, `event`, ...`args`): `void`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:123
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:87
 
 The `Symbol.for('nodejs.rejection')` method is called in case a
 promise rejection happens when emitting an event and
@@ -109,7 +109,7 @@ v13.4.0, v12.16.0
 
 > **addListener**\<`E`\>(`eventName`, `listener`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:128
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:92
 
 Alias for `emitter.on(eventName, listener)`.
 
@@ -143,11 +143,40 @@ v0.1.26
 
 ***
 
+### createArchiveWriteStream()
+
+> **createArchiveWriteStream**(`filename`): `Promise`\<`Writable`\>
+
+Defined in: [packages/core/src/providers/AbstractStorageProvider.ts:49](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/AbstractStorageProvider.ts#L49)
+
+Obtains a generic writable stream for a single monolithic archive file.
+This allows middleware like ArchiveProvider to multiplex streams into one file.
+
+#### Parameters
+
+##### filename
+
+`string`
+
+The desired filename of the archive.
+
+#### Returns
+
+`Promise`\<`Writable`\>
+
+A Node.js Writable stream.
+
+#### Inherited from
+
+[`AbstractStorageProvider`](AbstractStorageProvider.md).[`createArchiveWriteStream`](AbstractStorageProvider.md#createarchivewritestream)
+
+***
+
 ### createBsonWriteStream()
 
 > **createBsonWriteStream**(`dbName`, `collectionName`): `Promise`\<`Writable`\>
 
-Defined in: packages/core/src/providers/AbstractStorageProvider.ts:18
+Defined in: [packages/core/src/providers/AbstractStorageProvider.ts:24](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/AbstractStorageProvider.ts#L24)
 
 Obtains a writable stream for the BSON data of a specific collection.
 
@@ -181,7 +210,7 @@ A Node.js Writable stream to pipe the compressed/encrypted data into.
 
 > **createMetadataWriteStream**(`dbName`, `collectionName`): `Promise`\<`Writable`\>
 
-Defined in: packages/core/src/providers/AbstractStorageProvider.ts:26
+Defined in: [packages/core/src/providers/AbstractStorageProvider.ts:35](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/AbstractStorageProvider.ts#L35)
 
 Obtains a writable stream for the metadata JSON of a specific collection.
 
@@ -215,7 +244,7 @@ A Node.js Writable stream to pipe the metadata payload into.
 
 > **emit**\<`E`\>(`eventName`, ...`args`): `boolean`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:170
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:134
 
 Synchronously calls each of the listeners registered for the event named
 `eventName`, in the order they were registered, passing the supplied arguments
@@ -290,7 +319,7 @@ v0.1.26
 
 > **eventNames**(): (`string` \| `symbol`)[]
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:190
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:154
 
 Returns an array listing the events for which the emitter has registered
 listeners.
@@ -327,7 +356,7 @@ v6.0.0
 
 > **finalize**(): `Promise`\<`void`\>
 
-Defined in: packages/core/src/providers/AbstractStorageProvider.ts:34
+Defined in: [packages/core/src/providers/AbstractStorageProvider.ts:62](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/AbstractStorageProvider.ts#L62)
 
 Called to finalize the backup process after all collections have finished streaming.
 Useful for uploading final manifests or closing multiplexed archive files.
@@ -346,7 +375,7 @@ Useful for uploading final manifests or closing multiplexed archive files.
 
 > **getMaxListeners**(): `number`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:197
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:161
 
 Returns the current max listener value for the `EventEmitter` which is either
 set by `emitter.setMaxListeners(n)` or defaults to
@@ -368,12 +397,20 @@ v1.0.0
 
 ### initialize()
 
-> **initialize**(): `Promise`\<`void`\>
+> **initialize**(`expectedSizeInBytes?`): `Promise`\<`void`\>
 
-Defined in: packages/core/src/providers/AbstractStorageProvider.ts:14
+Defined in: [packages/core/src/providers/AbstractStorageProvider.ts:20](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/AbstractStorageProvider.ts#L20)
 
-Called before backup begins. 
+Called before backup begins.
 Useful for creating base directories on a filesystem or allocating/verifying cloud buckets.
+
+#### Parameters
+
+##### expectedSizeInBytes?
+
+`number`
+
+Optional size of the target database to check storage limits.
 
 #### Returns
 
@@ -389,7 +426,7 @@ Useful for creating base directories on a filesystem or allocating/verifying clo
 
 > **listenerCount**\<`E`\>(`eventName`, `listener?`): `number`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:206
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:170
 
 Returns the number of listeners listening for the event named `eventName`.
 If `listener` is provided, it will return how many times the listener is found
@@ -433,7 +470,7 @@ v3.2.0
 
 > **listeners**\<`E`\>(`eventName`): (...`args`) => `void`[]
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:222
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:186
 
 Returns a copy of the array of listeners for the event named `eventName`.
 
@@ -475,7 +512,7 @@ v0.1.26
 
 > **off**\<`E`\>(`eventName`, `listener`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:227
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:191
 
 Alias for `emitter.removeListener()`.
 
@@ -513,7 +550,7 @@ v10.0.0
 
 > **on**\<`E`\>(`eventName`, `listener`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:261
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:225
 
 Adds the `listener` function to the end of the listeners array for the
 event named `eventName`. No checks are made to see if the `listener` has
@@ -582,7 +619,7 @@ v0.1.101
 
 > **once**\<`E`\>(`eventName`, `listener`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:292
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:256
 
 Adds a **one-time** `listener` function for the event named `eventName`. The
 next time `eventName` is triggered, this listener is removed and then invoked.
@@ -648,7 +685,7 @@ v0.3.0
 
 > **prependListener**\<`E`\>(`eventName`, `listener`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:311
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:275
 
 Adds the `listener` function to the _beginning_ of the listeners array for the
 event named `eventName`. No checks are made to see if the `listener` has
@@ -702,7 +739,7 @@ v6.0.0
 
 > **prependOnceListener**\<`E`\>(`eventName`, `listener`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:328
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:292
 
 Adds a **one-time** `listener` function for the event named `eventName` to the
 _beginning_ of the listeners array. The next time `eventName` is triggered, this
@@ -750,11 +787,37 @@ v6.0.0
 
 ***
 
+### prune()
+
+> **prune**(`policy`): `Promise`\<[`PruningResult`](../interfaces/PruningResult.md)\>
+
+Defined in: [packages/core/src/providers/AbstractStorageProvider.ts:66](https://github.com/ShamalRathnayake/mongoshield/blob/37c34f4f1cc9c7701b1a943dbf51b10313c93a11/packages/core/src/providers/AbstractStorageProvider.ts#L66)
+
+Automatically cleans up old backups based on a user-defined policy.
+
+#### Parameters
+
+##### policy
+
+[`PruningPolicy`](../interfaces/PruningPolicy.md)
+
+The pruning policy defining retention rules.
+
+#### Returns
+
+`Promise`\<[`PruningResult`](../interfaces/PruningResult.md)\>
+
+#### Inherited from
+
+[`AbstractStorageProvider`](AbstractStorageProvider.md).[`prune`](AbstractStorageProvider.md#prune)
+
+***
+
 ### rawListeners()
 
 > **rawListeners**\<`E`\>(`eventName`): (...`args`) => `void`[]
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:362
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:326
 
 Returns a copy of the array of listeners for the event named `eventName`,
 including any wrappers (such as those created by `.once()`).
@@ -814,7 +877,7 @@ v9.4.0
 
 > **removeAllListeners**\<`E`\>(`eventName?`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:374
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:338
 
 Removes all listeners, or those of the specified `eventName`.
 
@@ -854,7 +917,7 @@ v0.1.26
 
 > **removeListener**\<`E`\>(`eventName`, `listener`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:461
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:425
 
 Removes the specified `listener` from the listener array for the event named
 `eventName`.
@@ -974,7 +1037,7 @@ v0.1.26
 
 > **setMaxListeners**(`n`): `this`
 
-Defined in: node\_modules/.pnpm/@types+node@25.3.5/node\_modules/@types/node/events.d.ts:472
+Defined in: node\_modules/.pnpm/@types+node@25.6.0/node\_modules/@types/node/events.d.ts:436
 
 By default `EventEmitter`s will print a warning if more than `10` listeners are
 added for a particular event. This is a useful default that helps finding

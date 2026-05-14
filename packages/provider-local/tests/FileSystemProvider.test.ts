@@ -67,6 +67,27 @@ describe("FileSystemProvider", () => {
       expect(files).toContain("testcol.bson.gz");
       stream.end();
     });
+
+    it("should create monolithic archive streams correctly with compression", async () => {
+      const provider = new FileSystemProvider({
+        outPath: baseDir,
+        compress: true,
+      });
+      await provider.initialize();
+
+      const stream = await provider.createArchiveWriteStream("backup.msaf");
+      stream.write("data");
+      
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      
+      const runDir = (provider as any).currentRunDir;
+      const { readdir } = await import("node:fs/promises");
+      const files = await readdir(runDir);
+      
+      // Because compress=true and the name doesn't end in .gz, it should append .gz
+      expect(files).toContain("backup.msaf.gz");
+      stream.end();
+    });
   });
 
   describe("Lifecycle & Atomic Backups", () => {

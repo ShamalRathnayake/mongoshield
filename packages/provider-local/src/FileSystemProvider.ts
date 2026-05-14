@@ -91,6 +91,29 @@ export class FileSystemProvider extends AbstractStorageProvider {
     return createWriteStream(filepath);
   }
 
+  protected override async _createArchiveWriteStream(
+    filename: string,
+  ): Promise<Writable> {
+    const suffix = this.compress && !filename.endsWith(".gz") ? ".gz" : "";
+    const filepath = join(this.currentRunDir, `${filename}${suffix}`);
+    this.writtenFiles.add(filepath);
+    
+    const fileStream = createWriteStream(filepath);
+    
+    if (this.compress) {
+      const { createGzip } = await import("node:zlib");
+      const gzipStream = createGzip();
+      gzipStream.pipe(fileStream);
+      
+      // Propagate errors
+      fileStream.on("error", (err) => gzipStream.destroy(err));
+      
+      return gzipStream;
+    }
+    
+    return fileStream;
+  }
+
   private async cleanupStaleFiles(dir: string): Promise<void> {
     try {
       const entries = await readdir(dir, { withFileTypes: true });
