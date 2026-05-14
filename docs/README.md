@@ -25,14 +25,19 @@ For deep technical details, roadmaps, and setup instructions, please refer to ou
 ### Usage Example
 
 ```typescript
-import { MongoShield } from 'mongoshield';
+import { MongoShield, ArchiveProvider } from 'mongoshield';
 import { FileSystemProvider } from '@mongoshield/provider-local';
 
-const provider = new FileSystemProvider({
+// 1. Initialize the downstream storage provider
+const localProvider = new FileSystemProvider({
   outPath: './backups',
   compress: true
 });
 
+// 2. Wrap it with the ArchiveProvider to create monolithic .msaf files
+const archivePlugin = new ArchiveProvider(localProvider, 'cluster-backup.msaf');
+
+// 3. Initialize MongoShield
 const shield = new MongoShield({
   config: {
     connection: { host: 'localhost', port: 27017 },
@@ -41,16 +46,15 @@ const shield = new MongoShield({
       collections: ['users', 'orders']
     },
     output: {
-      outPath: 'dump',
-      gzip: true,
-      encryptionKey: 'your-64-character-hex-master-key'
+      encryptionKey: 'your-64-character-hex-master-key' // Optional
     }
   },
-  storage: provider
+  storage: archivePlugin
 });
 
 shield.on("progress", (bytes) => console.log(`Wrote ${bytes} bytes`));
 
+// 4. Run the backup!
 await shield.backup();
 console.log('Backup completed successfully!');
 ```

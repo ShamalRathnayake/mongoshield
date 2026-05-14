@@ -16,7 +16,7 @@ export interface MongoShieldOptions {
 export class MongoShield extends EventEmitter {
   private engine: BackupEngine;
 
-  constructor(private options: MongoShieldOptions) {
+  constructor(options: MongoShieldOptions) {
     super();
 
     // Validate the core configuration

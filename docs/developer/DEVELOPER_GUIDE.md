@@ -102,7 +102,7 @@ The codebase has successfully completed **Phase 1 (Core Engine)** and is current
 
 ### In Progress (Phase 2):
 *   **Cloud Providers**: The `@mongoshield/provider-s3` package is under development to support direct-to-cloud streaming.
-*   **Separation of Concerns**: Moving `ArchiveProvider` and local file logic into a standalone `@mongoshield/provider-local` package.
+*   **Separation of Concerns**: We have successfully separated our logic! The `FileSystemProvider` lives in the standalone `@mongoshield/provider-local` package, while the `ArchiveProvider` remains in `@mongoshield/core` as a pure **Middleware** that wraps downstream providers to create monolithic `.msaf` files.
 
 ### Upcoming (Phase 5):
 *   **Oplog Tailing (`OplogTailer.ts`)**: Real-time incremental backups for Point-In-Time Recovery.
