@@ -261,9 +261,12 @@ describe("S3Provider", () => {
       oldDate.setDate(oldDate.getDate() - 10);
       const pOld = `backups/${oldDate.toISOString().replace(/[:.]/g, "-")}/`;
       
-      const p1 = "backups/2026-05-10T00-00-00-000Z/";
-      const p2 = "backups/2026-05-11T00-00-00-000Z/";
-      const p3 = "backups/2026-05-12T00-00-00-000Z/";
+      const d1 = new Date(); d1.setDate(d1.getDate() - 4);
+      const p1 = `backups/${d1.toISOString().replace(/[:.]/g, "-")}/`;
+      const d2 = new Date(); d2.setDate(d2.getDate() - 3);
+      const p2 = `backups/${d2.toISOString().replace(/[:.]/g, "-")}/`;
+      const d3 = new Date(); d3.setDate(d3.getDate() - 2);
+      const p3 = `backups/${d3.toISOString().replace(/[:.]/g, "-")}/`;
       
       mockSend.mockImplementation((command: any) => {
         if (command instanceof ListObjectsV2Command) {
