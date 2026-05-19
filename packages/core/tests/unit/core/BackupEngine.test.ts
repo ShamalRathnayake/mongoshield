@@ -158,10 +158,13 @@ describe("BackupEngine", () => {
 
       // Verify pipeline was called with Gzip and Encryption transform
       const calls = (streamPromises.pipeline as any).mock.calls;
-      expect(calls.length).toBe(3); // 3 collections
+      expect(calls.length).toBe(6); // 3 collections * 2 pipelines (metadata + bson)
 
-      // Each pipeline should have: readStream, bsonEncoder, gzip, encryption, writeStream
-      expect(calls[0].length).toBe(5);
+      // Metadata pipeline (first call for collection 1): readStream, gzip, metaStream
+      expect(calls[0].length).toBe(3);
+      
+      // BSON pipeline (queued after metadata pipelines): readStream, bsonEncoder, gzip, encryption, writeStream
+      expect(calls[3].length).toBe(5);
       expect(EncryptionTransform).toHaveBeenCalled();
     });
 

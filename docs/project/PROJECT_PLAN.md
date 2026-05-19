@@ -43,7 +43,7 @@ To ensure safe, test-driven delivery, the complete feature set is structured int
 ### Phase 3: The "Pro" Defenses (In Progress)
 **Goal:** Transform MongoShield from a one-way backup script into a robust, two-way, programmable data utility.
 * **Native Restore Engine (`.restore()`):** The exact opposite of the backup. Fetch a remote archive, decompress it, and pump data back into a target database via massive parallel bulk operations.
-* **Built-In Scheduler:** A production-grade backup scheduler (cron) with overlap prevention, exponential backoff retries, and detailed audit logging (persisting last 100 runs). See [Scheduler Plan](./SCHEDULER_PLAN.md) for details.
+* ✅ **Built-In Scheduler (Completed):** A production-grade backup scheduler (cron) with overlap prevention, exponential backoff retries, and detailed audit logging (persisting last 100 runs). See [Scheduler Plan](./SCHEDULER_PLAN.md) for details.
 * **General File Archiving:** Allow developers to specify static server directories (like user uploads) to be tarballed and uploaded alongside the database.
 * **Remote Pruning Policies:** APIs to automatically delete old backups in the cloud to save costs.
 * **Integrated Webhooks:** Easily send success/failure notifications to Slack, Discord, or Email.

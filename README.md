@@ -29,6 +29,7 @@ This is a monorepo containing the following packages:
 | [`@mongoshield/provider-google`](./packages/provider-google) | [![npm](https://img.shields.io/npm/v/@mongoshield/provider-google)](https://www.npmjs.com/package/@mongoshield/provider-google) | Google Cloud Storage (GCS) and Google Drive provider. |
 | [`@mongoshield/provider-microsoft`](./packages/provider-microsoft) | [![npm](https://img.shields.io/npm/v/@mongoshield/provider-microsoft)](https://www.npmjs.com/package/@mongoshield/provider-microsoft) | Microsoft Azure Blob Storage provider. |
 | [`@mongoshield/provider-network`](./packages/provider-network) | [![npm](https://img.shields.io/npm/v/@mongoshield/provider-network)](https://www.npmjs.com/package/@mongoshield/provider-network) | Network protocols provider (SFTP/SSH). |
+| [`@mongoshield/scheduler`](./packages/scheduler) | [![npm](https://img.shields.io/npm/v/@mongoshield/scheduler)](https://www.npmjs.com/package/@mongoshield/scheduler) | Autonomous backup scheduler orchestrator (cron, retries, locks, grace limits). |
 
 
 ## Usage Example

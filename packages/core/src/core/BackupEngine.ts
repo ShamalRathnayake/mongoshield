@@ -70,7 +70,7 @@ export class BackupEngine {
     }));
   }
 
-  public async run(): Promise<void> {
+  public async run(signal?: AbortSignal): Promise<void> {
     const client = await this.connectionManager.connect();
 
     try {
@@ -101,7 +101,7 @@ export class BackupEngine {
       if (targetDbName) {
         // Backup specific database
         const db = client.db(targetDbName);
-        await this.backupDatabase(db, targetDbName);
+        await this.backupDatabase(db, targetDbName, signal);
       } else {
         // Backup entire cluster (all non-internal databases)
         const adminDb = client.db().admin();
@@ -113,7 +113,7 @@ export class BackupEngine {
             continue; // Skip internal MongoDB databases
           }
           const db = client.db(name);
-          await this.backupDatabase(db, name);
+          await this.backupDatabase(db, name, signal);
         }
       }
 
@@ -123,7 +123,7 @@ export class BackupEngine {
     }
   }
 
-  private async backupDatabase(db: Db, dbName: string): Promise<void> {
+  private async backupDatabase(db: Db, dbName: string, signal?: AbortSignal): Promise<void> {
     const collections = await this.getTargetCollections(db);
     const concurrencyLimit = this.config.output.numParallelCollections || 4;
 
@@ -132,8 +132,8 @@ export class BackupEngine {
 
       await Promise.all(
         batch.map(async (col) => {
-          await this.extractCollectionMetadata(dbName, db, col.name);
-          await this.extractCollectionBSON(dbName, db, col.name);
+          await this.extractCollectionMetadata(dbName, db, col.name, signal);
+          await this.extractCollectionBSON(dbName, db, col.name, signal);
         }),
       );
     }
@@ -143,6 +143,7 @@ export class BackupEngine {
     dbName: string,
     db: Db,
     collectionName: string,
+    signal?: AbortSignal
   ) {
     const col = db.collection(collectionName);
 
@@ -170,19 +171,32 @@ export class BackupEngine {
       collectionName,
     );
 
+    const streams: any[] = [];
     if (this.config.output.gzip) {
-      const gz = createGzip();
-      gz.pipe(metaStream);
-      gz.end(payload);
-    } else {
-      metaStream.end(payload);
+      streams.push(createGzip());
     }
+    streams.push(metaStream);
+    
+    // Create a pipeline from a string/buffer is possible by using a readable or stream.Readable.from
+    // But since we just pipe directly, we can manually handle abort signal or use pipeline:
+    const { Readable } = require("node:stream");
+    const readStream = Readable.from([payload]);
+    
+    streams.unshift(readStream);
+    
+    if (signal) {
+      streams.push({ signal });
+    }
+    
+    // @ts-expect-error
+    await pipeline(...streams);
   }
 
   private async extractCollectionBSON(
     dbName: string,
     db: Db,
     collectionName: string,
+    signal?: AbortSignal
   ) {
     const col = db.collection(collectionName);
 
@@ -216,6 +230,10 @@ export class BackupEngine {
       collectionName,
     );
     streams.push(writeStream);
+
+    if (signal) {
+      streams.push({ signal });
+    }
 
     // @ts-expect-error - TS has varied overloads for pipeline, but spread array is supported at runtime
     await pipeline(...streams);
