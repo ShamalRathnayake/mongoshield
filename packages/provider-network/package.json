@@ -1,0 +1,37 @@
+{
+  "name": "@mongoshield/provider-network",
+  "version": "0.0.1-alpha.0",
+  "description": "Network storage provider (SFTP, WebDAV) for MongoShield.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ShamalRathnayake/mongoshield.git",
+    "directory": "packages/provider-network"
+  },
+  "engines": {
+    "node": ">= 20.x"
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mongoshield/core": "workspace:*",
+    "ssh2": "^1.15.0"
+  },
+  "devDependencies": {
+    "@types/ssh2": "^1.11.19"
+  }
+}
