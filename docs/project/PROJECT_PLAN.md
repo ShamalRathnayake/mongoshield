@@ -28,19 +28,19 @@ To ensure safe, test-driven delivery, the complete feature set is structured int
 * **Transformations:** Implement on-the-fly GZIP compression and native AES-256-GCM encryption with HKDF.
 * **Modular Storage:** Create the `AbstractStorageProvider` and `ArchiveProvider` (MSAF) to securely manage and multiplex streams.
 
-### Phase 2: The MVP Release (In Progress)
+### Phase 2: The MVP Release (Completed)
 **Goal:** Achieve feature-parity with deprecated tools but on our superior architecture. This is the first version recommended for general public use.
 * **Runtime Validation (Completed):** Implement `zod` to strictly validate configuration URIs and credentials.
 * **Lifecycle Hooks (Completed):** Implement native event emitters (`progress`, `error`) so developers can build custom logging.
-* **Cloud Providers (Modular Ecosystem):** To maintain absolute portability and minimal package size, cloud providers are organized into "Ecosystem" packages. This allows users to only install the dependencies required for their target platform. See [Provider Architecture](./PROVIDER_ARCHITECTURE.md) for details.
-    * `@mongoshield/provider-local` (Filesystem, NFS, SMB)
-    * `@mongoshield/provider-s3` (AWS, DigitalOcean, R2, B2)
-    * `@mongoshield/provider-google` (GCS, Drive)
-    * `@mongoshield/provider-microsoft` (Azure, OneDrive)
-    * `@mongoshield/provider-network` (SFTP, WebDAV)
+* **Cloud Providers (Modular Ecosystem) (Completed):** To maintain absolute portability and minimal package size, cloud providers are organized into "Ecosystem" packages. This allows users to only install the dependencies required for their target platform. See [Provider Architecture](./PROVIDER_ARCHITECTURE.md) for details.
+    * ✅ `@mongoshield/provider-local` (Filesystem, NFS, SMB)
+    * ✅ `@mongoshield/provider-s3` (AWS, DigitalOcean, R2, B2)
+    * ✅ `@mongoshield/provider-google` (GCS, Drive)
+    * ✅ `@mongoshield/provider-microsoft` (Azure, OneDrive)
+    * ✅ `@mongoshield/provider-network` (SFTP, WebDAV)
 * **Automated Pruning (Completed):** Every provider must implement a mandatory `prune()` interface to support automated old record deletion (by count or by age).
 
-### Phase 3: The "Pro" Defenses
+### Phase 3: The "Pro" Defenses (In Progress)
 **Goal:** Transform MongoShield from a one-way backup script into a robust, two-way, programmable data utility.
 * **Native Restore Engine (`.restore()`):** The exact opposite of the backup. Fetch a remote archive, decompress it, and pump data back into a target database via massive parallel bulk operations.
 * **Built-In Scheduler:** A production-grade backup scheduler (cron) with overlap prevention, exponential backoff retries, and detailed audit logging (persisting last 100 runs). See [Scheduler Plan](./SCHEDULER_PLAN.md) for details.
