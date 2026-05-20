@@ -1,73 +1,68 @@
 # MongoShield AI Agent Context & Directives
 
-**ATTENTION AI AGENTS:** This document is your System Prompt and Source of Truth for the MongoShield repository. Read this entirely before making any modifications to the codebase. 
+**ATTENTION AI AGENTS:** This document is your Source of Truth for the MongoShield repository. 
+To preserve context tokens, this file is strictly limited to **Core Directives**. It does **not** explain how the codebase works. You must dynamically read the architectural documentation when you need to understand specific subsystems.
 
 ---
 
-## 1. Core Project Identity & Directives
+## 1. Context Loading (READ BEFORE CODING)
+If you need to understand how the MongoShield engine works, you MUST use the `view_file` tool to read the specific chapter of the engineering book located in `docs/developer/detailed_documentation/`:
 
-**MongoShield** is a 100% native Node.js MongoDB data protection utility. 
+- `00-introduction.md`: Read for project constraints and theory.
+- `01-architecture.md`: Read for `pnpm` workspace structure, Tsup, Biome, and Changesets.
+- `02-core-engine.md`: Read if modifying `BackupEngine`, `BSONEncoderStream`, or `EncryptionStream`.
+- `03-storage-providers.md`: Read if modifying `AbstractStorageProvider`, S3/Azure logic, or the `ArchiveProvider` adapter.
+- `04-public-api.md`: Read if modifying the `mongoshield` wrapper, Zod validations, or EventEmitters.
 
-**CRITICAL DIRECTIVES:**
-1. **NO EXTERNAL BINARIES:** You are strictly forbidden from writing code that spawns `child_process` to execute `mongodump` or `mongorestore`. Everything MUST be implemented natively using the `mongodb` Node.js driver.
-2. **STREAMING ONLY:** You are strictly forbidden from loading entire collections or databases into memory (`toArray()`). You MUST use asynchronous cursors (`collection.find().stream()`) and Node.js `stream.Transform` pipelines to process data. The engine must be "No-Crash" regardless of database size.
-3. **STRICT TYPING:** Do not use `any` or `@ts-ignore` to bypass type errors. The project relies on deep type safety.
-4. **100% TEST COVERAGE:** You MUST maintain 100% unit test coverage (statements, lines, branches) for the `@mongoshield/core` package. Every PR must be verified with `pnpm test --coverage`.
-5. **NO HUMAN INTERVENTION FOR PUBLISHING:** Do not modify package versions manually. We use `@changesets/cli` and automated semantic versioning. 
-6. **DOCUMENTATION PARITY:** Whenever you add a new feature, change an architecture pattern, or modify the monorepo structure, you MUST immediately update this document (`AGENT_CONTEXT.md`), the `DEVELOPER_GUIDE.md`, and the `PROJECT_PLAN.md`.
-
----
-
-## 2. Monorepo Architecture
-
-This project is a strict Monorepo managed by `pnpm workspaces`. 
-
-*   **`@mongoshield/core` (`packages/core`)**: The pure engine. It connects to MongoDB, extracts the stream, compresses it, encrypts it, and writes it to a generic `StorageProvider` interface. It includes the `ArchiveProvider` (MSAF) middleware for monolithic stream multiplexing.
-*   **`@mongoshield/provider-*` (e.g., `packages/provider-s3`)**: Specific cloud adapters. These packages declare `@mongoshield/core` as a dependency and implement the `StorageProvider` interface to pipe the compressed, encrypted data stream to external services (like AWS S3). 
-
-**Rule:** Never add AWS, Google Cloud, or Azure dependencies to `@mongoshield/core`. Cloud integrations MUST be separate provider packages.
+If you need practical workflow instructions (how to run Vitest, Testcontainers, or build), read:
+- `docs/developer/DEVELOPER_GUIDE.md`
 
 ---
 
-## 3. Technology Stack & Tooling
+## 2. Strict Project Directives
 
-When modifying configuration or adding tooling, adhere to the following stack:
+When generating or modifying code, you MUST obey these absolute rules:
 
-*   **Package Manager**: `pnpm`
-*   **Language**: TypeScript (Strict Mode).
-*   **Target Environments**: Node.js `>= 20.x`. Prefer native Node.js APIs (`node:fs`, `node:stream`, `node:crypto`, `fetch()`) over external polyfills.
-*   **Linting & Formatting**: `Biome` (`biome.json`). Do NOT use ESLint or Prettier.
-*   **Bundler**: `tsup` configured for dual-builds (`esm` and `cjs`).
-*   **Testing**: `Vitest` + `v8` coverage (Strict 100% threshold).
-*   **Database Virtualization**: `@testcontainers/mongodb`. ALL integration tests must spin up an ephemeral Docker container instead of mocking the database connection.
-*   **Git Hooks**: `Husky` + `lint-staged` + `commitlint`.
-*   **Configuration Validation**: `Zod` (`zod` schemas in `src/config/`).
+1. **NO EXTERNAL BINARIES:** You are strictly forbidden from spawning `child_process` to execute `mongodump` or `mongorestore`. Everything MUST be implemented natively via the `mongodb` Node.js driver.
+2. **STREAMING ONLY:** You are strictly forbidden from using `toArray()` to load collections into memory. You MUST use asynchronous cursors (`collection.find().stream()`) and Node.js `stream.Transform` pipelines ($O(1)$ memory).
+3. **STRICT TYPING:** Do not use `any` or `@ts-ignore`. 
+4. **100% TEST COVERAGE:** You MUST maintain 100% unit test coverage for `@mongoshield/core`. Run `pnpm test --coverage`.
+5. **VIRTUALIZED TESTING:** Do not mock database connections. Use `@testcontainers/mongodb` to spin up ephemeral Docker containers for integration tests.
+6. **NO HUMAN PUBLISHING:** Do not modify `package.json` versions manually. Run `pnpm changeset` and let the Github Actions pipeline handle semantic versioning.
+7. **NO CLOUD DEPENDENCIES IN CORE:** Never add AWS, Google Cloud, or Azure dependencies to `@mongoshield/core`. Cloud integrations MUST be implemented as separate provider packages (e.g. `@mongoshield/provider-s3`) that implement the `StorageProvider` interface.
 
 ---
 
-## 4. Current State & Implementation Gaps
+## 3. Technology Stack
 
-As an agent, you must be aware of the exact current state of the codebase. We are in **Phase 2 (MVP Release)**, with Phase 1 fully completed. 
-
-**Working Features:**
-*   Monorepo linking.
-*   Native connection via `MongoClient` with TLS/Auth support.
-*   BSON Encoding (`BSONEncoderStream`).
-*   GZIP Compression.
-*   AES Encryption (`EncryptionStream` with HKDF-SHA256).
-*   Archive multiplexing (`ArchiveProvider` using MSAF protocol).
-*   100% Unit Test Coverage for core logic.
-*   Vitest integration with Testcontainers.
-
-**Known Gaps & Stubs (DO NOT HALLUCINATE THESE FEATURES EXIST):**
-*   `OplogTailer.ts` is missing. We need a class that queries the `local.oplog.rs` replica set collection and streams incremental changes. (Note: This is scheduled for Phase 5).
+- **Manager**: `pnpm` (Workspaces)
+- **Language**: TypeScript (Strict Mode)
+- **Target**: Node.js `>= 20.x` (Use native `node:fs`, `node:stream`, `node:crypto`)
+- **Lint/Format**: `Biome` (NO ESLint or Prettier)
+- **Testing**: `Vitest` + `Testcontainers`
+- **Validation**: `Zod`
 
 ---
 
-## 5. Security Context
+## 4. Packages & Current State
 
-Data protection tools are high-value targets. 
-*   **Encryption**: Encryption (`node:crypto`) must be applied to the stream *before* it hits any network provider. We use `AES-256-GCM` initialized via HKDF-SHA256 key derivation with a per-stream 32-byte salt. Key reuse is impossible. The salt and IV are prepended to the stream.
-*   **Path Traversal**: Providers MUST extend `AbstractStorageProvider` which automatically sanitizes `dbName` and `collectionName` against path traversal attacks (e.g., rejecting `../../etc`).
-*   **Validation**: Inputs MUST be strictly validated via Zod schemas, specifically enforcing enums and regex validators before establishing database connections.
-*   **CI Security Checks**: `pnpm audit` is strictly enforced in the Git pre-commit hook and Github Actions pipelines. Do not add highly volatile dependencies.
+### ✅ Phase 0, 1, 2 — Fully Complete
+All packages below are fully implemented with 100% test coverage:
+- **`@mongoshield/core`** (`packages/core`): Streaming engine. `BackupEngine`, `BSONEncoderStream`, `EncryptionStream` (HKDF + AES-256-GCM), `MultiplexWriteStream` (MSAF archive), `AbstractStorageProvider`, `ArchiveProvider`, `ConnectionManager`, Zod config schemas.
+- **`mongoshield`** (`packages/mongoshield`): High-level Facade. `MongoShield` class with Dependency Injection, EventEmitter proxy, Zod runtime validation.
+- **`@mongoshield/provider-local`** (`packages/provider-local`): `FileSystemProvider` — atomic `.tmp` rotation, `statfs` disk space checks, stale-file cleanup, age/count-based pruning.
+- **`@mongoshield/provider-s3`** (`packages/provider-s3`): `S3Provider` — multipart streaming upload via `@aws-sdk/lib-storage`, prefix-based hierarchical pruning.
+- **`@mongoshield/provider-google`** (`packages/provider-google`): `GoogleProvider` — resumable GCS upload streams with MD5 validation, timestamp-based pruning.
+- **`@mongoshield/provider-microsoft`** (`packages/provider-microsoft`): `AzureProvider` — `uploadStream` Block Blob streaming, hierarchical prefix pruning.
+- **`@mongoshield/provider-network`** (`packages/provider-network`): `SftpProvider` — custom recursive `mkdirp`, recursive SFTP `rmdirRecursive` for pruning.
+
+### ✅ Phase 3 (Partial) — Scheduler Complete
+- **`@mongoshield/scheduler`** (`packages/scheduler`): `BackupScheduler` — cron-based scheduling via `croner`, overlap prevention, configurable retries with exponential backoff, `AbortController` timeouts, graceful `SIGTERM`/`SIGINT` shutdown with configurable grace period, and atomic rolling audit log (`AuditLogger`).
+
+### ❌ Phase 3 (Remaining) — Not Started
+- **Restore Engine** — Native `.restore()` implementation. No files exist yet. Do NOT hallucinate this feature.
+- **Webhooks** — Slack/Discord/Email notifications on backup events. Not implemented.
+- **General File Archiving** — Static directory tarball uploads. Not implemented.
+
+### ❌ Phase 4, 5 — Not Started
+- Zero-Downtime Migration, PII Scrubbing, Oplog Tailing (`OplogTailer.ts`), Immutable Backups, AI Anomaly Detection. Do NOT hallucinate these features exist.

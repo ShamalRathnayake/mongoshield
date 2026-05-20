@@ -1,12 +1,54 @@
 # Chapter 4: The Public Wrapper (`mongoshield`)
 
-While `@mongoshield/core` does all the heavy lifting, it is not designed to be consumed directly by end-users. The `mongoshield` package provides a unified, user-friendly **Facade** pattern over the complex internal engine. 
+While `@mongoshield/core` does all the heavy lifting, it is a complex engine that requires precise orchestration. End-users (developers installing your package via NPM) should not be forced to manually manage streams, encryption salts, or chunk types. 
 
-## 4.1 The Entry Point: `MongoShield.ts`
+To solve this, the `@mongoshield/mongoshield` package provides a unified, user-friendly **Facade Pattern** over the complex internal engine. 
 
-[`MongoShield.ts`](../../../packages/mongoshield/src/MongoShield.ts) is the class that developers instantiate in their own Node.js scripts.
+## 4.1 Dependency Injection
 
-### Runtime Schema Validation (Zod)
+MongoShield relies heavily on **Inversion of Control** (IoC) via Dependency Injection.
+```typescript
+import { MongoShield } from "@mongoshield/mongoshield";
+import { S3Provider } from "@mongoshield/provider-s3";
+
+// 1. Instantiate the Storage Plugin
+const s3Storage = new S3Provider({ bucket: "my-backups" });
+
+// 2. Inject it into the Engine Facade
+const shield = new MongoShield({
+  config: { connection: { host: "localhost" } },
+  storage: s3Storage,
+});
+```
+**Logic Decision:**
+Notice how the `MongoShield` class does not import `S3Provider`. The engine is completely blind to where the data is going! The user creates the storage provider and *injects* it into the constructor. This guarantees strict Separation of Concerns. If a user wants to write a custom `GoogleDriveProvider`, they don't need to fork the MongoShield repository—they just write a class that implements `StorageProvider` and inject it here!
+
+## 4.2 Runtime Type Safety (Zod)
+
+TypeScript is fantastic, but its types are **erased** at compile time. If a user installs MongoShield in a legacy `CommonJS` project without TypeScript and passes an invalid configuration, the app might crash deep inside the streaming engine an hour later.
+
+MongoShield prevents this using **Zod** for runtime schema validation.
+
+### The Zod Schemas
+[`index.ts`](../../../packages/core/src/config/index.ts)
+```typescript
+export const OutputOptionsSchema = z.object({
+  outPath: z.string().default("dump"),
+  numParallelCollections: z.number().int().positive().default(4),
+  encryptionKey: z
+    .string()
+    .length(64, "Encryption key must be exactly 64 characters long")
+    .regex(/^[0-9a-fA-F]+$/, "Encryption key must be a valid hex string")
+    .optional(), 
+});
+
+export type OutputOptions = z.infer<typeof OutputOptionsSchema>;
+```
+**Logic Decision:**
+We use Zod to define the *shape* of the configuration at runtime. Notice the `.regex()` attached to the `encryptionKey`. If a user accidentally passes a 63-character string, or a base64 string instead of hex, Zod will catch it instantly. We then use `z.infer<typeof OutputOptionsSchema>` to statically generate the TypeScript interfaces, ensuring our runtime validation and compile-time types are never out of sync!
+
+### The Validation Gatekeeper
+[`MongoShield.ts`](../../../packages/mongoshield/src/MongoShield.ts)
 ```typescript
 let parsedConfig: BackupConfig;
 try {
@@ -18,23 +60,36 @@ try {
 this.engine = new BackupEngine(parsedConfig, options.storage);
 ```
 **Logic Decision:**
-TypeScript interfaces (`BackupConfigInput`) are entirely erased when code is compiled to JavaScript. If a user installs MongoShield via NPM and passes `{ numParallelCollections: "five" }` (a string instead of a number) in pure JS, TypeScript cannot warn them. By passing the raw input through `Zod` (`BackupConfigSchema.parse`), we perform **Runtime Type Checking**. Zod guarantees that by the time the config reaches the `BackupEngine`, it is perfectly formatted, sanitized, and safe to execute. This fails fast and provides human-readable error messages for bad inputs.
+Before the `BackupEngine` is even allowed to construct, `options.config` is passed through `.parse()`. If this succeeds, `parsedConfig` is mathematically guaranteed to be safe, properly defaulted, and structurally sound. 
 
-### Event Bubbling & The EventEmitter Pattern
+## 4.3 Event Bubbling & The EventEmitter Pattern
+
+The end-user does not interact with the StorageProvider directly once they pass it to `MongoShield`. If they want to draw a progress bar in their terminal, how do they know how many bytes have been uploaded to S3?
+
 ```typescript
 export class MongoShield extends EventEmitter {
-  // ...
-  options.storage.on("progress", (bytesWritten: number) => {
-    this.emit("progress", bytesWritten);
-  });
+  constructor(options: MongoShieldOptions) {
+    super();
+    // ...
+    options.storage.on("progress", (bytesWritten: number) => {
+      this.emit("progress", bytesWritten);
+    });
+    
+    options.storage.on("error", (err: Error) => {
+      this.emit("error", err);
+    });
+  }
 }
 ```
 **Logic Decision:**
-Remember how the `AbstractStorageProvider` wrapped streams in a `PassThrough` to emit `"progress"` events? The end-user doesn't interact with the StorageProvider directly once they pass it to `MongoShield`. Therefore, the `MongoShield` wrapper must act as an **Event Proxy**. It listens to the internal storage provider's events and re-emits them to the public API surface. This allows developers to easily attach UI progress bars or Datadog metrics to their backup scripts:
+The `MongoShield` class extends Node's native `EventEmitter`. It acts as an **Event Proxy**. It intercepts the `"progress"` and `"error"` events originating from the injected `StorageProvider` (which, as we learned in Chapter 3, were generated by a `PassThrough` stream!) and bubbles them up to the public API surface. 
 
+This creates a beautiful, frictionless developer experience:
 ```javascript
 const shield = new MongoShield({ ... });
 shield.on("progress", (bytes) => console.log(`Uploaded ${bytes} bytes`));
+shield.on("backup:started", () => console.log(`Engine running...`));
+
 await shield.backup();
 ```
 
@@ -43,10 +98,10 @@ await shield.backup();
 # Conclusion
 
 You have now traversed the entire architecture of MongoShield. You understand:
-1. Why **PNPM Workspaces** and strict CI/CD pipelines guarantee repository integrity.
-2. How **Streams** allow for constant memory ($O(1)$) backups regardless of database size.
+1. Why **PNPM Workspaces** and strict Git Hooks guarantee repository integrity.
+2. How **Streams** and **Backpressure** allow for constant memory ($O(1)$) backups regardless of database size.
 3. The cryptographic superiority of deriving temporary Stream Keys using **HKDF** and **AES-256-GCM**.
-4. How atomic **file renaming** and `statfs` checks prevent corrupted backups.
-5. Why **Zod** is used at the API boundary to enforce runtime safety.
+4. How **Storage Adapters** use atomic file renaming and custom SSH recursion to prevent corrupted backups.
+5. Why **Zod** and **Dependency Injection** are used at the API boundary to enforce runtime safety and modularity.
 
-This codebase is a masterclass in defensive, modern Node.js engineering. Use these patterns—streaming telemetry, atomic operations, stream multiplexing, and robust path sanitization—in your own systems to build unbreakable, production-grade applications.
+This codebase is a masterclass in defensive, modern Node.js engineering. Use these patterns—streaming telemetry, atomic operations, cryptography, and runtime type checking—in your own systems to build unbreakable, production-grade applications.

@@ -1,6 +1,6 @@
 # MongoShield 🛡️
 
-**Status:** ✅ PHASE 1 (CORE ENGINE) COMPLETE | 🚧 PHASE 2 (MVP) ACTIVE 🚧
+**Status:** ✅ PHASES 0–2 COMPLETE | ✅ SCHEDULER COMPLETE | 🚧 PHASE 3 (PRO DEFENSES) IN PROGRESS 🚧
 
 **MongoShield** is a revolutionary, highly secure, and entirely self-contained MongoDB data protection utility tailored specifically for modern Node.js and TypeScript ecosystems.
 
@@ -28,8 +28,12 @@ MongoShield is a modular ecosystem. The main `mongoshield` package includes the 
 |---|---|
 | [`mongoshield`](https://www.npmjs.com/package/mongoshield) | **Main package** — high-level API + core engine. Start here. |
 | [`@mongoshield/core`](https://www.npmjs.com/package/@mongoshield/core) | Low-level streaming engine, providers, and encryption. |
-| [`@mongoshield/provider-local`](https://www.npmjs.com/package/@mongoshield/provider-local) | Local filesystem storage provider. |
-| [`@mongoshield/provider-s3`](https://www.npmjs.com/package/@mongoshield/provider-s3) | AWS S3 and S3-compatible storage provider. |
+| [`@mongoshield/provider-local`](https://www.npmjs.com/package/@mongoshield/provider-local) | Local filesystem storage with rotation & pruning. |
+| [`@mongoshield/provider-s3`](https://www.npmjs.com/package/@mongoshield/provider-s3) | AWS S3 and S3-compatible storage (Cloudflare R2, DigitalOcean Spaces). |
+| [`@mongoshield/provider-google`](https://www.npmjs.com/package/@mongoshield/provider-google) | Google Cloud Storage (GCS) and Google Drive. |
+| [`@mongoshield/provider-microsoft`](https://www.npmjs.com/package/@mongoshield/provider-microsoft) | Microsoft Azure Blob Storage. |
+| [`@mongoshield/provider-network`](https://www.npmjs.com/package/@mongoshield/provider-network) | Network protocols — SFTP/SSH. |
+| [`@mongoshield/scheduler`](https://www.npmjs.com/package/@mongoshield/scheduler) | Autonomous backup scheduler with cron, retries, overlap prevention, and audit logging. |
 
 ## Quick Start
 
