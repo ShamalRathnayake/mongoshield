@@ -8,3 +8,4 @@ mongoshield_*
 setup_roadmap.md
 *.txt
 manual-test/*
+.pnpm-store/v11/index.db
