@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BackupEngine } from "../../../src/core/BackupEngine";
 import { ConnectionManager } from "../../../src/db/ConnectionManager";
 import type { StorageProvider } from "../../../src/providers/StorageProvider";
-import { BSONEncoderStream } from "../../../src/streams/BSONEncoderStream";
 import { EncryptionTransform } from "../../../src/streams/EncryptionStream";
 
 // Mock dependencies
@@ -64,7 +63,7 @@ describe("BackupEngine", () => {
     };
 
     mockClient = {
-      db: vi.fn().mockImplementation((name?: string) => mockDb),
+      db: vi.fn().mockImplementation((_name?: string) => mockDb),
     };
 
     (ConnectionManager.prototype.connect as any).mockResolvedValue(mockClient);
@@ -123,7 +122,7 @@ describe("BackupEngine", () => {
       delete config.target.dbName;
       const engine = new BackupEngine(config, mockStorage);
       await engine.run();
-      
+
       expect(mockStorage.initialize).toHaveBeenCalledWith(3000); // 1000 + 2000, skips admin
       expect(mockStorage.createMetadataWriteStream).toHaveBeenCalled();
     });

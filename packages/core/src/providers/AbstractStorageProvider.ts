@@ -15,8 +15,7 @@ import type {
  */
 export abstract class AbstractStorageProvider
   extends EventEmitter
-  implements StorageProvider
-{
+  implements StorageProvider {
   public async initialize(expectedSizeInBytes?: number): Promise<void> {
     await this._initialize(expectedSizeInBytes);
   }

@@ -66,7 +66,7 @@ describe("ArchiveProvider", () => {
   it("fails if global header write fails", async () => {
     mockStream.write = vi
       .fn()
-      .mockImplementation((chunk, cb) => cb(new Error("write-failed")));
+      .mockImplementation((_chunk, cb) => cb(new Error("write-failed")));
 
     const provider = new ArchiveProvider(mockDownstream);
 
