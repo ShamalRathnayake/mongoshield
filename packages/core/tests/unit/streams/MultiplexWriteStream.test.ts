@@ -10,7 +10,7 @@ describe("MultiplexWriteStream", () => {
     return new Promise<void>((resolve, reject) => {
       const writtenChunks: Buffer[] = [];
       const mockDestination = new Writable({
-        write(chunk, encoding, callback) {
+        write(chunk, _encoding, callback) {
           writtenChunks.push(Buffer.from(chunk));
           callback();
         },
@@ -54,9 +54,9 @@ describe("MultiplexWriteStream", () => {
   });
 
   it("handles backpressure correctly", () => {
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>((resolve, _reject) => {
       const mockDestination = new Writable({
-        write(chunk, encoding, callback) {
+        write(_chunk, _encoding, callback) {
           // Simulate backpressure by not calling callback immediately, and returning false
           setTimeout(callback, 10);
           return false;
@@ -171,7 +171,7 @@ describe("MultiplexWriteStream", () => {
   it("_final does not close destination stream", () => {
     return new Promise<void>((resolve) => {
       const mockDestination = new Writable({
-        write(chunk, encoding, callback) {
+        write(_chunk, _encoding, callback) {
           callback();
         },
       });

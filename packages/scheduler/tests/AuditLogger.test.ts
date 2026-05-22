@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditLogger } from "../src/AuditLogger";
 
 describe("AuditLogger", () => {
@@ -9,13 +9,13 @@ describe("AuditLogger", () => {
   beforeEach(async () => {
     try {
       await fs.unlink(logPath);
-    } catch (e) {}
+    } catch (_e) {}
   });
 
   afterEach(async () => {
     try {
       await fs.unlink(logPath);
-    } catch (e) {}
+    } catch (_e) {}
   });
 
   const mockRecordBase = {
@@ -51,7 +51,7 @@ describe("AuditLogger", () => {
 
   it("should enforce maxHistory limits and truncate oldest records", async () => {
     const logger = new AuditLogger(logPath, 3); // Max 3 records
-    
+
     await logger.appendRecord({ ...mockRecordBase, durationMs: 1 });
     await logger.appendRecord({ ...mockRecordBase, durationMs: 2 });
     await logger.appendRecord({ ...mockRecordBase, durationMs: 3 });

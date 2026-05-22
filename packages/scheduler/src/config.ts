@@ -22,8 +22,6 @@ export const SchedulerOptionsSchema = z.object({
 export type SchedulerOptions = z.infer<typeof SchedulerOptionsSchema>;
 export type SchedulerOptionsInput = z.input<typeof SchedulerOptionsSchema>;
 
-export function validateSchedulerConfig(
-  config: unknown,
-): SchedulerOptions {
+export function validateSchedulerConfig(config: unknown): SchedulerOptions {
   return SchedulerOptionsSchema.parse(config);
 }

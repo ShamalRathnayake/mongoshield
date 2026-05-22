@@ -1,10 +1,14 @@
 import { EventEmitter } from "node:events";
-import { Cron } from "croner";
-import pino from "pino";
 import type { BackupConfig, StorageProvider } from "@mongoshield/core";
 import { BackupEngine } from "@mongoshield/core";
-import { validateSchedulerConfig, type SchedulerOptions, type SchedulerOptionsInput } from "./config";
+import { Cron } from "croner";
+import pino from "pino";
 import { AuditLogger, type AuditRecord } from "./AuditLogger";
+import {
+  type SchedulerOptions,
+  type SchedulerOptionsInput,
+  validateSchedulerConfig,
+} from "./config";
 
 export class BackupScheduler extends EventEmitter {
   private config: BackupConfig;
@@ -12,7 +16,7 @@ export class BackupScheduler extends EventEmitter {
   private storage: StorageProvider;
   private logger: pino.Logger;
   private auditLogger: AuditLogger;
-  
+
   private cronJob: Cron | null = null;
   private state: "idle" | "running" = "idle";
   private currentAbortController: AbortController | null = null;
@@ -21,7 +25,7 @@ export class BackupScheduler extends EventEmitter {
     config: BackupConfig,
     schedulerOptions: SchedulerOptionsInput,
     storage: StorageProvider,
-    logger?: pino.Logger
+    logger?: pino.Logger,
   ) {
     super();
     this.config = config;
@@ -30,7 +34,7 @@ export class BackupScheduler extends EventEmitter {
     this.logger = logger || pino({ level: "info" });
     this.auditLogger = new AuditLogger(
       this.schedulerOptions.auditLogPath,
-      this.schedulerOptions.maxAuditHistory
+      this.schedulerOptions.maxAuditHistory,
     );
   }
 
@@ -39,15 +43,21 @@ export class BackupScheduler extends EventEmitter {
       throw new Error("Scheduler is already running");
     }
 
-    this.logger.info(`Starting BackupScheduler with cron: ${this.schedulerOptions.cron}`);
+    this.logger.info(
+      `Starting BackupScheduler with cron: ${this.schedulerOptions.cron}`,
+    );
 
-    this.cronJob = new Cron(this.schedulerOptions.cron, {
-      timezone: this.schedulerOptions.timezone
-    }, () => {
-      this.executeJob().catch(err => {
-        this.logger.error({ err }, "Unhandled error in executeJob");
-      });
-    });
+    this.cronJob = new Cron(
+      this.schedulerOptions.cron,
+      {
+        timezone: this.schedulerOptions.timezone,
+      },
+      () => {
+        this.executeJob().catch((err) => {
+          this.logger.error({ err }, "Unhandled error in executeJob");
+        });
+      },
+    );
 
     // Handle graceful shutdown
     process.on("SIGINT", this.handleGracefulShutdown);
@@ -68,16 +78,24 @@ export class BackupScheduler extends EventEmitter {
     if (this.state === "running" && this.currentAbortController) {
       if (force) {
         this.logger.warn("Force stopping active backup immediately");
-        this.currentAbortController.abort(new Error("Backup aborted forcefully"));
+        this.currentAbortController.abort(
+          new Error("Backup aborted forcefully"),
+        );
       } else {
-        this.logger.info(`Waiting for grace period (${this.schedulerOptions.gracePeriodMs}ms) to finish current backup chunk...`);
+        this.logger.info(
+          `Waiting for grace period (${this.schedulerOptions.gracePeriodMs}ms) to finish current backup chunk...`,
+        );
         // Wait for grace period
-        await new Promise(resolve => setTimeout(resolve, this.schedulerOptions.gracePeriodMs));
-        
+        await new Promise((resolve) =>
+          setTimeout(resolve, this.schedulerOptions.gracePeriodMs),
+        );
+
         // If still running, abort
         if (this.state === "running") {
           this.logger.warn("Grace period expired, aborting active backup");
-          this.currentAbortController.abort(new Error("Backup aborted after grace period"));
+          this.currentAbortController.abort(
+            new Error("Backup aborted after grace period"),
+          );
         }
       }
     }
@@ -88,19 +106,25 @@ export class BackupScheduler extends EventEmitter {
   }
 
   private handleGracefulShutdown = () => {
-    this.logger.info("Received termination signal, initiating graceful shutdown...");
-    this.stop(false).then(() => {
-      process.exit(0);
-    }).catch(err => {
-      this.logger.error({ err }, "Error during graceful shutdown");
-      process.exit(1);
-    });
+    this.logger.info(
+      "Received termination signal, initiating graceful shutdown...",
+    );
+    this.stop(false)
+      .then(() => {
+        process.exit(0);
+      })
+      .catch((err) => {
+        this.logger.error({ err }, "Error during graceful shutdown");
+        process.exit(1);
+      });
   };
 
   private async executeJob() {
     if (this.state === "running") {
       if (this.schedulerOptions.preventOverlap) {
-        this.logger.warn("Backup job overlap prevented. Previous job is still running.");
+        this.logger.warn(
+          "Backup job overlap prevented. Previous job is still running.",
+        );
         this.emit("scheduler:overlapPrevented");
         return;
       }
@@ -108,7 +132,7 @@ export class BackupScheduler extends EventEmitter {
 
     this.state = "running";
     this.currentAbortController = new AbortController();
-    
+
     let attempt = 0;
     const maxAttempts = this.schedulerOptions.retries + 1;
     let finalError: Error | undefined;
@@ -116,7 +140,9 @@ export class BackupScheduler extends EventEmitter {
 
     while (attempt < maxAttempts) {
       try {
-        this.logger.info(`Starting backup attempt ${attempt + 1}/${maxAttempts}`);
+        this.logger.info(
+          `Starting backup attempt ${attempt + 1}/${maxAttempts}`,
+        );
         this.emit("backup:started", { attempt: attempt + 1 });
 
         const engine = new BackupEngine(this.config, this.storage);
@@ -126,7 +152,9 @@ export class BackupScheduler extends EventEmitter {
         const timeoutPromise = new Promise<void>((_, reject) => {
           if (this.schedulerOptions.timeoutMs) {
             timeoutId = setTimeout(() => {
-              const err = new Error(`Backup timed out after ${this.schedulerOptions.timeoutMs}ms`);
+              const err = new Error(
+                `Backup timed out after ${this.schedulerOptions.timeoutMs}ms`,
+              );
               this.currentAbortController?.abort(err);
               reject(err);
             }, this.schedulerOptions.timeoutMs);
@@ -142,18 +170,21 @@ export class BackupScheduler extends EventEmitter {
 
         // Success!
         this.logger.info("Backup completed successfully");
-        
+
         // Prune
         try {
           if (typeof (this.storage as any).prune === "function") {
             await (this.storage as any).prune();
           }
         } catch (pruneErr) {
-          this.logger.warn({ err: pruneErr }, "Automated pruning failed, but backup was successful");
+          this.logger.warn(
+            { err: pruneErr },
+            "Automated pruning failed, but backup was successful",
+          );
         }
 
         const durationMs = Date.now() - startTime;
-        
+
         const record = await this.auditLogger.appendRecord({
           status: "success",
           durationMs,
@@ -168,17 +199,19 @@ export class BackupScheduler extends EventEmitter {
             provider: this.storage.constructor.name,
             pathOrUri: this.config.output.outPath,
             encrypted: !!this.config.output.encryptionKey,
-          }
+          },
         });
 
         this.emit("backup:completed", { record });
         this.state = "idle";
         this.currentAbortController = null;
         return; // Exit loop
-
       } catch (err: any) {
-        this.logger.error({ err, attempt: attempt + 1 }, "Backup attempt failed");
-        
+        this.logger.error(
+          { err, attempt: attempt + 1 },
+          "Backup attempt failed",
+        );
+
         if (err.name === "AbortError" || err.message.includes("aborted")) {
           // If it was gracefully aborted or forced, we don't retry
           finalError = err;
@@ -187,9 +220,11 @@ export class BackupScheduler extends EventEmitter {
 
         attempt++;
         if (attempt < maxAttempts) {
-          const delay = this.schedulerOptions.retryDelayMs * Math.pow(this.schedulerOptions.backoffFactor, attempt - 1);
+          const delay =
+            this.schedulerOptions.retryDelayMs *
+            this.schedulerOptions.backoffFactor ** (attempt - 1);
           this.logger.info(`Waiting ${delay}ms before next attempt...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          await new Promise((resolve) => setTimeout(resolve, delay));
         } else {
           finalError = err;
         }
@@ -217,8 +252,8 @@ export class BackupScheduler extends EventEmitter {
       },
       error: {
         message: finalError?.message || "Unknown error",
-        code: (finalError as any)?.code
-      }
+        code: (finalError as any)?.code,
+      },
     });
 
     this.emit("backup:failed", { error: finalError, record });

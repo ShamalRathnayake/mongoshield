@@ -1,17 +1,15 @@
 import { PassThrough, Writable } from "node:stream";
 import {
-  S3Client,
+  DeleteObjectsCommand,
   HeadBucketCommand,
   ListObjectsV2Command,
-  DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
-import { Upload } from "@aws-sdk/lib-storage";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { S3Provider } from "../src/S3Provider";
 
 vi.mock("@aws-sdk/client-s3", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@aws-sdk/client-s3")>();
-  
+
   class MockS3Client {
     send = vi.fn();
   }
@@ -24,7 +22,7 @@ vi.mock("@aws-sdk/client-s3", async (importOriginal) => {
 
 vi.mock("@aws-sdk/lib-storage", () => {
   const mockUploadInstances: any[] = [];
-  
+
   class MockUpload {
     params: any;
     constructor(options: any) {
@@ -33,11 +31,13 @@ vi.mock("@aws-sdk/lib-storage", () => {
     }
     done = vi.fn().mockResolvedValue(true);
   }
-  
+
   return {
     Upload: MockUpload,
     __getMockUploadInstances: () => mockUploadInstances,
-    __clearMockUploadInstances: () => { mockUploadInstances.length = 0; }
+    __clearMockUploadInstances: () => {
+      mockUploadInstances.length = 0;
+    },
   };
 });
 
@@ -71,7 +71,7 @@ describe("S3Provider", () => {
       mockSend.mockRejectedValueOnce(notFoundError);
 
       await expect(provider.initialize()).rejects.toThrow(
-        'S3Provider: Bucket "test-bucket" does not exist.'
+        'S3Provider: Bucket "test-bucket" does not exist.',
       );
     });
 
@@ -81,7 +81,7 @@ describe("S3Provider", () => {
       mockSend.mockRejectedValueOnce(forbiddenError);
 
       await expect(provider.initialize()).rejects.toThrow(
-        'S3Provider: Access denied to bucket "test-bucket". Check your credentials.'
+        'S3Provider: Access denied to bucket "test-bucket". Check your credentials.',
       );
     });
 
@@ -95,14 +95,18 @@ describe("S3Provider", () => {
     it("should generate a timestamped prefix", async () => {
       await provider.initialize();
       const currentRunPrefix = (provider as any).currentRunPrefix;
-      expect(currentRunPrefix).toMatch(/^backups\/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\/$/);
+      expect(currentRunPrefix).toMatch(
+        /^backups\/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\/$/,
+      );
     });
   });
 
   describe("Streaming Writes", () => {
     beforeEach(async () => {
       // @ts-expect-error
-      const { __clearMockUploadInstances } = await import("@aws-sdk/lib-storage");
+      const { __clearMockUploadInstances } = await import(
+        "@aws-sdk/lib-storage"
+      );
       __clearMockUploadInstances();
       await provider.initialize();
     });
@@ -116,7 +120,7 @@ describe("S3Provider", () => {
       const { __getMockUploadInstances } = await import("@aws-sdk/lib-storage");
       const instances = __getMockUploadInstances();
       const uploadCall = instances[0];
-      
+
       expect(uploadCall.params.Bucket).toBe("test-bucket");
       expect(uploadCall.params.Key).toMatch(/backups\/.*\/db\/col\.bson/);
       expect(uploadCall.params.Body).toBeInstanceOf(PassThrough);
@@ -128,7 +132,9 @@ describe("S3Provider", () => {
       // @ts-expect-error
       const { __getMockUploadInstances } = await import("@aws-sdk/lib-storage");
       const uploadCall = __getMockUploadInstances()[0];
-      expect(uploadCall.params.Key).toMatch(/backups\/.*\/db\/col\.metadata\.json/);
+      expect(uploadCall.params.Key).toMatch(
+        /backups\/.*\/db\/col\.metadata\.json/,
+      );
     });
 
     it("should create an Archive write stream", async () => {
@@ -147,15 +153,16 @@ describe("S3Provider", () => {
       });
       await compressedProvider.initialize();
 
-      const stream = await compressedProvider.createArchiveWriteStream("backup.msaf");
+      const stream =
+        await compressedProvider.createArchiveWriteStream("backup.msaf");
       expect(stream).toBeInstanceOf(Writable); // Gzip instance
-      
+
       // @ts-expect-error
       const { __getMockUploadInstances } = await import("@aws-sdk/lib-storage");
       const uploadCall = __getMockUploadInstances()[0];
       expect(uploadCall.params.Key).toMatch(/backups\/.*\/backup\.msaf\.gz/);
     });
-    
+
     it("should append .gz to BSON streams if compression is enabled", async () => {
       const compressedProvider = new S3Provider({
         bucket: "test-bucket",
@@ -163,9 +170,12 @@ describe("S3Provider", () => {
       });
       await compressedProvider.initialize();
 
-      const stream = await compressedProvider.createBsonWriteStream("db", "col");
+      const stream = await compressedProvider.createBsonWriteStream(
+        "db",
+        "col",
+      );
       expect(stream).toBeInstanceOf(PassThrough); // Telemetry wrapper around passthrough
-      
+
       // @ts-expect-error
       const { __getMockUploadInstances } = await import("@aws-sdk/lib-storage");
       const uploadCall = __getMockUploadInstances()[0];
@@ -208,27 +218,36 @@ describe("S3Provider", () => {
       const oldDate = new Date();
       oldDate.setDate(oldDate.getDate() - 10);
       const oldPrefix = `backups/${oldDate.toISOString().replace(/[:.]/g, "-")}/`;
-      
+
       const newDate = new Date();
       const newPrefix = `backups/${newDate.toISOString().replace(/[:.]/g, "-")}/`;
 
       mockSend.mockImplementation((command: any) => {
         if (command instanceof ListObjectsV2Command) {
           if (command.input.Delimiter === "/") {
-            return Promise.resolve({ CommonPrefixes: [{ Prefix: oldPrefix }, { Prefix: newPrefix }] });
+            return Promise.resolve({
+              CommonPrefixes: [{ Prefix: oldPrefix }, { Prefix: newPrefix }],
+            });
           }
-          return Promise.resolve({ Contents: [{ Key: `${command.input.Prefix}file1.bson` }, { Key: `${command.input.Prefix}file2.bson` }] });
+          return Promise.resolve({
+            Contents: [
+              { Key: `${command.input.Prefix}file1.bson` },
+              { Key: `${command.input.Prefix}file2.bson` },
+            ],
+          });
         }
         return Promise.resolve({});
       });
 
       const res = await provider.prune({ strategy: "age", maxDays: 5 });
-      
+
       expect(res.deletedCount).toBe(1);
       expect(res.deletedPaths[0]).toBe(`s3://test-bucket/${oldPrefix}`);
 
       // Should have called ListObjectsV2(Prefixes) -> ListObjectsV2(Keys) -> DeleteObjects
-      const deleteCall = mockSend.mock.calls.find((c: any) => c[0] instanceof DeleteObjectsCommand);
+      const deleteCall = mockSend.mock.calls.find(
+        (c: any) => c[0] instanceof DeleteObjectsCommand,
+      );
       expect(deleteCall).toBeDefined();
       expect(deleteCall[0].input.Delete.Objects.length).toBe(2);
     });
@@ -237,49 +256,69 @@ describe("S3Provider", () => {
       const p1 = "backups/2026-01-01T00-00-00-000Z/";
       const p2 = "backups/2026-01-02T00-00-00-000Z/";
       const p3 = "backups/2026-01-03T00-00-00-000Z/";
-      
+
       mockSend.mockImplementation((command: any) => {
         if (command instanceof ListObjectsV2Command) {
           if (command.input.Delimiter === "/") {
-            return Promise.resolve({ CommonPrefixes: [{ Prefix: p1 }, { Prefix: p2 }, { Prefix: p3 }] });
+            return Promise.resolve({
+              CommonPrefixes: [{ Prefix: p1 }, { Prefix: p2 }, { Prefix: p3 }],
+            });
           }
-          return Promise.resolve({ Contents: [{ Key: `${command.input.Prefix}file1` }] });
+          return Promise.resolve({
+            Contents: [{ Key: `${command.input.Prefix}file1` }],
+          });
         }
         return Promise.resolve({});
       });
 
-      // We only want to keep the latest 2 backups. 
+      // We only want to keep the latest 2 backups.
       // Current active run is ignored. p1, p2, p3 are existing.
       const res = await provider.prune({ strategy: "count", maxCount: 2 });
-      
+
       expect(res.deletedCount).toBe(1);
       expect(res.deletedPaths).toContain(`s3://test-bucket/${p1}`);
     });
-    
+
     it("should implement 'both' strategy correctly", async () => {
       const oldDate = new Date();
       oldDate.setDate(oldDate.getDate() - 10);
       const pOld = `backups/${oldDate.toISOString().replace(/[:.]/g, "-")}/`;
-      
-      const d1 = new Date(); d1.setDate(d1.getDate() - 4);
+
+      const d1 = new Date();
+      d1.setDate(d1.getDate() - 4);
       const p1 = `backups/${d1.toISOString().replace(/[:.]/g, "-")}/`;
-      const d2 = new Date(); d2.setDate(d2.getDate() - 3);
+      const d2 = new Date();
+      d2.setDate(d2.getDate() - 3);
       const p2 = `backups/${d2.toISOString().replace(/[:.]/g, "-")}/`;
-      const d3 = new Date(); d3.setDate(d3.getDate() - 2);
+      const d3 = new Date();
+      d3.setDate(d3.getDate() - 2);
       const p3 = `backups/${d3.toISOString().replace(/[:.]/g, "-")}/`;
-      
+
       mockSend.mockImplementation((command: any) => {
         if (command instanceof ListObjectsV2Command) {
           if (command.input.Delimiter === "/") {
-            return Promise.resolve({ CommonPrefixes: [{ Prefix: pOld }, { Prefix: p1 }, { Prefix: p2 }, { Prefix: p3 }] });
+            return Promise.resolve({
+              CommonPrefixes: [
+                { Prefix: pOld },
+                { Prefix: p1 },
+                { Prefix: p2 },
+                { Prefix: p3 },
+              ],
+            });
           }
-          return Promise.resolve({ Contents: [{ Key: `${command.input.Prefix}file1` }] });
+          return Promise.resolve({
+            Contents: [{ Key: `${command.input.Prefix}file1` }],
+          });
         }
         return Promise.resolve({});
       });
 
-      const res = await provider.prune({ strategy: "both", maxCount: 2, maxDays: 5 });
-      
+      const res = await provider.prune({
+        strategy: "both",
+        maxCount: 2,
+        maxDays: 5,
+      });
+
       // Should delete pOld (age) and p1 (excess count)
       expect(res.deletedCount).toBe(2);
       expect(res.deletedPaths).toContain(`s3://test-bucket/${pOld}`);

@@ -5,13 +5,7 @@ import {
   MSAF_MAGIC,
   MSAF_VERSION,
 } from "../../../src/providers/ArchiveProvider";
-import {
-  CHUNK_TYPE_BSON,
-  CHUNK_TYPE_EOF,
-  CHUNK_TYPE_META,
-  MultiplexWriteStream,
-} from "../../../src/streams/MultiplexWriteStream";
-import type { StorageProvider } from "../../../src/providers/StorageProvider";
+import { CHUNK_TYPE_EOF } from "../../../src/streams/MultiplexWriteStream";
 
 describe("ArchiveProvider", () => {
   let mockDownstream: any;
@@ -21,7 +15,7 @@ describe("ArchiveProvider", () => {
     vi.clearAllMocks();
 
     mockStream = new Writable({
-      write(chunk, encoding, callback) {
+      write(_chunk, _encoding, callback) {
         callback();
       },
     });
@@ -38,14 +32,16 @@ describe("ArchiveProvider", () => {
   });
 
   it("initializes correctly: calls downstream and writes header", async () => {
-    mockStream.write = vi.fn().mockImplementation((chunk, cb) => cb());
+    mockStream.write = vi.fn().mockImplementation((_chunk, cb) => cb());
 
     const provider = new ArchiveProvider(mockDownstream, "my-backup.msaf");
 
     await provider.initialize(5000);
 
     expect(mockDownstream.initialize).toHaveBeenCalledWith(5000);
-    expect(mockDownstream.createArchiveWriteStream).toHaveBeenCalledWith("my-backup.msaf");
+    expect(mockDownstream.createArchiveWriteStream).toHaveBeenCalledWith(
+      "my-backup.msaf",
+    );
 
     const expectedHeader = Buffer.concat([MSAF_MAGIC, MSAF_VERSION]);
     expect(mockStream.write).toHaveBeenCalledWith(
@@ -66,7 +62,7 @@ describe("ArchiveProvider", () => {
   it("fails if global header write fails", async () => {
     mockStream.write = vi
       .fn()
-      .mockImplementation((chunk, cb) => cb(new Error("write-failed")));
+      .mockImplementation((_chunk, cb) => cb(new Error("write-failed")));
 
     const provider = new ArchiveProvider(mockDownstream);
 
@@ -108,7 +104,7 @@ describe("ArchiveProvider", () => {
   });
 
   it("finalizes correctly: writes EOF, ends stream, calls downstream finalize", async () => {
-    mockStream.end = vi.fn().mockImplementation((chunk, cb) => cb());
+    mockStream.end = vi.fn().mockImplementation((_chunk, cb) => cb());
 
     const provider = new ArchiveProvider(mockDownstream);
     await provider.initialize();

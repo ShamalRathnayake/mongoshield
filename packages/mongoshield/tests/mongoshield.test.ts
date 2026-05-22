@@ -3,10 +3,10 @@ import { MongoShield, VERSION } from "../src/index";
 
 describe("mongoshield wrapper package", () => {
   const mockStorage = {
-    initialize: async () => { },
-    createBsonWriteStream: async () => ({} as any),
-    createMetadataWriteStream: async () => ({} as any),
-    finalize: async () => { },
+    initialize: async () => {},
+    createBsonWriteStream: async () => ({}) as any,
+    createMetadataWriteStream: async () => ({}) as any,
+    finalize: async () => {},
     prune: async () => ({ deletedCount: 0, deletedPaths: [] }),
     on: () => mockStorage as any,
   };
@@ -17,20 +17,28 @@ describe("mongoshield wrapper package", () => {
         config: {
           connection: { host: "localhost", port: 27017 },
           target: { dbName: "test" },
-          output: { outPath: "dump", gzip: false, numParallelCollections: 4, oplog: false }
+          output: {
+            outPath: "dump",
+            gzip: false,
+            numParallelCollections: 4,
+            oplog: false,
+          },
         },
-        storage: mockStorage as any
+        storage: mockStorage as any,
       });
       expect(shield).toBeDefined();
       expect(shield).toBeInstanceOf(MongoShield);
     });
 
     it("should throw an error with invalid configuration", () => {
-      expect(() => new MongoShield({
-        // @ts-ignore
-        config: { connection: { host: 123 } },
-        storage: mockStorage as any
-      })).toThrow("MongoShield Configuration Error");
+      expect(
+        () =>
+          new MongoShield({
+            // @ts-expect-error
+            config: { connection: { host: 123 } },
+            storage: mockStorage as any,
+          }),
+      ).toThrow("MongoShield Configuration Error");
     });
   });
 

@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { BackupScheduler } from "../src/BackupScheduler";
-import type { BackupConfig, StorageProvider } from "@mongoshield/core";
-import { BackupEngine } from "@mongoshield/core";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { BackupConfig, StorageProvider } from "@mongoshield/core";
+import { BackupEngine } from "@mongoshield/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BackupScheduler } from "../src/BackupScheduler";
 
 // Mock BackupEngine
 vi.mock("@mongoshield/core", async (importOriginal) => {
@@ -19,8 +19,17 @@ describe("BackupScheduler", () => {
 
   const mockConfig: BackupConfig = {
     connection: { host: "localhost", port: 27017 },
-    target: { dbName: "test", viewsAsCollections: false, dumpDbUsersAndRoles: false },
-    output: { outPath: "/tmp", gzip: false, numParallelCollections: 1, oplog: false },
+    target: {
+      dbName: "test",
+      viewsAsCollections: false,
+      dumpDbUsersAndRoles: false,
+    },
+    output: {
+      outPath: "/tmp",
+      gzip: false,
+      numParallelCollections: 1,
+      oplog: false,
+    },
   };
 
   const mockStorage: StorageProvider = {
@@ -34,23 +43,31 @@ describe("BackupScheduler", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    try { await fs.unlink(logPath); } catch {}
+    try {
+      await fs.unlink(logPath);
+    } catch {}
   });
 
   afterEach(async () => {
-    try { await fs.unlink(logPath); } catch {}
+    try {
+      await fs.unlink(logPath);
+    } catch {}
   });
 
   it("should prevent overlap if preventOverlap is true", async () => {
-    const scheduler = new BackupScheduler(mockConfig, {
-      cron: "* * * * * *",
-      preventOverlap: true,
-      auditLogPath: logPath,
-    }, mockStorage);
+    const scheduler = new BackupScheduler(
+      mockConfig,
+      {
+        cron: "* * * * * *",
+        preventOverlap: true,
+        auditLogPath: logPath,
+      },
+      mockStorage,
+    );
 
     // Force state to running
     (scheduler as any).state = "running";
-    
+
     let overlapEmitted = false;
     scheduler.on("scheduler:overlapPrevented", () => {
       overlapEmitted = true;
@@ -61,22 +78,27 @@ describe("BackupScheduler", () => {
   });
 
   it("should retry on failure and apply exponential backoff", async () => {
-    const scheduler = new BackupScheduler(mockConfig, {
-      cron: "* * * * * *",
-      retries: 2,
-      retryDelayMs: 10, // Fast delay for testing
-      backoffFactor: 2,
-      auditLogPath: logPath,
-    }, mockStorage);
+    const scheduler = new BackupScheduler(
+      mockConfig,
+      {
+        cron: "* * * * * *",
+        retries: 2,
+        retryDelayMs: 10, // Fast delay for testing
+        backoffFactor: 2,
+        auditLogPath: logPath,
+      },
+      mockStorage,
+    );
 
-    const mockRun = vi.fn()
+    const mockRun = vi
+      .fn()
       .mockRejectedValueOnce(new Error("Network error 1"))
       .mockRejectedValueOnce(new Error("Network error 2"))
       .mockResolvedValueOnce(undefined);
 
-    vi.mocked(BackupEngine).mockImplementation(function() {
-      return { run: mockRun } as any;
-    } as any);
+    vi.mocked(BackupEngine).mockImplementation(
+      (() => ({ run: mockRun }) as any) as any,
+    );
 
     await (scheduler as any).executeJob();
 
@@ -88,18 +110,22 @@ describe("BackupScheduler", () => {
   });
 
   it("should fail gracefully if all retries are exhausted", async () => {
-    const scheduler = new BackupScheduler(mockConfig, {
-      cron: "* * * * * *",
-      retries: 1,
-      retryDelayMs: 10,
-      auditLogPath: logPath,
-    }, mockStorage);
+    const scheduler = new BackupScheduler(
+      mockConfig,
+      {
+        cron: "* * * * * *",
+        retries: 1,
+        retryDelayMs: 10,
+        auditLogPath: logPath,
+      },
+      mockStorage,
+    );
 
     const mockRun = vi.fn().mockRejectedValue(new Error("Fatal error"));
 
-    vi.mocked(BackupEngine).mockImplementation(function() {
-      return { run: mockRun } as any;
-    } as any);
+    vi.mocked(BackupEngine).mockImplementation(
+      (() => ({ run: mockRun }) as any) as any,
+    );
 
     let failedEmitted = false;
     scheduler.on("backup:failed", () => {
@@ -118,12 +144,16 @@ describe("BackupScheduler", () => {
   });
 
   it("should enforce timeouts using AbortSignal", async () => {
-    const scheduler = new BackupScheduler(mockConfig, {
-      cron: "* * * * * *",
-      timeoutMs: 50, // Very short timeout
-      retries: 0, // No retries so it fails immediately
-      auditLogPath: logPath,
-    }, mockStorage);
+    const scheduler = new BackupScheduler(
+      mockConfig,
+      {
+        cron: "* * * * * *",
+        timeoutMs: 50, // Very short timeout
+        retries: 0, // No retries so it fails immediately
+        auditLogPath: logPath,
+      },
+      mockStorage,
+    );
 
     const mockRun = vi.fn().mockImplementation(async (signal: AbortSignal) => {
       return new Promise<void>((resolve, reject) => {
@@ -135,9 +165,9 @@ describe("BackupScheduler", () => {
       });
     });
 
-    vi.mocked(BackupEngine).mockImplementation(function() {
-      return { run: mockRun } as any;
-    } as any);
+    vi.mocked(BackupEngine).mockImplementation(
+      (() => ({ run: mockRun }) as any) as any,
+    );
 
     await (scheduler as any).executeJob();
 

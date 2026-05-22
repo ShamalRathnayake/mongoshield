@@ -6,7 +6,11 @@ import {
   MultiplexWriteStream,
 } from "../streams/MultiplexWriteStream";
 import { AbstractStorageProvider } from "./AbstractStorageProvider";
-import type { PruningPolicy, PruningResult, StorageProvider } from "./StorageProvider";
+import type {
+  PruningPolicy,
+  PruningResult,
+  StorageProvider,
+} from "./StorageProvider";
 
 export const MSAF_MAGIC = Buffer.from("MSHLDARC", "utf8");
 export const MSAF_VERSION = Buffer.from([0x01]);
@@ -33,9 +37,9 @@ export class ArchiveProvider extends AbstractStorageProvider {
     }
 
     // Request the single archive stream from the downstream provider
-    this.archiveStream = await (this.downstream as any).createArchiveWriteStream(
-      this.archiveFilename,
-    );
+    this.archiveStream = await (
+      this.downstream as any
+    ).createArchiveWriteStream(this.archiveFilename);
 
     // Write the Global Header (Magic Bytes + Version)
     const headerBuffer = Buffer.concat([MSAF_MAGIC, MSAF_VERSION]);
@@ -84,8 +88,8 @@ export class ArchiveProvider extends AbstractStorageProvider {
     eofHeader.writeUInt16LE(0, 1); // Name length (0)
     eofHeader.writeUInt32LE(0, 3); // Payload length (0)
 
-    await new Promise<void>((resolve, reject) => {
-      this.archiveStream!.end(eofHeader, () => {
+    await new Promise<void>((resolve, _reject) => {
+      this.archiveStream?.end(eofHeader, () => {
         resolve();
       });
     });

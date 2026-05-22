@@ -91,7 +91,7 @@ export class BackupEngine {
             }
           }
         }
-      } catch (err) {
+      } catch (_err) {
         // Fallback to 0 if stats fail (e.g., due to missing clusterMonitor role)
         expectedSizeInBytes = 0;
       }
@@ -123,7 +123,11 @@ export class BackupEngine {
     }
   }
 
-  private async backupDatabase(db: Db, dbName: string, signal?: AbortSignal): Promise<void> {
+  private async backupDatabase(
+    db: Db,
+    dbName: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const collections = await this.getTargetCollections(db);
     const concurrencyLimit = this.config.output.numParallelCollections || 4;
 
@@ -143,7 +147,7 @@ export class BackupEngine {
     dbName: string,
     db: Db,
     collectionName: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ) {
     const col = db.collection(collectionName);
 
@@ -176,18 +180,18 @@ export class BackupEngine {
       streams.push(createGzip());
     }
     streams.push(metaStream);
-    
+
     // Create a pipeline from a string/buffer is possible by using a readable or stream.Readable.from
     // But since we just pipe directly, we can manually handle abort signal or use pipeline:
     const { Readable } = require("node:stream");
     const readStream = Readable.from([payload]);
-    
+
     streams.unshift(readStream);
-    
+
     if (signal) {
       streams.push({ signal });
     }
-    
+
     // @ts-expect-error
     await pipeline(...streams);
   }
@@ -196,7 +200,7 @@ export class BackupEngine {
     dbName: string,
     db: Db,
     collectionName: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ) {
     const col = db.collection(collectionName);
 

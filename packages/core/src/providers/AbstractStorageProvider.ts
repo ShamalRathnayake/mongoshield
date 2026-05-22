@@ -46,13 +46,13 @@ export abstract class AbstractStorageProvider
     return this.wrapWithTelemetry(stream);
   }
 
-  public async createArchiveWriteStream(
-    filename: string,
-  ): Promise<Writable> {
+  public async createArchiveWriteStream(filename: string): Promise<Writable> {
     this.sanitizePath(filename);
 
     if (!this._createArchiveWriteStream) {
-      throw new Error("This StorageProvider does not support monolithic archive streams.");
+      throw new Error(
+        "This StorageProvider does not support monolithic archive streams.",
+      );
     }
 
     const stream = await this._createArchiveWriteStream(filename);

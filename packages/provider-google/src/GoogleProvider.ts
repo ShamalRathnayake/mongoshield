@@ -1,5 +1,9 @@
 import { PassThrough, type Writable } from "node:stream";
-import { Storage, type StorageOptions, type Bucket } from "@google-cloud/storage";
+import {
+  type Bucket,
+  Storage,
+  type StorageOptions,
+} from "@google-cloud/storage";
 import {
   AbstractStorageProvider,
   type PruningPolicy,
@@ -23,7 +27,7 @@ export class GoogleProvider extends AbstractStorageProvider {
   constructor(options: GoogleProviderOptions) {
     super();
     this.compress = options.compress ?? false;
-    
+
     // Normalize base prefix
     this.basePrefix = options.prefix || "backups/";
     if (this.basePrefix && !this.basePrefix.endsWith("/")) {
@@ -36,7 +40,9 @@ export class GoogleProvider extends AbstractStorageProvider {
     this.currentRunPrefix = "";
   }
 
-  protected override async _initialize(expectedSizeInBytes?: number): Promise<void> {
+  protected override async _initialize(
+    _expectedSizeInBytes?: number,
+  ): Promise<void> {
     try {
       const [exists] = await this.bucket.exists();
       if (!exists) {
@@ -46,8 +52,15 @@ export class GoogleProvider extends AbstractStorageProvider {
       if (err.message?.includes("does not exist")) {
         throw err;
       }
-      if (err.code === 403 || err.message?.includes("Forbidden") || err.message?.includes("access is denied") || err.message?.includes("does not have storage.buckets.get access")) {
-        throw new Error(`Access denied to GCS bucket '${this.bucket.name}'. Check your Service Account credentials and IAM permissions.`);
+      if (
+        err.code === 403 ||
+        err.message?.includes("Forbidden") ||
+        err.message?.includes("access is denied") ||
+        err.message?.includes("does not have storage.buckets.get access")
+      ) {
+        throw new Error(
+          `Access denied to GCS bucket '${this.bucket.name}'. Check your Service Account credentials and IAM permissions.`,
+        );
       }
       throw err;
     }
@@ -72,35 +85,43 @@ export class GoogleProvider extends AbstractStorageProvider {
     return writeStream;
   }
 
-  protected override async _createBsonWriteStream(dbName: string, collectionName: string): Promise<Writable> {
+  protected override async _createBsonWriteStream(
+    dbName: string,
+    collectionName: string,
+  ): Promise<Writable> {
     let key = `${this.currentRunPrefix}${dbName}/${collectionName}.bson`;
     if (this.compress) key += ".gz";
 
     const passThrough = new PassThrough();
     const gcsStream = this.createGcsWriteStream(key);
     passThrough.pipe(gcsStream);
-    
+
     return passThrough;
   }
 
-  protected override async _createMetadataWriteStream(dbName: string, collectionName: string): Promise<Writable> {
+  protected override async _createMetadataWriteStream(
+    dbName: string,
+    collectionName: string,
+  ): Promise<Writable> {
     const key = `${this.currentRunPrefix}${dbName}/${collectionName}.metadata.json`;
-    
+
     const passThrough = new PassThrough();
     const gcsStream = this.createGcsWriteStream(key);
     passThrough.pipe(gcsStream);
-    
+
     return passThrough;
   }
 
-  protected override async _createArchiveWriteStream(archiveName: string): Promise<Writable> {
+  protected override async _createArchiveWriteStream(
+    archiveName: string,
+  ): Promise<Writable> {
     let key = `${this.currentRunPrefix}${archiveName}`;
     if (this.compress) key += ".gz";
 
     const passThrough = new PassThrough();
     const gcsStream = this.createGcsWriteStream(key);
     passThrough.pipe(gcsStream);
-    
+
     return passThrough;
   }
 
@@ -108,7 +129,9 @@ export class GoogleProvider extends AbstractStorageProvider {
     await Promise.all(this.activeUploads);
   }
 
-  protected override async _prune(policy: PruningPolicy): Promise<PruningResult> {
+  protected override async _prune(
+    policy: PruningPolicy,
+  ): Promise<PruningResult> {
     const result: PruningResult = { deletedCount: 0, deletedPaths: [] };
     if (!policy.maxCount && !policy.maxDays) {
       return result;
@@ -126,11 +149,13 @@ export class GoogleProvider extends AbstractStorageProvider {
     const runs: { prefix: string; date: Date }[] = [];
 
     for (const prefix of prefixes) {
-      const match = prefix.match(/(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
+      const match = prefix.match(
+        /(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/,
+      );
       if (match) {
-        const isoFormat = match[1].substring(0, 13) + ":" + match[1].substring(14, 16) + ":" + match[1].substring(17, 19) + "." + match[1].substring(20, 23) + "Z";
+        const isoFormat = `${match[1].substring(0, 13)}:${match[1].substring(14, 16)}:${match[1].substring(17, 19)}.${match[1].substring(20, 23)}Z`;
         const date = new Date(isoFormat);
-        if (!isNaN(date.getTime())) {
+        if (!Number.isNaN(date.getTime())) {
           runs.push({ prefix, date });
         }
       }
@@ -162,14 +187,16 @@ export class GoogleProvider extends AbstractStorageProvider {
     // Or we could run them in parallel
     const deletePromises = [];
     for (const prefixToDelete of runsToDelete) {
-      const [filesToDelete] = await this.bucket.getFiles({ prefix: prefixToDelete });
+      const [filesToDelete] = await this.bucket.getFiles({
+        prefix: prefixToDelete,
+      });
       for (const file of filesToDelete) {
         result.deletedPaths.push(file.name);
         result.deletedCount++;
         deletePromises.push(file.delete().catch(() => {})); // Ignore individual delete errors if they were already deleted
       }
     }
-    
+
     await Promise.all(deletePromises);
 
     return result;

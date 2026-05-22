@@ -52,7 +52,9 @@ export class AuditLogger {
     }
   }
 
-  public async appendRecord(record: Omit<AuditRecord, "id" | "timestamp">): Promise<AuditRecord> {
+  public async appendRecord(
+    record: Omit<AuditRecord, "id" | "timestamp">,
+  ): Promise<AuditRecord> {
     const history = await this.getHistory();
 
     const newRecord: AuditRecord = {

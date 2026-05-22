@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AzureProvider } from "../src/AzureProvider";
-import { BlobServiceClient } from "@azure/storage-blob";
 
 const mockUploadStream = vi.fn();
 const mockDelete = vi.fn();
@@ -21,13 +20,14 @@ vi.mock("@azure/storage-blob", () => {
           listBlobsFlat: mockListBlobsFlat,
         })),
       })),
-    }
+    },
   };
 });
 
 describe("AzureProvider", () => {
   const defaultOptions = {
-    connectionString: "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=test;EndpointSuffix=core.windows.net",
+    connectionString:
+      "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=test;EndpointSuffix=core.windows.net",
     container: "test-container",
   };
 
@@ -49,7 +49,7 @@ describe("AzureProvider", () => {
   describe("Initialization", () => {
     it("should initialize and verify container existence", async () => {
       const provider = new AzureProvider(defaultOptions);
-      // @ts-ignore - calling protected method for testing
+      // @ts-expect-error - calling protected method for testing
       await provider._initialize();
 
       expect(mockExists).toHaveBeenCalled();
@@ -58,8 +58,8 @@ describe("AzureProvider", () => {
     it("should throw error if container does not exist", async () => {
       mockExists.mockResolvedValueOnce(false);
       const provider = new AzureProvider(defaultOptions);
-      
-      // @ts-ignore
+
+      // @ts-expect-error
       await expect(provider._initialize()).rejects.toThrow(/does not exist/);
     });
 
@@ -67,18 +67,20 @@ describe("AzureProvider", () => {
       const authError = new Error("AuthorizationFailure");
       (authError as any).statusCode = 403;
       mockExists.mockRejectedValueOnce(authError);
-      
+
       const provider = new AzureProvider(defaultOptions);
-      // @ts-ignore
+      // @ts-expect-error
       await expect(provider._initialize()).rejects.toThrow(/Access denied/);
     });
 
     it("should generate a timestamped prefix during initialization", async () => {
       const provider = new AzureProvider(defaultOptions);
-      // @ts-ignore
+      // @ts-expect-error
       await provider._initialize();
-      // @ts-ignore
-      expect(provider.currentRunPrefix).toMatch(/^backups\/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\/$/);
+      // @ts-expect-error
+      expect(provider.currentRunPrefix).toMatch(
+        /^backups\/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\/$/,
+      );
     });
   });
 
@@ -87,44 +89,56 @@ describe("AzureProvider", () => {
 
     beforeEach(async () => {
       provider = new AzureProvider(defaultOptions);
-      // @ts-ignore
+      // @ts-expect-error
       await provider._initialize();
     });
 
     it("should create a BSON write stream", async () => {
-      // @ts-ignore
+      // @ts-expect-error
       const stream = await provider._createBsonWriteStream("db1", "col1");
       expect(stream).toBeInstanceOf(PassThrough);
-      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(expect.stringContaining("db1/col1.bson"));
+      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(
+        expect.stringContaining("db1/col1.bson"),
+      );
       expect(mockUploadStream).toHaveBeenCalledWith(stream);
     });
 
     it("should create a Metadata write stream", async () => {
-      // @ts-ignore
+      // @ts-expect-error
       const stream = await provider._createMetadataWriteStream("db1", "col1");
       expect(stream).toBeInstanceOf(PassThrough);
-      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(expect.stringContaining("db1/col1.metadata.json"));
+      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(
+        expect.stringContaining("db1/col1.metadata.json"),
+      );
       expect(mockUploadStream).toHaveBeenCalledWith(stream);
     });
 
     it("should create an Archive write stream", async () => {
-      // @ts-ignore
+      // @ts-expect-error
       const stream = await provider._createArchiveWriteStream("archive.tar");
       expect(stream).toBeInstanceOf(PassThrough);
-      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(expect.stringContaining("archive.tar"));
+      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(
+        expect.stringContaining("archive.tar"),
+      );
       expect(mockUploadStream).toHaveBeenCalledWith(stream);
     });
 
     it("should apply gzip compression if compress is true", async () => {
-      const gzipProvider = new AzureProvider({ ...defaultOptions, compress: true });
-      // @ts-ignore
+      const gzipProvider = new AzureProvider({
+        ...defaultOptions,
+        compress: true,
+      });
+      // @ts-expect-error
       await gzipProvider._initialize();
-      
-      // @ts-ignore
-      const stream = await gzipProvider._createArchiveWriteStream("archive.tar");
-      
+
+      // @ts-expect-error
+      const stream =
+        await gzipProvider._createArchiveWriteStream("archive.tar");
+
       // Ensure the key has .gz appended
-      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(expect.stringContaining("archive.tar.gz"));
+      expect(mockGetBlockBlobClient).toHaveBeenCalledWith(
+        expect.stringContaining("archive.tar.gz"),
+      );
       // The returned stream should be a Gzip stream, which is a Transform stream, testing duck typing
       expect(typeof stream.pipe).toBe("function");
     });
@@ -133,7 +147,7 @@ describe("AzureProvider", () => {
   describe("Finalization", () => {
     it("should await all active uploads in _finalize", async () => {
       const provider = new AzureProvider(defaultOptions);
-      // @ts-ignore
+      // @ts-expect-error
       await provider._initialize();
 
       // Mock a pending upload promise
@@ -143,12 +157,12 @@ describe("AzureProvider", () => {
       });
       mockUploadStream.mockReturnValueOnce(uploadPromise);
 
-      // @ts-ignore
+      // @ts-expect-error
       await provider._createBsonWriteStream("test", "test");
 
       // _finalize should block until the promise resolves
       let finalized = false;
-      // @ts-ignore
+      // @ts-expect-error
       provider._finalize().then(() => {
         finalized = true;
       });
@@ -158,8 +172,8 @@ describe("AzureProvider", () => {
       expect(finalized).toBe(false);
 
       // Resolve the upload
-      resolveUpload!();
-      
+      resolveUpload?.();
+
       await new Promise((res) => setTimeout(res, 0));
       expect(finalized).toBe(true);
     });
@@ -170,7 +184,7 @@ describe("AzureProvider", () => {
 
     beforeEach(async () => {
       provider = new AzureProvider(defaultOptions);
-      // @ts-ignore
+      // @ts-expect-error
       await provider._initialize();
     });
 
@@ -195,18 +209,22 @@ describe("AzureProvider", () => {
       const run1 = "backups/2020-01-01T00-00-00-000Z/";
       const run2 = "backups/2021-01-01T00-00-00-000Z/"; // Newer
       const run3 = "backups/2022-01-01T00-00-00-000Z/"; // Newest
-      
-      mockListBlobsByHierarchy.mockImplementation(createMockHierarchicalIterator([run1, run2, run3, currentPrefix]));
-      mockListBlobsFlat.mockImplementation(createMockFlatIterator(["file1.bson", "file2.bson"]));
 
-      // @ts-ignore
+      mockListBlobsByHierarchy.mockImplementation(
+        createMockHierarchicalIterator([run1, run2, run3, currentPrefix]),
+      );
+      mockListBlobsFlat.mockImplementation(
+        createMockFlatIterator(["file1.bson", "file2.bson"]),
+      );
+
+      // @ts-expect-error
       const result = await provider._prune({ strategy: "count", maxCount: 1 });
 
       // Run3 is the newest, so run1 and run2 should be deleted.
       // currentRunPrefix should be ignored.
       // 2 prefixes * 2 files = 4 deletions.
       expect(result.deletedCount).toBe(4);
-      
+
       // Called flat for run1 and run2
       expect(mockListBlobsFlat).toHaveBeenCalledTimes(2);
       expect(mockDelete).toHaveBeenCalledTimes(4);
@@ -222,11 +240,15 @@ describe("AzureProvider", () => {
 
       const runYesterday = `backups/${yesterdayStr}/`;
       const runOld = `backups/${oldStr}/`;
-      
-      mockListBlobsByHierarchy.mockImplementation(createMockHierarchicalIterator([runYesterday, runOld]));
-      mockListBlobsFlat.mockImplementation(createMockFlatIterator(["file1.bson"]));
 
-      // @ts-ignore
+      mockListBlobsByHierarchy.mockImplementation(
+        createMockHierarchicalIterator([runYesterday, runOld]),
+      );
+      mockListBlobsFlat.mockImplementation(
+        createMockFlatIterator(["file1.bson"]),
+      );
+
+      // @ts-expect-error
       const result = await provider._prune({ strategy: "age", maxDays: 5 });
 
       // Only runOld should be deleted
@@ -236,8 +258,10 @@ describe("AzureProvider", () => {
     });
 
     it("should return early if no runs are found", async () => {
-      mockListBlobsByHierarchy.mockImplementation(createMockHierarchicalIterator([]));
-      // @ts-ignore
+      mockListBlobsByHierarchy.mockImplementation(
+        createMockHierarchicalIterator([]),
+      );
+      // @ts-expect-error
       const result = await provider._prune({ strategy: "count", maxCount: 1 });
       expect(result.deletedCount).toBe(0);
       expect(mockDelete).not.toHaveBeenCalled();

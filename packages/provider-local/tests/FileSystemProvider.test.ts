@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -77,13 +77,13 @@ describe("FileSystemProvider", () => {
 
       const stream = await provider.createArchiveWriteStream("backup.msaf");
       stream.write("data");
-      
+
       await new Promise((resolve) => setTimeout(resolve, 50));
-      
+
       const runDir = (provider as any).currentRunDir;
       const { readdir } = await import("node:fs/promises");
       const files = await readdir(runDir);
-      
+
       // Because compress=true and the name doesn't end in .gz, it should append .gz
       expect(files).toContain("backup.msaf.gz");
       stream.end();
