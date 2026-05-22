@@ -17,8 +17,8 @@ export abstract class AbstractStorageProvider
   extends EventEmitter
   implements StorageProvider
 {
-  public async initialize(): Promise<void> {
-    await this._initialize();
+  public async initialize(expectedSizeInBytes?: number): Promise<void> {
+    await this._initialize(expectedSizeInBytes);
   }
 
   public async createBsonWriteStream(
@@ -100,7 +100,7 @@ export abstract class AbstractStorageProvider
   /**
    * Child classes must implement these specific methods instead of the public interface.
    */
-  protected abstract _initialize(): Promise<void>;
+  protected abstract _initialize(expectedSizeInBytes?: number): Promise<void>;
   protected abstract _createBsonWriteStream(
     dbName: string,
     collectionName: string,

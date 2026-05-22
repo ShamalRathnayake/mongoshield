@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -209,7 +209,10 @@ describe("FileSystemProvider", () => {
 
     it("should handle large scale pruning (150+ directories)", async () => {
       for (let i = 1; i <= 150; i++) {
-        const name = `2026-01-01_${i.toString().padStart(3, "0")}-00-00`;
+        // Generate valid looking timestamps: 2026-01-01_00-00-00 ... 2026-01-07_06-00-00
+        const day = String(Math.floor(i / 24) + 1).padStart(2, "0");
+        const hour = String(i % 24).padStart(2, "0");
+        const name = `2026-01-${day}_${hour}-00-00`;
         await mkdir(join(baseDir, name), { recursive: true });
       }
 

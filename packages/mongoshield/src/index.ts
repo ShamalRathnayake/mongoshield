@@ -9,6 +9,6 @@
 export * from "@mongoshield/core";
 // Logger
 export { logger } from "./logger";
-export type { MongoShieldConfig } from "./MongoShield";
+export type { MongoShieldOptions } from "./MongoShield";
 // High-level wrapper
-export { MongoShield, MongoShieldConfigSchema } from "./MongoShield";
+export { MongoShield } from "./MongoShield";

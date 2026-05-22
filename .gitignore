@@ -7,3 +7,4 @@ coverage/
 mongoshield_*
 setup_roadmap.md
 *.txt
+manual-test/*

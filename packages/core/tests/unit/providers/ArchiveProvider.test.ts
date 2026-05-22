@@ -7,12 +7,7 @@ import {
   MSAF_MAGIC,
   MSAF_VERSION,
 } from "../../../src/providers/ArchiveProvider";
-import {
-  CHUNK_TYPE_BSON,
-  CHUNK_TYPE_EOF,
-  CHUNK_TYPE_META,
-  MultiplexWriteStream,
-} from "../../../src/streams/MultiplexWriteStream";
+import { CHUNK_TYPE_EOF } from "../../../src/streams/MultiplexWriteStream";
 
 vi.mock("node:fs");
 vi.mock("node:fs/promises");
@@ -26,12 +21,12 @@ describe("ArchiveProvider", () => {
 
   it("initializes correctly: mkdir, createWriteStream, write header", async () => {
     const mockStream = new Writable({
-      write(chunk, encoding, callback) {
+      write(_chunk, _encoding, callback) {
         callback();
       },
     });
     // @ts-expect-error
-    mockStream.write = vi.fn().mockImplementation((chunk, cb) => cb());
+    mockStream.write = vi.fn().mockImplementation((_chunk, cb) => cb());
 
     (createWriteStream as any).mockReturnValue(mockStream);
     (mkdir as any).mockResolvedValue(undefined);
@@ -72,7 +67,7 @@ describe("ArchiveProvider", () => {
     const mockStream = new Writable();
     mockStream.write = vi
       .fn()
-      .mockImplementation((chunk, cb) => cb(new Error("write-failed")));
+      .mockImplementation((_chunk, cb) => cb(new Error("write-failed")));
 
     (createWriteStream as any).mockReturnValue(mockStream);
     (mkdir as any).mockResolvedValue(undefined);
@@ -96,7 +91,7 @@ describe("ArchiveProvider", () => {
 
   it("creates BSON write stream after initialization", async () => {
     const mockStream = new Writable({
-      write(c, e, cb) {
+      write(_c, _e, cb) {
         cb();
       },
     });
@@ -130,7 +125,7 @@ describe("ArchiveProvider", () => {
 
   it("creates Metadata write stream after initialization", async () => {
     const mockStream = new Writable({
-      write(c, e, cb) {
+      write(_c, _e, cb) {
         cb();
       },
     });
@@ -151,11 +146,11 @@ describe("ArchiveProvider", () => {
 
   it("finalizes correctly: writes EOF and ends stream", async () => {
     const mockStream = new Writable({
-      write(c, e, cb) {
+      write(_c, _e, cb) {
         cb();
       },
     });
-    mockStream.end = vi.fn().mockImplementation((chunk, cb) => cb());
+    mockStream.end = vi.fn().mockImplementation((_chunk, cb) => cb());
 
     (createWriteStream as any).mockReturnValue(mockStream);
     (mkdir as any).mockResolvedValue(undefined);

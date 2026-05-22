@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BackupEngine } from "../../../src/core/BackupEngine";
 import { ConnectionManager } from "../../../src/db/ConnectionManager";
 import type { StorageProvider } from "../../../src/providers/StorageProvider";
-import { BSONEncoderStream } from "../../../src/streams/BSONEncoderStream";
 import { EncryptionTransform } from "../../../src/streams/EncryptionStream";
 
 // Mock dependencies
@@ -36,6 +35,16 @@ describe("BackupEngine", () => {
     } as any;
 
     mockDb = {
+      admin: vi.fn().mockReturnValue({
+        listDatabases: vi.fn().mockResolvedValue({
+          databases: [
+            { name: "admin", sizeOnDisk: 100 },
+            { name: "testdb", sizeOnDisk: 1000 },
+            { name: "otherdb", sizeOnDisk: 2000 },
+          ],
+        }),
+      }),
+      stats: vi.fn().mockResolvedValue({ dataSize: 500 }),
       listCollections: vi.fn().mockReturnValue({
         toArray: vi.fn().mockResolvedValue([
           { name: "users", type: "collection" },
@@ -54,7 +63,7 @@ describe("BackupEngine", () => {
     };
 
     mockClient = {
-      db: vi.fn().mockReturnValue(mockDb),
+      db: vi.fn().mockImplementation((_name?: string) => mockDb),
     };
 
     (ConnectionManager.prototype.connect as any).mockResolvedValue(mockClient);
@@ -109,12 +118,13 @@ describe("BackupEngine", () => {
   });
 
   describe("run", () => {
-    it("throws if dbName is missing", async () => {
+    it("executes full cluster backup when dbName is missing", async () => {
       delete config.target.dbName;
       const engine = new BackupEngine(config, mockStorage);
-      await expect(engine.run()).rejects.toThrow(
-        "dbName is currently required",
-      );
+      await engine.run();
+
+      expect(mockStorage.initialize).toHaveBeenCalledWith(3000); // 1000 + 2000, skips admin
+      expect(mockStorage.createMetadataWriteStream).toHaveBeenCalled();
     });
 
     it("executes full backup workflow", async () => {
@@ -166,20 +176,19 @@ describe("BackupEngine", () => {
       await expect(engine.run()).resolves.toBeUndefined();
     });
 
-    it("throws if dbName is missing during run", async () => {
-      config.target.dbName = undefined;
+    it("calculates expectedSizeInBytes for single DB", async () => {
+      config.target.dbName = "testdb";
       const engine = new BackupEngine(config, mockStorage);
-      await expect(engine.run()).rejects.toThrow(
-        "BackupEngine: target.dbName is currently required",
-      );
+      await engine.run();
+      expect(mockStorage.initialize).toHaveBeenCalledWith(500);
     });
 
-    it("throws if dbName is missing during run", async () => {
-      config.target.dbName = undefined;
+    it("falls back to 0 size if stats fails", async () => {
+      mockDb.stats.mockRejectedValueOnce(new Error("Unauthorized"));
+      config.target.dbName = "testdb";
       const engine = new BackupEngine(config, mockStorage);
-      await expect(engine.run()).rejects.toThrow(
-        "BackupEngine: target.dbName is currently required",
-      );
+      await engine.run();
+      expect(mockStorage.initialize).toHaveBeenCalledWith(0);
     });
 
     it("uses default concurrency if numParallelCollections is missing", async () => {

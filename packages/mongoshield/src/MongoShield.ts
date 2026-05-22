@@ -1,34 +1,64 @@
-import { z } from "zod";
+import { EventEmitter } from "node:events";
+import {
+  type BackupConfig,
+  type BackupConfigInput,
+  BackupConfigSchema,
+  BackupEngine,
+  type StorageProvider,
+} from "@mongoshield/core";
 import { logger } from "./logger";
 
-export const MongoShieldConfigSchema = z.object({
-  uri: z.string().url("Must be a valid MongoDB URI"),
-  destination: z.enum(["local", "s3", "gdrive"]).optional().default("local"),
-});
+export interface MongoShieldOptions {
+  config: BackupConfigInput;
+  storage: StorageProvider;
+}
 
-export type MongoShieldConfig = z.infer<typeof MongoShieldConfigSchema>;
+export class MongoShield extends EventEmitter {
+  private engine: BackupEngine;
 
-export class MongoShield {
-  private config: MongoShieldConfig;
+  constructor(options: MongoShieldOptions) {
+    super();
 
-  constructor(config: MongoShieldConfig) {
-    this.config = MongoShieldConfigSchema.parse(config);
-    logger.info(
-      { destination: this.config.destination },
-      "MongoShield (Alpha) initialized",
-    );
-    logger.warn(
-      "This is an alpha release of MongoShield. DO NOT use in production. Native Backup Streamer is under active development.",
-    );
+    // Validate the core configuration
+    let parsedConfig: BackupConfig;
+    try {
+      parsedConfig = BackupConfigSchema.parse(options.config);
+    } catch (err: any) {
+      logger.error({ err }, "Invalid MongoShield configuration");
+      throw new Error(`MongoShield Configuration Error: ${err.message}`);
+    }
+
+    this.engine = new BackupEngine(parsedConfig, options.storage);
+
+    // Wire up telemetry events from the storage provider
+    options.storage.on("progress", (bytesWritten: number) => {
+      this.emit("progress", bytesWritten);
+    });
+
+    options.storage.on("error", (err: Error) => {
+      this.emit("error", err);
+    });
+
+    logger.info("MongoShield instance initialized");
   }
 
+  /**
+   * Executes the backup pipeline.
+   * Emits `backup:started`, `backup:completed`, and `backup:failed` lifecycle events.
+   */
   public async backup(): Promise<void> {
-    logger.info("Starting backup process...");
-    logger.warn(
-      "Not implemented yet! This is a placeholder for the Phase 1 BackupStreamer engine.",
-    );
-    // Simulate some work
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    logger.info("Backup process completed (mock).");
+    logger.info("Starting MongoShield backup process...");
+    this.emit("backup:started");
+
+    try {
+      await this.engine.run();
+
+      logger.info("Backup process completed successfully.");
+      this.emit("backup:completed");
+    } catch (err: any) {
+      logger.error({ err }, "Backup process failed");
+      this.emit("backup:failed", err);
+      throw err;
+    }
   }
 }
