@@ -43,3 +43,5 @@ jobs:
 
       - name: Test (Vitest + Testcontainers)
         run: pnpm test
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: true
