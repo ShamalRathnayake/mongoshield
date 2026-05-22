@@ -38,7 +38,9 @@ vi.mock("@google-cloud/storage", () => {
     bucket: vi.fn(() => mockBucket),
   };
 
-  const MockStorage = vi.fn(() => mockStorage);
+  const MockStorage = vi.fn(function MockStorageConstructor() {
+    return mockStorage;
+  });
 
   return {
     Storage: MockStorage,

@@ -161,7 +161,7 @@ export class BackupScheduler extends EventEmitter {
           }
         });
 
-        const enginePromise = engine.run(this.currentAbortController!.signal);
+        const enginePromise = engine.run(this.currentAbortController?.signal);
 
         // Race between timeout and engine completion
         await Promise.race([enginePromise, timeoutPromise]);

@@ -96,9 +96,9 @@ describe("BackupScheduler", () => {
       .mockRejectedValueOnce(new Error("Network error 2"))
       .mockResolvedValueOnce(undefined);
 
-    vi.mocked(BackupEngine).mockImplementation(
-      (() => ({ run: mockRun }) as any) as any,
-    );
+    vi.mocked(BackupEngine).mockImplementation(function MockBackupEngine() {
+      return { run: mockRun } as any;
+    });
 
     await (scheduler as any).executeJob();
 
@@ -123,9 +123,9 @@ describe("BackupScheduler", () => {
 
     const mockRun = vi.fn().mockRejectedValue(new Error("Fatal error"));
 
-    vi.mocked(BackupEngine).mockImplementation(
-      (() => ({ run: mockRun }) as any) as any,
-    );
+    vi.mocked(BackupEngine).mockImplementation(function MockBackupEngine() {
+      return { run: mockRun } as any;
+    });
 
     let failedEmitted = false;
     scheduler.on("backup:failed", () => {
@@ -165,9 +165,9 @@ describe("BackupScheduler", () => {
       });
     });
 
-    vi.mocked(BackupEngine).mockImplementation(
-      (() => ({ run: mockRun }) as any) as any,
-    );
+    vi.mocked(BackupEngine).mockImplementation(function MockBackupEngine() {
+      return { run: mockRun } as any;
+    });
 
     await (scheduler as any).executeJob();
 
