@@ -123,8 +123,8 @@ export class SftpProvider extends AbstractStorageProvider {
 
     const uploadPromise = new Promise<void>((resolve, reject) => {
       writeStream.on("close", () => resolve());
-      writeStream.on("error", (err) => reject(err));
-      passThrough.on("error", (err) => {
+      writeStream.on("error", (err: Error) => reject(err));
+      passThrough.on("error", (err: Error) => {
         writeStream.destroy();
         reject(err);
       });
