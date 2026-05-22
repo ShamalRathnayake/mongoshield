@@ -3,6 +3,11 @@ lockfileVersion: '9.0'
 settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
+  overrides:
+    lodash: '>=4.18.0'
+    tmp: '>=0.2.4'
+    uuid: '>=14.0.0'
+    vite: 7.3.2
 
 importers:
 
