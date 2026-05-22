@@ -46,6 +46,19 @@ export abstract class AbstractStorageProvider
     return this.wrapWithTelemetry(stream);
   }
 
+  public async createArchiveWriteStream(filename: string): Promise<Writable> {
+    this.sanitizePath(filename);
+
+    if (!this._createArchiveWriteStream) {
+      throw new Error(
+        "This StorageProvider does not support monolithic archive streams.",
+      );
+    }
+
+    const stream = await this._createArchiveWriteStream(filename);
+    return this.wrapWithTelemetry(stream);
+  }
+
   public async finalize(): Promise<void> {
     await this._finalize();
   }
@@ -109,6 +122,7 @@ export abstract class AbstractStorageProvider
     dbName: string,
     collectionName: string,
   ): Promise<Writable>;
+  protected _createArchiveWriteStream?(filename: string): Promise<Writable>;
   protected abstract _finalize(): Promise<void>;
   protected abstract _prune(policy: PruningPolicy): Promise<PruningResult>;
 }

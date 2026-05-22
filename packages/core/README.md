@@ -31,9 +31,10 @@ If you're building a custom storage provider (e.g., Google Drive, Azure Blob), e
 import { AbstractStorageProvider } from '@mongoshield/core';
 
 export class MyCustomProvider extends AbstractStorageProvider {
-  protected async _initialize(): Promise<void> { /* ... */ }
+  protected async _initialize(expectedSizeInBytes?: number): Promise<void> { /* ... */ }
   protected async _createBsonWriteStream(dbName: string, collName: string) { /* ... */ }
   protected async _createMetadataWriteStream(dbName: string, collName: string) { /* ... */ }
+  protected async _createArchiveWriteStream(filename: string) { /* ... */ } // Optional, for monolithic files
   protected async _finalize(): Promise<void> { /* ... */ }
   protected async _prune(policy: any): Promise<any> { /* ... */ }
 }

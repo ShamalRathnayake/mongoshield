@@ -51,6 +51,14 @@ export interface StorageProvider {
   ): Promise<Writable>;
 
   /**
+   * Obtains a generic writable stream for a single monolithic archive file.
+   * This allows middleware like ArchiveProvider to multiplex streams into one file.
+   * @param filename The desired filename of the archive.
+   * @returns A Node.js Writable stream.
+   */
+  createArchiveWriteStream?(filename: string): Promise<Writable>;
+
+  /**
    * Called to finalize the backup process after all collections have finished streaming.
    * Useful for uploading final manifests or closing multiplexed archive files.
    */
