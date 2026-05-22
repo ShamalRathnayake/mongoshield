@@ -16,7 +16,7 @@ export class BSONEncoderStream extends Transform {
 
   public override _transform(
     chunk: any,
-    encoding: BufferEncoding,
+    _encoding: BufferEncoding,
     callback: TransformCallback,
   ): void {
     try {

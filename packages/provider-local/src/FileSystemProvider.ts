@@ -31,7 +31,9 @@ export class FileSystemProvider extends AbstractStorageProvider {
     }
   }
 
-  protected override async _initialize(expectedSizeInBytes?: number): Promise<void> {
+  protected override async _initialize(
+    expectedSizeInBytes?: number,
+  ): Promise<void> {
     this.writtenFiles.clear();
 
     // Ensure base output path exists first so we can check statfs
@@ -104,14 +106,18 @@ export class FileSystemProvider extends AbstractStorageProvider {
             if (children.length === 0) {
               await rm(fullPath, { recursive: true, force: true });
             }
-          } catch (e) {
+          } catch (_e) {
             // Ignore if directory doesn't exist anymore
           }
         } else if (entry.isFile()) {
           // Check if it's a backup file not written in this run
           if (!this.writtenFiles.has(fullPath)) {
             // Be safe, only delete .bson or .json or .gz files
-            if (fullPath.includes('.bson') || fullPath.includes('.json') || fullPath.includes('.gz')) {
+            if (
+              fullPath.includes(".bson") ||
+              fullPath.includes(".json") ||
+              fullPath.includes(".gz")
+            ) {
               await rm(fullPath, { force: true });
             }
           }
@@ -157,7 +163,9 @@ export class FileSystemProvider extends AbstractStorageProvider {
       const backups = entries.filter((e) => {
         const fullPath = join(this.baseOutPath, e.name);
         // Matches YYYY-MM-DD_HH-mm-ss
-        const isBackupFormat = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/.test(e.name) || e.name.endsWith(".tmp");
+        const isBackupFormat =
+          /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/.test(e.name) ||
+          e.name.endsWith(".tmp");
         return isBackupFormat && fullPath !== this.currentRunDir;
       });
 
@@ -176,8 +184,12 @@ export class FileSystemProvider extends AbstractStorageProvider {
       const toDelete = new Set<string>();
 
       // Identify completed backups vs stale temporary ones
-      const completedBackups = backupStats.filter((d) => !d.name.endsWith(".tmp"));
-      const staleTempBackups = backupStats.filter((d) => d.name.endsWith(".tmp"));
+      const completedBackups = backupStats.filter(
+        (d) => !d.name.endsWith(".tmp"),
+      );
+      const staleTempBackups = backupStats.filter((d) =>
+        d.name.endsWith(".tmp"),
+      );
 
       // 1. Cleanup all stale temporary directories
       for (const stale of staleTempBackups) {

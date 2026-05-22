@@ -19,7 +19,7 @@ export class ArchiveProvider extends AbstractStorageProvider {
 
   constructor(
     private archivePath: string,
-    compress = false,
+    _compress = false,
   ) {
     super();
   }
@@ -44,7 +44,7 @@ export class ArchiveProvider extends AbstractStorageProvider {
     const headerBuffer = Buffer.concat([MSAF_MAGIC, MSAF_VERSION]);
 
     await new Promise<void>((resolve, reject) => {
-      this.archiveStream!.write(headerBuffer, (error) => {
+      this.archiveStream?.write(headerBuffer, (error) => {
         if (error) reject(error);
         else resolve();
       });
@@ -84,14 +84,14 @@ export class ArchiveProvider extends AbstractStorageProvider {
     eofHeader.writeUInt16LE(0, 1); // Name length (0)
     eofHeader.writeUInt32LE(0, 3); // Payload length (0)
 
-    await new Promise<void>((resolve, reject) => {
-      this.archiveStream!.end(eofHeader, () => {
+    await new Promise<void>((resolve, _reject) => {
+      this.archiveStream?.end(eofHeader, () => {
         resolve();
       });
     });
   }
 
-  protected async _prune(policy: PruningPolicy): Promise<PruningResult> {
+  protected async _prune(_policy: PruningPolicy): Promise<PruningResult> {
     // ArchiveProvider natively creates single file archives (.msaf)
     // Pruning in this context would mean deleting old .msaf files.
     // Usually, the higher-level scheduler or file system provider manages this.

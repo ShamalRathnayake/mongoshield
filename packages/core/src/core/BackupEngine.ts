@@ -91,7 +91,7 @@ export class BackupEngine {
             }
           }
         }
-      } catch (err) {
+      } catch (_err) {
         // Fallback to 0 if stats fail (e.g., due to missing clusterMonitor role)
         expectedSizeInBytes = 0;
       }

@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
 import {
-  BackupEngine,
-  type BackupConfigInput,
   type BackupConfig,
+  type BackupConfigInput,
   BackupConfigSchema,
+  BackupEngine,
   type StorageProvider,
 } from "@mongoshield/core";
 import { logger } from "./logger";
@@ -16,7 +16,7 @@ export interface MongoShieldOptions {
 export class MongoShield extends EventEmitter {
   private engine: BackupEngine;
 
-  constructor(private options: MongoShieldOptions) {
+  constructor(options: MongoShieldOptions) {
     super();
 
     // Validate the core configuration
@@ -52,7 +52,7 @@ export class MongoShield extends EventEmitter {
 
     try {
       await this.engine.run();
-      
+
       logger.info("Backup process completed successfully.");
       this.emit("backup:completed");
     } catch (err: any) {

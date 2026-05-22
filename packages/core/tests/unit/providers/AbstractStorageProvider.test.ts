@@ -1,4 +1,4 @@
-import { PassThrough, Writable } from "node:stream";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { AbstractStorageProvider } from "../../../src/providers/AbstractStorageProvider";
 

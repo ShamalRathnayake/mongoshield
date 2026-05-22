@@ -1,5 +1,5 @@
 import * as BSON from "bson";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { BSONEncoderStream } from "../../../src/streams/BSONEncoderStream";
 
 describe("BSONEncoderStream", () => {
