@@ -35,6 +35,6 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@types/uuid": "^9.0.8"
+    "@types/uuid": "^11.0.0"
   }
 }
