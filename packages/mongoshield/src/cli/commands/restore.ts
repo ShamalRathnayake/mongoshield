@@ -1,0 +1,460 @@
+/**
+ * `mongoshield restore`: restore a backup into a deployment.
+ *
+ * Restoring is where data gets overwritten, so this command is careful:
+ *
+ *   1. It always works out and prints the plan first (source → target, documents,
+ *      what will happen to each namespace).
+ *   2. With the default mode (fail-if-exists) the planner stops if any target has data.
+ *   3. Dropping, upserting, or inserting into non-empty collections needs a "yes":
+ *      interactively, or with --yes. Without a terminal and without --yes it refuses.
+ *   4. --dry-run stops after the plan and writes nothing.
+ */
+
+import type { MongoShieldConfigInput } from "../../config/schema.ts";
+import { assertNoConflicts } from "../../engine/restore-plan.ts";
+import { MongoShieldError } from "../../errors.ts";
+import type { ClusterTime } from "../../format/manifest.ts";
+import { planPointInTimeRestore } from "../../journal/index.ts";
+import type {
+  RestoreMode,
+  RestoreOptions,
+  RestorePlan,
+  RestorePlanEntry,
+  RestoreResult,
+  UsersAndRolesMode,
+} from "../../types.ts";
+import { usageError } from "../args.ts";
+import type { CommandContext, CommandSpec } from "../command.ts";
+import { confirmOrThrow } from "../confirm.ts";
+import { formatCount, formatDuration, plural } from "../format.ts";
+import type { Output } from "../io.ts";
+import { ProgressDisplay } from "../progress.ts";
+import {
+  type CliShield,
+  createCliShield,
+  decryptionFromConfig,
+  displayUri,
+  readPassphraseEnv,
+  rememberUriPassword,
+} from "../setup.ts";
+import { renderTable } from "../table.ts";
+import {
+  backupSelectorArgument,
+  excludeOption,
+  identityFileOption,
+  includeOption,
+  listOrUndefined,
+  parseKeyValues,
+  passphraseEnvOption,
+  storageFromOption,
+} from "./shared-options.ts";
+
+const NAME = "restore";
+
+const MODES: readonly RestoreMode[] = ["fail-if-exists", "drop", "insert", "upsert"];
+
+const USERS_AND_ROLES_MODES: readonly UsersAndRolesMode[] = ["skip", "create", "replace"];
+
+export const restoreCommand: CommandSpec = {
+  name: NAME,
+  summary: "Restore a backup into MongoDB",
+  description: [
+    "Shows the plan first, then restores. By default nothing is overwritten: the",
+    "restore stops if a target collection already has documents. Use --rename to",
+    "restore next to the live data, or --mode to replace (drop), add to (insert) or",
+    "merge into (upsert) existing collections; those modes ask for confirmation.",
+  ].join("\n"),
+  positionals: [
+    { name: "backup", optional: true, description: 'Backup id, or "latest" (default)' },
+  ],
+  options: {
+    "to-uri": {
+      type: "string",
+      valueName: "<mongodb-uri>",
+      description: "Restore into this deployment (default: the configured source)",
+    },
+    from: storageFromOption,
+    include: includeOption,
+    exclude: excludeOption,
+    rename: {
+      type: "string",
+      multiple: true,
+      valueName: "<from=to>",
+      description: "Restore under another name, e.g. 'app.*=app_restored.*'",
+    },
+    mode: {
+      type: "string",
+      choices: MODES,
+      defaultText: "fail-if-exists",
+      description: "What to do when a target collection already exists",
+    },
+    drop: { type: "boolean", description: "Same as --mode drop" },
+    at: {
+      type: "string",
+      valueName: "<time>",
+      description:
+        "Point-in-time recovery: an ISO date (2026-11-14T03:17:42Z) or a cluster time (t:i). Needs the change journal",
+    },
+    "dry-run": { type: "boolean", description: "Show the plan and stop; write nothing" },
+    "identity-file": identityFileOption,
+    "passphrase-env": passphraseEnvOption,
+    "skip-indexes": {
+      type: "boolean",
+      description: "Do not create indexes (faster, for throwaway targets)",
+    },
+    "skip-search-indexes": {
+      type: "boolean",
+      description: "Do not recreate Atlas Search / Vector Search indexes",
+    },
+    "users-and-roles": {
+      type: "string",
+      choices: USERS_AND_ROLES_MODES,
+      defaultText: "skip",
+      description:
+        "Restore the backup's users and roles: create missing ones, or replace existing ones too",
+    },
+  },
+  examples: [
+    {
+      description: "Restore the latest backup next to the live data",
+      command: "mongoshield restore --rename 'app.*=app_restored.*'",
+    },
+    {
+      description: "Preview restoring one collection into a staging cluster",
+      command:
+        "mongoshield restore 2026-10-20T03-00-04Z_7f3a9c --include app.users --to-uri $STAGING_URI --dry-run",
+    },
+    {
+      description: "Replace existing collections in a script",
+      command: "mongoshield restore latest --drop --yes --identity-file ~/keys/backup.key",
+    },
+  ],
+  run: runRestoreCommand,
+};
+
+async function runRestoreCommand(context: CommandContext): Promise<number> {
+  const cli = await createCliShield(context, restoreOverrides(context));
+  try {
+    const targetUri = context.flags.string("to-uri") ?? cli.config.source?.uri;
+    if (!targetUri) throw missingTargetError();
+
+    const options = await restoreOptions(context, cli, targetUri);
+    // For a point-in-time restore, the plan shown is the base backup's plan; the
+    // journal replay on top of it is announced separately.
+    const plan = await cli.shield.planRestore(await baseRestoreOptions(context, cli, options));
+    checkPlan(plan);
+    // Show the plan before anything else, even when it is going to be refused:
+    // the table is what tells the user which collections are in the way.
+    printPlan(context.out, plan, targetUri, cli.storageLabel);
+    assertNoConflicts(plan);
+
+    if (options.dryRun) return finishDryRun(context, plan);
+
+    await confirmIfDestructive(context, plan, targetUri);
+    const result = await restoreWithProgress(context, cli, options);
+    printRestoreResult(context, result);
+    return 0;
+  } finally {
+    await cli.shield.close();
+  }
+}
+
+/** Flags as a config layer: where backups are read from, and decryption secrets. */
+function restoreOverrides(context: CommandContext): MongoShieldConfigInput {
+  const toUri = context.flags.string("to-uri");
+  if (toUri) rememberUriPassword(context, toUri);
+
+  const passphraseVariable = context.flags.string("passphrase-env");
+  const passphrase = passphraseVariable
+    ? readPassphraseEnv(context, passphraseVariable)
+    : undefined;
+  const identityFiles = listOrUndefined(context, "identity-file");
+
+  return {
+    storage: context.flags.string("from"),
+    decryption: identityFiles || passphrase ? { identityFiles, passphrase } : undefined,
+  };
+}
+
+/** Builds the RestoreOptions shared by the plan and the real run. */
+async function restoreOptions(
+  context: CommandContext,
+  cli: CliShield,
+  targetUri: string,
+): Promise<RestoreOptions> {
+  const { flags } = context;
+  const include = listOrUndefined(context, "include");
+  const exclude = listOrUndefined(context, "exclude");
+  const rename = parseKeyValues(context, NAME, "rename");
+  const decryption = await decryptionFromConfig(context, cli.config);
+
+  const at = parseAt(context);
+  return {
+    backup: backupSelectorArgument(context),
+    target: { uri: targetUri },
+    ...(at ? { at } : {}),
+    mode: restoreMode(context),
+    dryRun: flags.boolean("dry-run"),
+    skipIndexes: flags.boolean("skip-indexes"),
+    skipSearchIndexes: flags.boolean("skip-search-indexes"),
+    usersAndRoles:
+      USERS_AND_ROLES_MODES.find((mode) => mode === flags.string("users-and-roles")) ?? "skip",
+    signal: context.signal,
+    ...(include ? { include } : {}),
+    ...(exclude ? { exclude } : {}),
+    ...(rename ? { rename } : {}),
+    ...(decryption ? { decryption } : {}),
+  };
+}
+
+/**
+ * `--at`: an ISO 8601 date, or an exact cluster time written `t:i`
+ * (as shown by `mongoshield journal status`).
+ */
+function parseAt(context: CommandContext): Date | ClusterTime | undefined {
+  const raw = context.flags.string("at");
+  if (raw === undefined) return undefined;
+
+  const clusterTime = /^(\d+):(\d+)$/.exec(raw);
+  if (clusterTime) return { t: Number(clusterTime[1]), i: Number(clusterTime[2]) };
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    throw usageError(
+      `--at ${raw} is neither a date (2026-11-14T03:17:42Z) nor a cluster time (t:i).`,
+      NAME,
+    );
+  }
+  return date;
+}
+
+/** `--drop` is shorthand for `--mode drop`; giving both with different modes is a mistake. */
+function restoreMode(context: CommandContext): RestoreMode {
+  const mode = context.flags.string("mode");
+  if (context.flags.boolean("drop")) {
+    if (mode !== undefined && mode !== "drop") {
+      throw usageError(`--drop contradicts --mode ${mode}.`, NAME);
+    }
+    return "drop";
+  }
+  return MODES.find((candidate) => candidate === mode) ?? "fail-if-exists";
+}
+
+/**
+ * Stops when the filters selected nothing: "restored 0 documents" would look
+ * like success to a script. (Conflicts with existing data are reported by the
+ * planner itself, with every conflicting namespace listed.)
+ */
+function checkPlan(plan: RestorePlan): void {
+  if (plan.entries.length > 0) return;
+  throw new MongoShieldError(
+    "MS_CONFIG_INVALID",
+    `No namespaces in backup ${plan.backupId} match the --include/--exclude filters.`,
+    { hint: `Run \`mongoshield inspect ${plan.backupId}\` to see what the backup contains.` },
+  );
+}
+
+/** The plan table, on stderr (it is context for the decision, not the result). */
+function printPlan(out: Output, plan: RestorePlan, targetUri: string, storage: string): void {
+  if (out.settings.json) return;
+  out.info(
+    `Restore plan: backup ${out.style("bold", plan.backupId)} from ${storage} → ${displayUri(targetUri)} (mode: ${plan.mode})`,
+  );
+  const rows = plan.entries.map((entry) => [
+    entry.from,
+    "→",
+    entry.to,
+    entry.type,
+    formatCount(entry.documents),
+    formatExisting(out, entry.existingDocuments),
+    styledAction(out, entry),
+  ]);
+  const table = renderTable(
+    [
+      { header: "SOURCE" },
+      { header: "" },
+      { header: "TARGET" },
+      { header: "TYPE" },
+      { header: "DOCUMENTS", align: "right" },
+      { header: "EXISTING", align: "right" },
+      { header: "ACTION" },
+    ],
+    rows,
+    (text) => out.style("dim", text),
+  );
+  out.info(indent(table));
+  const documents = plan.entries.reduce((sum, entry) => sum + entry.documents, 0);
+  out.info(`${plural(plan.entries.length, "namespace")}, ${plural(documents, "document")}.`);
+}
+
+/** Destructive actions stand out in red/yellow. */
+function styledAction(out: Output, entry: RestorePlanEntry): string {
+  switch (entry.action) {
+    case "create":
+      return out.style("green", "create");
+    case "drop-and-create":
+      return out.style("red", "drop + create");
+    case "insert":
+      return out.style("yellow", "insert");
+    case "upsert":
+      return out.style("yellow", "upsert");
+    case "skip":
+      return out.style("dim", "skip");
+    case "conflict":
+      return out.style("red", `conflict: ${entry.reason ?? "target has data"}`);
+  }
+}
+
+/** Existing documents in the target: highlighted when non-zero, "?" when uncountable. */
+function formatExisting(out: Output, existing: number | undefined): string {
+  if (existing === undefined) return out.style("yellow", "?");
+  return existing > 0 ? out.style("yellow", formatCount(existing)) : "0";
+}
+
+function finishDryRun(context: CommandContext, plan: RestorePlan): number {
+  if (context.out.settings.json) {
+    const result: RestoreResult = { plan, dryRun: true, documentsRestored: 0, durationMs: 0 };
+    context.out.json(result);
+  } else {
+    context.out.success("Dry run: nothing was written.");
+  }
+  return 0;
+}
+
+/**
+ * Asks before dropping or upserting, or inserting into collections that
+ * already have documents. Plain creates into empty targets need no question.
+ */
+async function confirmIfDestructive(
+  context: CommandContext,
+  plan: RestorePlan,
+  targetUri: string,
+): Promise<void> {
+  // An uncountable target (undefined) might hold data, so it counts as non-empty.
+  const nonEmpty = plan.entries.filter((entry) => entry.existingDocuments !== 0).length;
+  const target = displayUri(targetUri);
+
+  let question: string | undefined;
+  if (plan.mode === "drop") {
+    question = `Drop and replace ${plural(plan.entries.length, "collection")} in ${target}?`;
+  } else if (plan.mode === "upsert") {
+    question = `Upsert into ${plural(plan.entries.length, "collection")} in ${target}, replacing documents with the same _id?`;
+  } else if (nonEmpty > 0) {
+    question = `Insert into ${plural(nonEmpty, "collection")} in ${target} that already have documents?`;
+  }
+  if (question === undefined) return;
+
+  await confirmOrThrow(context, { question, action: `restore with --mode ${plan.mode}` });
+}
+
+async function restoreWithProgress(
+  context: CommandContext,
+  cli: CliShield,
+  options: RestoreOptions,
+): Promise<RestoreResult> {
+  const progress = new ProgressDisplay(context.out, "Restoring");
+  try {
+    return await cli.shield.restore({ ...options, onProgress: progress.onProgress });
+  } finally {
+    progress.stop();
+  }
+}
+
+function printRestoreResult(context: CommandContext, result: RestoreResult): void {
+  const { out } = context;
+  if (out.settings.json) {
+    out.json(result);
+    return;
+  }
+  // The summary is the command's result, so it goes to stdout.
+  out.result(
+    `${out.style("green", "✔")} Restored ${plural(result.documentsRestored, "document")} from ${result.plan.backupId} into ${plural(result.plan.entries.length, "namespace")} in ${formatDuration(result.durationMs)}.`,
+  );
+  const pointInTime = result.pointInTime;
+  if (pointInTime) {
+    out.result(
+      `  Replayed ${plural(pointInTime.events, "journal event")}: the data now reflects ${formatClusterTime(pointInTime.restoredTo)}.`,
+    );
+    for (const warning of pointInTime.warnings) out.warn(warning);
+  }
+  printSearchIndexes(out, result);
+  printUsersAndRoles(out, result);
+}
+
+/** Search indexes created (they finish building on Atlas) or left out. */
+function printSearchIndexes(out: Output, result: RestoreResult): void {
+  const report = result.searchIndexes;
+  if (report === undefined) return;
+  if (report.created.length > 0) {
+    out.result(
+      `  Created ${plural(report.created.length, "search index", "search indexes")}; Atlas builds them in the background.`,
+    );
+  }
+  if (report.notCreated.length > 0) {
+    const names = report.notCreated.map((index) => `${index.ns} ${index.name}`).join(", ");
+    out.warn(`The target does not support Atlas Search; not created: ${names}.`);
+  }
+}
+
+/** Users and roles written, and the users who need a new password. */
+function printUsersAndRoles(out: Output, result: RestoreResult): void {
+  const report = result.usersAndRoles;
+  if (report === undefined) return;
+  const roles = report.rolesCreated.length + report.rolesReplaced.length;
+  const users = report.usersCreated.length + report.usersReplaced.length;
+  const kept = report.rolesKept.length + report.usersKept.length;
+  out.result(
+    `  Restored ${plural(roles, "role")} and ${plural(users, "user")}${kept > 0 ? ` (${kept} already existed and were kept)` : ""}.`,
+  );
+  if (report.passwordResetRequired.length > 0) {
+    out.warn(
+      `The target did not accept password hashes. These users got a random password and need a password reset: ${report.passwordResetRequired.join(", ")}.`,
+    );
+  }
+}
+
+/**
+ * The options to plan with: unchanged for a normal restore; for `--at`, the base
+ * backup the journal planner picks (which also fails early on journal gaps).
+ */
+async function baseRestoreOptions(
+  context: CommandContext,
+  cli: CliShield,
+  options: RestoreOptions,
+): Promise<RestoreOptions> {
+  if (options.at === undefined) return options;
+  // The base backup is chosen by --at; a backup id next to it would be silently ignored.
+  if (options.backup !== "latest") {
+    throw usageError(
+      "--at picks its base backup itself; leave out the backup id (or pass `latest`).",
+      NAME,
+    );
+  }
+  const pointInTime = await planPointInTimeRestore(cli.shield.storage, options.at, {
+    signal: context.signal,
+  });
+  context.out.info(
+    `Point in time: base backup ${pointInTime.baseBackupId}, then ${pointInTime.segments.length} journal segment(s) replayed up to ${formatClusterTime(pointInTime.at)}.`,
+  );
+  const { at: _at, ...rest } = options;
+  return { ...rest, backup: pointInTime.baseBackupId };
+}
+
+/** `{ t: 1794538804, i: 3 }` → `2026-11-14T03:00:04Z (1794538804:3)`. */
+function formatClusterTime(time: ClusterTime): string {
+  return `${new Date(time.t * 1000).toISOString().replace(".000", "")} (${time.t}:${time.i})`;
+}
+
+function missingTargetError(): MongoShieldError {
+  return new MongoShieldError("MS_CONFIG_INVALID", "No restore target is configured.", {
+    hint: "Pass --to-uri, set MONGODB_URI (or MONGOSHIELD_URI), or set source.uri in mongoshield.config.ts.",
+  });
+}
+
+function indent(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => `  ${line}`)
+    .join("\n");
+}
