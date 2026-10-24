@@ -47,6 +47,8 @@ export async function loadCliConfig(
 
   // Remember secrets from the config so no error output can ever echo them.
   if (loaded.config.source?.uri) rememberUriPassword(context, loaded.config.source.uri);
+  // The drill's scratch deployment (config, or MONGOSHIELD_DRILL_URI) has credentials too.
+  if (loaded.config.drill?.targetUri) rememberUriPassword(context, loaded.config.drill.targetUri);
   if (loaded.config.encryption?.passphrase) context.addSecret(loaded.config.encryption.passphrase);
   if (loaded.config.decryption?.passphrase) context.addSecret(loaded.config.decryption.passphrase);
   for (const identity of loaded.config.decryption?.identities ?? []) context.addSecret(identity);

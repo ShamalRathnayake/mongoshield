@@ -2,12 +2,20 @@
  * `mongoshield list`: the backups in storage, newest first.
  *
  * Shows complete backups and also incomplete runs (crashed or still running)
- * and invalid ones, so nothing in storage is hidden from the user.
+ * and invalid ones, so nothing in storage is hidden from the user. KIND tells full
+ * backups from incrementals (`incr #3`: the third after its full backup; `inspect`
+ * names the parent and the base).
  */
 
 import type { CatalogEntry } from "../../catalog/catalog.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
-import { encryptionSummary, holdMarker, styledStatus, verificationSummary } from "../describe.ts";
+import {
+  encryptionSummary,
+  holdMarker,
+  kindSummary,
+  styledStatus,
+  verificationSummary,
+} from "../describe.ts";
 import { formatBytes, formatCount, formatDateWithRelative, plural } from "../format.ts";
 import { createCliShield } from "../setup.ts";
 import { renderTable } from "../table.ts";
@@ -60,6 +68,8 @@ function renderEntries(context: CommandContext, entries: readonly CatalogEntry[]
       out.style("bold", entry.id),
       formatDateWithRelative(entry.startedAt, now),
       styledStatus(entry, out),
+      // `full` or `incr #n` (the n-th incremental after its full backup).
+      kindSummary(entry.manifest),
       totals ? formatCount(totals.namespaces) : "–",
       totals ? formatCount(totals.documents) : "–",
       totals ? formatBytes(totals.bytesStored) : "–",
@@ -73,6 +83,7 @@ function renderEntries(context: CommandContext, entries: readonly CatalogEntry[]
       { header: "ID" },
       { header: "CREATED" },
       { header: "STATUS" },
+      { header: "KIND" },
       { header: "NS", align: "right" },
       { header: "DOCUMENTS", align: "right" },
       { header: "SIZE", align: "right" },

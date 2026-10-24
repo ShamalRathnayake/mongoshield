@@ -289,6 +289,26 @@ describe("mongoshield prune with several sources/selections in one storage", () 
     expect((await listedIds(url)).sort()).toEqual([billing[0], ...search].sort());
   });
 
+  it("scopes by the config's retention.scopeLabels, like mongoshield run", async () => {
+    const { url, storage } = await namedMemoryStore();
+    const nightly = await seriesOf(storage, { labels: { "mongoshield.plan": "nightly" } });
+    const hourly = await seriesOf(storage, { labels: { "mongoshield.plan": "hourly" } }, 1);
+    const cwd = await mkdtemp(join(workDir, "scope-labels-config-"));
+    await writeFile(
+      join(cwd, "mongoshield.config.json"),
+      JSON.stringify({
+        storage: url,
+        retention: { last: 1, scopeLabels: { "mongoshield.plan": "nightly" } },
+      }),
+    );
+    const run = await runTestCli(["prune", "--yes", "--json"], { cwd });
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.json<{ scope: unknown }>().scope).toEqual({
+      labels: { "mongoshield.plan": "nightly" },
+    });
+    expect((await listedIds(url)).sort()).toEqual([nightly[0], ...hourly].sort());
+  });
+
   it("uses the one deployment the matching backups come from, and refuses when there are several", async () => {
     const { url, storage } = await namedMemoryStore();
     await seriesOf(storage, { clusterId: "cluster-a" });

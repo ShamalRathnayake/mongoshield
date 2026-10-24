@@ -38,6 +38,24 @@ export default defineConfig({
           hookTimeout: 600_000,
         },
       },
+      {
+        // Opt-in tests against real cloud services (S3, R2, GCS, Azure, SFTP, KMS).
+        // Each suite runs only when its environment variables are set and skips with
+        // a message naming them otherwise (see docs/testing-real-clouds.md). Never
+        // part of `pnpm test` / `pnpm coverage`: run it with `pnpm test:cloud`.
+        // Files run one after another so a run's request rate stays modest, with long
+        // timeouts because every operation crosses the internet.
+        extends: true,
+        test: {
+          name: "cloud",
+          include: ["test/cloud/**/*.test.ts"],
+          environment: "node",
+          globalSetup: ["test/cloud/global-setup.ts"],
+          fileParallelism: false,
+          testTimeout: 600_000,
+          hookTimeout: 600_000,
+        },
+      },
     ],
     coverage: {
       provider: "v8",

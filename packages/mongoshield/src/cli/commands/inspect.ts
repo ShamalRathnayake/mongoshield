@@ -8,13 +8,14 @@
 
 import { type DrillRecord, readDrills } from "../../catalog/annotations.ts";
 import { type CatalogEntry, immutableUntilOf } from "../../catalog/catalog.ts";
+import { selectBackup } from "../../catalog/select.ts";
 import type { Manifest, NamespaceEntry } from "../../format/manifest.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
 import {
+  chainSummary,
   consistencySummary,
   drillSummary,
   encryptionSummary,
-  findBackup,
   formatRto,
   verificationRecordSummary,
 } from "../describe.ts";
@@ -52,7 +53,8 @@ async function runInspectCommand(context: CommandContext): Promise<number> {
   const { out } = context;
   const cli = await createCliShield(context, { storage: context.flags.string("from") });
   try {
-    const entry = await findBackup(cli.shield, backupSelectorArgument(context), context.signal);
+    const entries = await cli.shield.list({ signal: context.signal });
+    const entry = selectBackup(entries, backupSelectorArgument(context));
     // The catalog entry carries only the last drill; inspect shows them all.
     const drills = (
       await readDrills(cli.shield.storage, entry.id, { signal: context.signal })
@@ -61,9 +63,9 @@ async function runInspectCommand(context: CommandContext): Promise<number> {
       out.json({ ...entry, drills });
       return 0;
     }
-    // findBackup only returns complete backups, which always have a manifest.
+    // selectBackup only returns complete backups, which always have a manifest.
     if (entry.manifest) {
-      out.result(renderSummary(out, entry, entry.manifest));
+      out.result(renderSummary(out, entry, entry.manifest, entries));
       out.result();
       out.result(renderNamespaces(out, entry.manifest.namespaces));
     }
@@ -78,7 +80,12 @@ async function runInspectCommand(context: CommandContext): Promise<number> {
 }
 
 /** The label/value block at the top. */
-function renderSummary(out: Output, entry: CatalogEntry, manifest: Manifest): string {
+function renderSummary(
+  out: Output,
+  entry: CatalogEntry,
+  manifest: Manifest,
+  entries: readonly CatalogEntry[],
+): string {
   const started = new Date(manifest.startedAt);
   const completed = new Date(manifest.completedAt);
   const { totals, consistency, source } = manifest;
@@ -88,6 +95,8 @@ function renderSummary(out: Output, entry: CatalogEntry, manifest: Manifest): st
     ["Completed", formatDateWithRelative(completed)],
     ["Duration", formatDuration(completed.getTime() - started.getTime())],
     ["Written by", manifest.tool],
+    // Full or incremental, and where it sits in its chain (src/catalog/chain.ts).
+    ["Kind", chainSummary(manifest, entries)],
     ["Source", `${source.topology}, MongoDB ${source.serverVersion}`],
     ["Consistency", consistencySummary(manifest)],
     ["Compression", manifest.compression],
@@ -107,7 +116,7 @@ function renderSummary(out: Output, entry: CatalogEntry, manifest: Manifest): st
     ["Hold", holdDetails(entry)],
     ["Immutable", immutableDetails(entry)],
   ];
-  if (consistency.warning) pairs.splice(6, 0, ["", out.style("yellow", consistency.warning)]);
+  if (consistency.warning) pairs.splice(7, 0, ["", out.style("yellow", consistency.warning)]);
   return renderDetails(pairs, (label) => out.style("dim", label));
 }
 
@@ -174,12 +183,18 @@ function renderNamespaces(out: Output, namespaces: readonly NamespaceEntry[]): s
   );
 }
 
-/** One row per restore drill, newest first. */
+/**
+ * One row per restore drill, newest first. When some of them are upgrade rehearsals
+ * (`mongoshield rehearse-upgrade`), a MONGODB column shows the version each one
+ * proved (`–` for ordinary drills); without rehearsals the table is unchanged.
+ */
 function renderDrills(out: Output, drills: readonly DrillRecord[]): string {
   const now = new Date();
+  const withVersions = drills.some((drill) => drill.targetVersion !== undefined);
   const rows = drills.map((drill) => [
     formatRelative(new Date(drill.drilledAt), now),
     drill.ok ? out.style("green", "passed") : out.style("red", "failed"),
+    ...(withVersions ? [drill.targetVersion === undefined ? "–" : `→ ${drill.targetVersion}`] : []),
     drill.restored ? formatRto(drill.restoreDurationMs) : "–",
     formatCount(drill.documentsRestored),
     formatCount(drill.problemCount),
@@ -188,6 +203,7 @@ function renderDrills(out: Output, drills: readonly DrillRecord[]): string {
     [
       { header: "DRILLED" },
       { header: "RESULT" },
+      ...(withVersions ? [{ header: "MONGODB" }] : []),
       { header: "RTO", align: "right" },
       { header: "DOCUMENTS", align: "right" },
       { header: "PROBLEMS", align: "right" },

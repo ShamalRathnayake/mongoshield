@@ -84,7 +84,8 @@ export interface BackupOptions {
   readonly consistency?: ConsistencyMode | "auto";
   readonly labels?: Readonly<Record<string, string>>;
   /**
-   * Collections (and parts of split collections) dumped at the same time. Defaults to 4.
+   * Collections (and parts of split collections) dumped at the same time. Defaults to 4,
+   * or 2 on Atlas Free and Flex clusters (see docs/guides/atlas-free-tier.md).
    */
   readonly parallelism?: number;
   /**
@@ -112,7 +113,11 @@ export interface BackupOptions {
   readonly readPreferenceTags?: readonly Readonly<Record<string, string>>[];
   /** Upper bound on documents read per second, over all collections together. */
   readonly maxDocumentsPerSecond?: number;
-  /** Upper bound on raw BSON bytes read per second, over all collections together. */
+  /**
+   * Upper bound on raw BSON bytes read per second, over all collections together.
+   * Unlimited by default; 4 MiB/s on Atlas Free and Flex clusters when neither this nor
+   * `maxDocumentsPerSecond` is set.
+   */
   readonly maxBytesPerSecond?: number;
   /**
    * Make every file of the backup write-once for this many days (S3 Object Lock and
@@ -125,9 +130,21 @@ export interface BackupOptions {
    * database when `include` is not given), as `admin/system.users` and
    * `admin/system.roles` entries of the manifest. Off by default. The users' credentials
    * are SCRAM hashes, which can still be attacked offline: encrypt backups that hold
-   * them (a warning is logged when they are not encrypted).
+   * them (a warning is logged when they are not encrypted). Atlas Free and Flex
+   * clusters refuse it (`MS_UNSUPPORTED_TOPOLOGY`): they allow no reads of users.
    */
   readonly includeUsersAndRoles?: boolean;
+  /**
+   * Take an incremental backup: store only the changes made since a parent backup
+   * (`from`: `"latest"`, the default, or a backup id), recorded with a change stream
+   * from the parent's end time. Restoring it restores the chain's full backup and
+   * replays every incremental up to it. `true` is short for `{ from: "latest" }`.
+   * Needs a replica set or sharded cluster (MongoDB 6.0+) whose oplog still reaches
+   * back to the parent's end, and a parent taken with consistency `converge` or
+   * `snapshot` from the same deployment with the same include/exclude selection.
+   * See docs/guides/incremental-backups.md.
+   */
+  readonly incremental?: boolean | IncrementalOptions;
   readonly signal?: AbortSignal;
   readonly onProgress?: (event: ProgressEvent) => void;
   /**
@@ -138,6 +155,30 @@ export interface BackupOptions {
     manifest: Manifest,
     options: { readonly signal?: AbortSignal },
   ) => Promise<void>;
+}
+
+/** Options of an incremental backup (`BackupOptions.incremental`). */
+export interface IncrementalOptions {
+  /**
+   * The backup to continue: `"latest"` (default) is the newest backup of the same
+   * deployment and selection (and the same `mongoshield.plan` label, when the new
+   * backup has one) that an incremental can follow; or an explicit backup id.
+   */
+  readonly from?: "latest" | string;
+  /**
+   * Take a full backup instead when no incremental is possible: no backup to continue,
+   * one that cannot be continued, a standalone server, or an oplog that no longer
+   * reaches back to the parent's end. The result's `fullBackupReason` says why.
+   * Without it (the default) those cases throw. Scheduled runs use it.
+   */
+  readonly fallbackToFull?: boolean;
+  /**
+   * Start a new chain with a full backup once the chain's full backup completed more
+   * than this many milliseconds ago (e.g. 7 days: "full weekly, incremental hourly").
+   */
+  readonly fullAfterMs?: number;
+  /** Start a new chain with a full backup once the chain holds this many incrementals. */
+  readonly maxChainLength?: number;
 }
 
 /** MongoDB read preference modes accepted by `BackupOptions.readPreference`. */
@@ -163,6 +204,11 @@ export interface CompletedBackupResult {
   readonly id: string;
   readonly manifest: Manifest;
   readonly durationMs: number;
+  /**
+   * Set when an incremental backup was asked for but a full one was taken (the
+   * `incremental` policy, or `fallbackToFull`): why.
+   */
+  readonly fullBackupReason?: string;
 }
 
 /**
@@ -198,7 +244,10 @@ export interface RestoreOptions {
    * Point-in-time recovery: restore the newest base backup taken before this moment,
    * then replay the change journal up to it (see docs/guides/point-in-time-recovery.md).
    * A `Date` is rounded down to its second; a cluster time `{ t, i }` is exact.
-   * Use with `backup: "latest"`; the base backup is chosen automatically.
+   * With `backup: "latest"` the base backup is chosen automatically (an incremental
+   * chain that reaches the moment is used when the journal does not). With an
+   * incremental backup's id, its chain is restored up to the moment instead
+   * (docs/guides/incremental-backups.md).
    */
   readonly at?: Date | ClusterTime;
   /** Defaults to the instance's `source`. */
@@ -228,7 +277,9 @@ export interface RestoreOptions {
    * What to do with the users and roles of a backup taken with `includeUsersAndRoles`.
    * Defaults to `"skip"`. Only users and roles of databases the include/exclude
    * patterns select (`<db>.system.users` / `<db>.system.roles` must match) are
-   * restored, into the database the rename rules give.
+   * restored, into the database the rename rules give. MongoDB Atlas targets refuse
+   * `"create"` and `"replace"` up front (`MS_UNSUPPORTED_TOPOLOGY`): Atlas only takes
+   * user and role changes through its own API.
    */
   readonly usersAndRoles?: UsersAndRolesMode;
   readonly signal?: AbortSignal;
@@ -290,7 +341,8 @@ export interface UsersAndRolesReport {
   /**
    * How users were written: `merge` restores them with their password hashes, as
    * mongorestore does (`_mergeAuthzCollections`); `createUser` is the fallback when the
-   * target refuses that (e.g. Atlas), and then passwords cannot be restored.
+   * target refuses that (a user without the `restore` role), and then passwords cannot
+   * be restored.
    */
   readonly method: "merge" | "createUser";
   /**
@@ -324,6 +376,15 @@ export interface RestorePlan {
   readonly backupId: string;
   readonly mode: RestoreMode;
   readonly entries: readonly RestorePlanEntry[];
+  /**
+   * Present when `backupId` is an incremental backup: the full backup whose documents
+   * are restored (`entries` describe it) and the incrementals replayed after it, oldest
+   * first, ending with `backupId` (or earlier, for a restore `at` a time inside the chain).
+   */
+  readonly chain?: {
+    readonly baseBackupId: string;
+    readonly incrementals: readonly string[];
+  };
 }
 
 /** What a point-in-time restore replayed on top of its base backup. */
@@ -343,6 +404,11 @@ export interface RestoreResult {
   readonly durationMs: number;
   /** Present for point-in-time restores (`at`). */
   readonly pointInTime?: PointInTimeResult;
+  /**
+   * Restores of an incremental backup: the change events read from the chain's windows
+   * (the base backup's own window included) and replayed.
+   */
+  readonly eventsReplayed?: number;
   /** Present when restored collections had Atlas Search indexes (and they were not skipped). */
   readonly searchIndexes?: SearchIndexReport;
   /** Present when users and roles were restored (`usersAndRoles` other than `skip`). */
@@ -363,6 +429,13 @@ export interface VerifyOptions {
   readonly backup: BackupSelector;
   /** Defaults to `"fast"`. */
   readonly mode?: VerifyMode;
+  /**
+   * Incremental backups: `"full"` (default) also checks the files of every earlier
+   * backup of the chain, in the same mode; `"links"` checks only that every earlier
+   * backup exists and lines up (cheap, e.g. right after an hourly incremental whose
+   * chain was verified before). Ignored for full backups.
+   */
+  readonly chain?: "full" | "links";
   readonly decryption?: DecryptionOptions;
   readonly signal?: AbortSignal;
   readonly onProgress?: (event: ProgressEvent) => void;
@@ -385,6 +458,16 @@ export interface VerifyReport {
   readonly documentsChecked: number;
   readonly problems: readonly VerifyProblem[];
   readonly durationMs: number;
+  /** Incremental backups: the chain that was checked. */
+  readonly chain?: {
+    readonly baseBackupId: string;
+    /** The backup's position after the base (1 for the first incremental). */
+    readonly length: number;
+    /** The members that could be reached, oldest first, ending with `backupId`. */
+    readonly members: readonly string[];
+    /** Whether the earlier members' files were checked too (`"full"`) or only the links. */
+    readonly scope: "full" | "links";
+  };
 }
 
 export type ProgressEvent =

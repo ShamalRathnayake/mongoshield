@@ -11,18 +11,26 @@
  *         backup's changes file is decoded event by event, and its event count, order
  *         and window are checked too.
  *
+ * Incremental backups are only restorable together with every backup before them, so
+ * verifying one checks its whole chain: every link (each parent exists, is complete,
+ * and ends exactly where its child starts; src/catalog/chain.ts) and, unless
+ * `chain: "links"`, every member's files in the same mode. Problems in an earlier
+ * member are reported with its id in front of the file key (`<id>/app/users.bson.zst`),
+ * broken links as `chain <id>`.
+ *
  * Problems are collected rather than thrown, so one run reports everything that is
  * wrong. Only a missing backup, a missing or non-matching key in deep mode, storage
  * access errors and aborts are thrown: those say nothing about the backup itself.
  */
 
 import { BSON } from "mongodb";
-import { listBackups, selectBackup } from "../catalog/index.ts";
+import { type CatalogEntry, inspectChain, listBackups, selectBackup } from "../catalog/index.ts";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
 import {
   type ChangesFile,
   isAuthzEntry,
+  isIncrementalManifest,
   type Manifest,
   type NamespaceEntry,
   type StoredFile,
@@ -58,13 +66,15 @@ interface VerifyTotals {
   readonly problems: VerifyProblem[];
 }
 
-/** Shared state of one verify run. */
+/** Shared state of one verify run (of one backup of a chain). */
 interface VerifyRun {
   readonly mode: VerifyMode;
   readonly source: StoredBackupSource;
   readonly totals: VerifyTotals;
   readonly tracker: ProgressTracker;
   readonly signal: AbortSignal | undefined;
+  /** Put in front of every problem's subject: `""`, or `<id>/` for an earlier chain member. */
+  readonly prefix: string;
 }
 
 /**
@@ -80,29 +90,75 @@ export async function verifyBackup(
 ): Promise<VerifyReport> {
   const startedAt = performance.now();
   const mode = options.mode ?? "fast";
-  const manifest = await loadManifest(context, options);
+  const { manifest, entries } = await loadManifest(context, options);
   const totals: VerifyTotals = {
     filesChecked: 0,
     bytesChecked: 0,
     documentsChecked: 0,
     problems: [],
   };
+  const tracker = new ProgressTracker({ onProgress: options.onProgress, logger: context.logger });
+  context.logger.info("Verifying backup", { backupId: manifest.id, mode });
 
+  await verifyStoredFiles(context, manifest, options, { totals, tracker, prefix: "" });
+  const chain = isIncrementalManifest(manifest)
+    ? await verifyChain(context, entries, manifest, options, { totals, tracker })
+    : undefined;
+  tracker.finish();
+
+  const report: VerifyReport = {
+    backupId: manifest.id,
+    mode,
+    ok: totals.problems.length === 0,
+    filesChecked: totals.filesChecked,
+    bytesChecked: totals.bytesChecked,
+    documentsChecked: totals.documentsChecked,
+    problems: totals.problems,
+    durationMs: Math.round(performance.now() - startedAt),
+    ...(chain === undefined ? {} : { chain }),
+  };
+  context.logger.info("Verification finished", {
+    backupId: manifest.id,
+    ok: report.ok,
+    problems: report.problems.length,
+  });
+  return report;
+}
+
+/**
+ * Checks one backup's own files: the key envelope, every namespace's metadata and data
+ * files, and the changes file. Problems go to `shared.totals`, their subjects prefixed
+ * with `shared.prefix`.
+ */
+async function verifyStoredFiles(
+  context: VerifyContext,
+  manifest: Manifest,
+  options: VerifyOptions,
+  shared: {
+    readonly totals: VerifyTotals;
+    readonly tracker: ProgressTracker;
+    readonly prefix: string;
+  },
+): Promise<void> {
+  const mode = options.mode ?? "fast";
+  const { totals } = shared;
   // Deep mode needs the keys (for passphrase backups: the unlocked key envelope).
   // If the envelope itself is damaged, nothing can be decrypted, so the rest of the
   // run falls back to checksum checks, which still find every other damaged file.
   const deepSource =
-    mode === "deep" ? await openForDeepVerify(context, manifest, options, totals) : undefined;
+    mode === "deep"
+      ? await openForDeepVerify(context, manifest, options, totals, shared.prefix)
+      : undefined;
   const run: VerifyRun = {
     mode: deepSource === undefined ? "fast" : "deep",
     source: deepSource ?? sourceFromManifest(context.storage, manifest, options.decryption),
     totals,
-    tracker: new ProgressTracker({ onProgress: options.onProgress, logger: context.logger }),
+    tracker: shared.tracker,
     signal: options.signal,
+    prefix: shared.prefix,
   };
-  context.logger.info("Verifying backup", { backupId: manifest.id, mode });
 
-  checkTotals(manifest, run.totals.problems);
+  checkTotals(manifest, run);
   // Fast mode checks the key envelope like any other file (deep mode just read it).
   const keyFile = manifest.encryption?.keyFile;
   if (mode === "fast" && keyFile !== undefined) {
@@ -117,24 +173,39 @@ export async function verifyBackup(
     if (run.mode === "fast") await checkFileFast(run, manifest.changes);
     else await checkChangesDeep(run, manifest, manifest.changes);
   }
-  run.tracker.finish();
+}
 
-  const report: VerifyReport = {
-    backupId: manifest.id,
-    mode,
-    ok: totals.problems.length === 0,
-    filesChecked: totals.filesChecked,
-    bytesChecked: totals.bytesChecked,
-    documentsChecked: totals.documentsChecked,
-    problems: totals.problems,
-    durationMs: Math.round(performance.now() - startedAt),
+/**
+ * The chain of an incremental backup (see the file header): records every broken link,
+ * then checks the files of every earlier member that could be reached (unless
+ * `chain: "links"`). Returns the report's `chain` section.
+ */
+async function verifyChain(
+  context: VerifyContext,
+  entries: readonly CatalogEntry[],
+  manifest: Manifest & { readonly chain: NonNullable<Manifest["chain"]> },
+  options: VerifyOptions,
+  shared: { readonly totals: VerifyTotals; readonly tracker: ProgressTracker },
+): Promise<NonNullable<VerifyReport["chain"]>> {
+  const inspection = inspectChain(entries, manifest);
+  for (const problem of inspection.problems) {
+    shared.totals.problems.push({ subject: `chain ${problem.backupId}`, problem: problem.problem });
+  }
+  const scope = options.chain ?? "full";
+  const earlier = inspection.members.slice(1);
+  if (scope === "full") {
+    for (const member of earlier) {
+      throwIfAborted(options.signal);
+      await verifyStoredFiles(context, member, options, { ...shared, prefix: `${member.id}/` });
+    }
+  }
+  return {
+    baseBackupId: manifest.chain.base,
+    length: manifest.chain.length,
+    // Oldest first, ending with the verified backup itself.
+    members: [...inspection.members].reverse().map((member) => member.id),
+    scope,
   };
-  context.logger.info("Verification finished", {
-    backupId: manifest.id,
-    ok: report.ok,
-    problems: report.problems.length,
-  });
-  return report;
 }
 
 /**
@@ -148,6 +219,7 @@ async function openForDeepVerify(
   manifest: Manifest,
   options: VerifyOptions,
   totals: VerifyTotals,
+  prefix: string,
 ): Promise<StoredBackupSource | undefined> {
   const keyFile = manifest.encryption?.keyFile;
   try {
@@ -161,10 +233,10 @@ async function openForDeepVerify(
     return source;
   } catch (error) {
     if (keyFile === undefined) throw error;
-    recordReadFailure({ totals }, keyFile.key, error);
+    recordReadFailure({ totals, prefix }, keyFile.key, error);
     totals.filesChecked += 1;
     totals.problems.push({
-      subject: keyFile.key,
+      subject: `${prefix}${keyFile.key}`,
       problem:
         "Without the key file nothing can be decrypted; the other files were only checked against their checksums.",
     });
@@ -172,7 +244,11 @@ async function openForDeepVerify(
   }
 }
 
-async function loadManifest(context: VerifyContext, options: VerifyOptions): Promise<Manifest> {
+/** The selected backup's manifest, and the catalog (for its chain). */
+async function loadManifest(
+  context: VerifyContext,
+  options: VerifyOptions,
+): Promise<{ readonly manifest: Manifest; readonly entries: readonly CatalogEntry[] }> {
   const entries = await listBackups(context.storage, {
     logger: context.logger,
     ...(options.signal ? { signal: options.signal } : {}),
@@ -181,24 +257,26 @@ async function loadManifest(context: VerifyContext, options: VerifyOptions): Pro
   if (selected.manifest === undefined) {
     throw new MongoShieldError("MS_INTERNAL", `Backup ${selected.id} has no manifest.`);
   }
-  return selected.manifest;
+  return { manifest: selected.manifest, entries };
 }
 
 /** The manifest's totals must add up; a mismatch means it was edited or mis-written. */
-function checkTotals(manifest: Manifest, problems: VerifyProblem[]): void {
+function checkTotals(manifest: Manifest, run: Pick<VerifyRun, "totals" | "prefix">): void {
   let documents = 0;
   for (const entry of manifest.namespaces) documents += entry.documents;
   if (manifest.totals.documents !== documents) {
-    problems.push({
-      subject: "manifest.json",
-      problem: `totals.documents is ${manifest.totals.documents}, but the namespaces add up to ${documents}.`,
-    });
+    addProblem(
+      run,
+      "manifest.json",
+      `totals.documents is ${manifest.totals.documents}, but the namespaces add up to ${documents}.`,
+    );
   }
   if (manifest.totals.namespaces !== manifest.namespaces.length) {
-    problems.push({
-      subject: "manifest.json",
-      problem: `totals.namespaces is ${manifest.totals.namespaces}, but ${manifest.namespaces.length} namespaces are listed.`,
-    });
+    addProblem(
+      run,
+      "manifest.json",
+      `totals.namespaces is ${manifest.totals.namespaces}, but ${manifest.namespaces.length} namespaces are listed.`,
+    );
   }
 }
 
@@ -220,7 +298,7 @@ function verifyNamespaceInSpan(
       // Namespaces run concurrently and share one problem list, so count this
       // namespace's problems by their subject (its file keys) afterwards.
       await verifyNamespace(run, entry);
-      const problems = problemsOf(run.totals.problems, entry);
+      const problems = problemsOf(run.totals.problems, entry, run.prefix);
       span.setAttributes({ [ATTRIBUTES.problems]: problems });
       if (problems > 0) span.fail(PROBLEMS_FOUND);
     },
@@ -228,9 +306,13 @@ function verifyNamespaceInSpan(
 }
 
 /** How many of `problems` are about `entry`'s files or the namespace itself. */
-function problemsOf(problems: readonly VerifyProblem[], entry: NamespaceEntry): number {
-  const subjects = new Set<string>([entry.ns, entry.metadata.key]);
-  for (const file of entry.files) subjects.add(file.key);
+function problemsOf(
+  problems: readonly VerifyProblem[],
+  entry: NamespaceEntry,
+  prefix: string,
+): number {
+  const subjects = new Set<string>([entry.ns, entry.metadata.key].map((key) => `${prefix}${key}`));
+  for (const file of entry.files) subjects.add(`${prefix}${file.key}`);
   let count = 0;
   for (const problem of problems) {
     if (subjects.has(problem.subject)) count += 1;
@@ -336,6 +418,9 @@ async function checkChangesDeep(
 ): Promise<void> {
   run.totals.filesChecked += 1;
   const { from, to } = manifest.consistency;
+  // An incremental's window starts after its parent's end: an event at exactly `from`
+  // belongs to the parent and would be replayed twice.
+  const exclusiveStart = isIncrementalManifest(manifest);
   let events = 0;
   let previous = from;
   let orderProblem: string | undefined;
@@ -349,6 +434,15 @@ async function checkChangesDeep(
         compareClusterTimes(time, previous) < 0
       ) {
         orderProblem = `Event #${events} (${formatClusterTime(time)}) is earlier than the one before it or the start of the window.`;
+      }
+      if (
+        orderProblem === undefined &&
+        exclusiveStart &&
+        events === 1 &&
+        from !== undefined &&
+        compareClusterTimes(time, from) === 0
+      ) {
+        orderProblem = `Event #1 (${formatClusterTime(time)}) is at the parent's end time, so it belongs to the parent.`;
       }
       if (orderProblem === undefined && to !== undefined && compareClusterTimes(time, to) > 0) {
         orderProblem = `Event #${events} (${formatClusterTime(time)}) is after the end of the window (${formatClusterTime(to)}).`;
@@ -389,7 +483,11 @@ function parseDocument(raw: Buffer, file: StoredFile, indexInFile: number): void
  * (no matching identity, or a passphrase that does not open a file whose checksum is
  * fine; the read pipeline has already turned modified files into MS_INTEGRITY_FAILED).
  */
-function recordReadFailure(run: Pick<VerifyRun, "totals">, subject: string, error: unknown): void {
+function recordReadFailure(
+  run: Pick<VerifyRun, "totals" | "prefix">,
+  subject: string,
+  error: unknown,
+): void {
   if (!isMongoShieldError(error)) throw error;
   const isKeyProblem =
     error.code === "MS_NO_IDENTITY" ||
@@ -406,6 +504,10 @@ function recordReadFailure(run: Pick<VerifyRun, "totals">, subject: string, erro
   addProblem(run, subject, problem);
 }
 
-function addProblem(run: Pick<VerifyRun, "totals">, subject: string, problem: string): void {
-  run.totals.problems.push({ subject, problem });
+function addProblem(
+  run: Pick<VerifyRun, "totals" | "prefix">,
+  subject: string,
+  problem: string,
+): void {
+  run.totals.problems.push({ subject: `${run.prefix}${subject}`, problem });
 }

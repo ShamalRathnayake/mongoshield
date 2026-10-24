@@ -19,16 +19,46 @@
  *   insert / upsert  non-empty time series           conflict (no unique _id to merge on)
  *
  * A target that does not exist is always `create`.
+ *
+ * Incremental backups hold no documents of their own: the plan of one is the plan of
+ * its chain's base full backup (its namespaces, document counts and targets), plus the
+ * incrementals to replay after it, oldest first (src/catalog/chain.ts). With `at`, the
+ * chain is cut at the first incremental that reaches that time.
+ *
+ * What change events cannot carry comes from the chain's **state member**: the newest
+ * incremental that ends at or before the restore's time (the selected one, without
+ * `at`). Every incremental records the metadata of every selected namespace and a full
+ * copy of every time series collection (FORMAT.md, "Incremental backups"), so the
+ * plan takes the base's collections (documents, replayed on), but the state member's
+ * views and time series collections, and the state member's metadata of each
+ * collection (`latestMetadata`) to bring options, validators and TTLs up to date.
  */
 
 import type { Document, MongoClient } from "mongodb";
 import { MongoServerError } from "mongodb";
-import { type CatalogEntry, listBackups, selectBackup } from "../catalog/index.ts";
+import {
+  type CatalogEntry,
+  chainUntil,
+  listBackups,
+  resolveChain,
+  selectBackup,
+} from "../catalog/index.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import { type CollectionEntry, collectionEntries, type Manifest } from "../format/manifest.ts";
+import {
+  type ClusterTime,
+  type CollectionEntry,
+  collectionEntries,
+  type IncrementalManifest,
+  isIncrementalManifest,
+  type Manifest,
+  type NamespaceEntry,
+  type StoredFile,
+} from "../format/manifest.ts";
+import { toJournalTime } from "../journal/time.ts";
 import { compileNamespaceFilter, splitNamespace } from "../mongo/index.ts";
 import type { RestoreMode, RestoreOptions, RestorePlan, RestorePlanEntry } from "../types.ts";
 import type { RestoreContext } from "./context.ts";
+import { compareClusterTimes } from "./converge-time.ts";
 import { assertValidTargetNamespace, compileRenameMap } from "./restore-rename.ts";
 
 /** The kind of namespace, as recorded in manifests and reported by listCollections. */
@@ -53,13 +83,28 @@ export type ActionDecision =
 export interface PlannedNamespace {
   readonly source: CollectionEntry;
   readonly entry: RestorePlanEntry;
+  /** The backup whose files `source` lists (a chain's base, or its state member). */
+  readonly backupId: string;
 }
 
 /** A plan plus everything `runRestore` needs to carry it out. */
 export interface DetailedRestorePlan {
   readonly plan: RestorePlan;
+  /** The backup whose namespaces are restored: the selected one, or its chain's base. */
   readonly manifest: Manifest;
   readonly namespaces: readonly PlannedNamespace[];
+  /**
+   * Incremental backups whose changes are replayed after `manifest`, oldest first.
+   * Empty unless an incremental backup was selected.
+   */
+  readonly incrementals: readonly IncrementalManifest[];
+  /** The chain's state member (see the file header), when it is an incremental. */
+  readonly stateBackupId?: string | undefined;
+  /**
+   * The state member's metadata file of each collection, by source namespace: what a
+   * chain restore brings the restored collection's options and indexes up to.
+   */
+  readonly latestMetadata: ReadonlyMap<string, StoredFile>;
 }
 
 /** Server error code for "not authorized". */
@@ -91,8 +136,9 @@ export async function buildRestorePlan(
   options: RestoreOptions,
 ): Promise<DetailedRestorePlan> {
   const mode = options.mode ?? DEFAULT_RESTORE_MODE;
-  const manifest = await loadManifest(context, options);
-  const selected = selectNamespaces(manifest, options);
+  const { manifest, incrementals, backupId, state } = await loadChain(context, options);
+  const planning = planningEntries(manifest, state);
+  const selected = selectNamespaces({ ...manifest, namespaces: [...planning.entries] }, options);
   const targets = mapTargets(selected, options.rename);
 
   const states = await inspectTargets(context.client, [...targets.values()], options.signal);
@@ -109,6 +155,7 @@ export async function buildRestorePlan(
       // `runRestore` refuses a plan that contains any.
       conflicts.push({
         source,
+        backupId: planning.owners.get(source.ns) ?? manifest.id,
         entry: {
           from: source.ns,
           to,
@@ -126,6 +173,7 @@ export async function buildRestorePlan(
     }
     namespaces.push({
       source,
+      backupId: planning.owners.get(source.ns) ?? manifest.id,
       entry: {
         from: source.ns,
         to,
@@ -141,7 +189,23 @@ export async function buildRestorePlan(
   const entries = [...namespaces, ...conflicts]
     .map((planned) => planned.entry)
     .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
-  return { manifest, namespaces, plan: { backupId: manifest.id, mode, entries } };
+  const chain =
+    incrementals.length === 0 && backupId === manifest.id
+      ? {}
+      : {
+          chain: {
+            baseBackupId: manifest.id,
+            incrementals: incrementals.map((incremental) => incremental.id),
+          },
+        };
+  return {
+    manifest,
+    namespaces,
+    incrementals,
+    stateBackupId: state?.id,
+    latestMetadata: planning.latestMetadata,
+    plan: { backupId, mode, entries, ...chain },
+  };
 }
 
 /**
@@ -219,18 +283,108 @@ function describeType(type: NamespaceType): string {
 // Steps
 // ---------------------------------------------------------------------------
 
-/** Selects the backup and returns its manifest. */
-async function loadManifest(context: RestoreContext, options: RestoreOptions): Promise<Manifest> {
+/** What a restore reads: the backup holding the documents, and the incrementals after it. */
+interface LoadedChain {
+  /** The selected backup's id (an incremental's own id, not its base's). */
+  readonly backupId: string;
+  readonly manifest: Manifest;
+  readonly incrementals: readonly IncrementalManifest[];
+  /** The chain's state member (see the file header), when it is an incremental. */
+  readonly state: IncrementalManifest | undefined;
+}
+
+/** The namespaces a restore plans over, which backup holds each, and the newest metadata. */
+interface PlanningEntries {
+  readonly entries: readonly NamespaceEntry[];
+  /** Source namespace → id of the backup holding its entry (absent: the base). */
+  readonly owners: ReadonlyMap<string, string>;
+  readonly latestMetadata: ReadonlyMap<string, StoredFile>;
+}
+
+/**
+ * The base's entries, or for a chain with a state member (see the file header): the
+ * base's collections, plus the state member's views and time series collections (and
+ * its users and roles entries are handled by restore-authz.ts, not here). A view or
+ * time series collection dropped after the base is therefore not restored, and one
+ * created after it is.
+ */
+export function planningEntries(
+  base: Manifest,
+  state: IncrementalManifest | undefined,
+): PlanningEntries {
+  if (state === undefined) {
+    return { entries: base.namespaces, owners: new Map(), latestMetadata: new Map() };
+  }
+  const fromState = collectionEntries(state.namespaces).filter(
+    (entry) => entry.type === "view" || (entry.type === "timeseries" && entry.content === "full"),
+  );
+  const latestMetadata = new Map<string, StoredFile>();
+  for (const entry of collectionEntries(state.namespaces)) {
+    if (entry.type === "collection") latestMetadata.set(entry.ns, entry.metadata);
+  }
+  return {
+    entries: [
+      ...collectionEntries(base.namespaces).filter((entry) => entry.type === "collection"),
+      ...fromState,
+    ].sort((a, b) => (a.ns < b.ns ? -1 : a.ns > b.ns ? 1 : 0)),
+    owners: new Map(fromState.map((entry) => [entry.ns, state.id])),
+    latestMetadata,
+  };
+}
+
+/**
+ * The newest incremental of a (cut) chain that ends at or before `at`: every change
+ * up to its end is restored, so its metadata and time series copies are not newer than
+ * the restore's time. `undefined` when only the base qualifies.
+ */
+export function stateMemberOf(
+  incrementals: readonly IncrementalManifest[],
+  at: ClusterTime | undefined,
+): IncrementalManifest | undefined {
+  for (const incremental of [...incrementals].reverse()) {
+    const end = incremental.consistency.to;
+    if (at === undefined || (end !== undefined && compareClusterTimes(end, at) <= 0)) {
+      return incremental;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Selects the backup. A full backup is restored on its own; an incremental through its
+ * chain (base + incrementals), cut at `options.at` when given.
+ *
+ * @throws MongoShieldError from `selectBackup`, `resolveChain` (a broken chain) and
+ *   `chainUntil` (`at` outside the chain).
+ */
+async function loadChain(context: RestoreContext, options: RestoreOptions): Promise<LoadedChain> {
   const entries = await listBackups(context.storage, {
     logger: context.logger,
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const selected: CatalogEntry = selectBackup(entries, options.backup);
-  if (selected.manifest === undefined) {
+  const manifest = selected.manifest;
+  if (manifest === undefined) {
     // selectBackup only returns complete entries, which always carry a manifest.
     throw new MongoShieldError("MS_INTERNAL", `Backup ${selected.id} has no manifest.`);
   }
-  return selected.manifest;
+  if (!isIncrementalManifest(manifest)) {
+    return { backupId: manifest.id, manifest, incrementals: [], state: undefined };
+  }
+  const resolved = resolveChain(entries, manifest);
+  const at = options.at === undefined ? undefined : toJournalTime(options.at);
+  const chain = at === undefined ? resolved : chainUntil(resolved, at);
+  context.logger.info("Restoring an incremental backup through its chain", {
+    backupId: manifest.id,
+    base: chain.base.id,
+    incrementals: chain.incrementals.length,
+  });
+  return {
+    backupId: manifest.id,
+    manifest: chain.base,
+    incrementals: chain.incrementals,
+    state: stateMemberOf(chain.incrementals, at),
+  };
 }
 
 /**

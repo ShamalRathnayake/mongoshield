@@ -5,6 +5,10 @@
  * (CI), it uses the flags and sensible defaults. The generated config never
  * contains secrets: the connection string is read from an environment
  * variable, and the only key in it is the public age recipient.
+ *
+ * `--preset atlas-free` (or `atlas-flex`) writes a config ready for an Atlas Free or
+ * Flex cluster: the preset, a gentle read pace and a retention policy for small
+ * clusters, plus Atlas-specific next steps (database user, IP access list).
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -12,6 +16,11 @@ import { basename, isAbsolute, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { type CANCEL_SYMBOL, cancel, intro, isCancel, outro, select, text } from "@clack/prompts";
 import { CONFIG_FILE_NAMES } from "../../config/load.ts";
+import {
+  CONFIG_PRESET_NAMES,
+  type ConfigPresetName,
+  isConfigPresetName,
+} from "../../config/presets.ts";
 import { assertValidRecipient, generateIdentity } from "../../crypto/index.ts";
 import { MongoShieldError } from "../../errors.ts";
 import { usageError } from "../args.ts";
@@ -40,8 +49,14 @@ export const initCommand: CommandSpec = {
     "Asks where to store backups, which environment variable holds the connection",
     "string, and whether to encrypt (optionally generating a key pair). With --yes",
     "or without a terminal it uses the flags below and their defaults.",
+    "--preset atlas-free (or atlas-flex) writes a config for an Atlas Free or Flex cluster.",
   ].join("\n"),
   options: {
+    preset: {
+      type: "string",
+      valueName: "<name>",
+      description: `Start from a preset for your deployment: ${CONFIG_PRESET_NAMES.join(", ")}`,
+    },
     storage: {
       type: "string",
       valueName: "<storage-url>",
@@ -73,6 +88,10 @@ export const initCommand: CommandSpec = {
       description: "Non-interactive, for CI or provisioning scripts",
       command: "mongoshield init --yes --storage s3://acme-backups/prod --keygen",
     },
+    {
+      description: "A config for an Atlas Free (M0) cluster, encrypted with a new key",
+      command: "mongoshield init --preset atlas-free --keygen",
+    },
   ],
   run: runInitCommand,
 };
@@ -100,6 +119,7 @@ async function runInitCommand(context: CommandContext): Promise<number> {
     uriEnv: answers.uriEnv,
     ...(recipient ? { recipient } : {}),
     ...(keyFile ? { keyFile: displayPath(context, keyFile) } : {}),
+    ...(answers.preset ? { preset: answers.preset } : {}),
   };
   await writeFile(configPath, generateConfigText(template), { flag: "wx" });
 
@@ -110,10 +130,17 @@ async function runInitCommand(context: CommandContext): Promise<number> {
       uriEnv: answers.uriEnv,
       ...(recipient ? { recipient } : {}),
       ...(keyFile ? { identityFile: keyFile } : {}),
+      ...(answers.preset ? { preset: answers.preset } : {}),
     });
     return 0;
   }
-  await printNextSteps(context, { configPath, uriEnv: answers.uriEnv, keyFile, interactive });
+  await printNextSteps(context, {
+    configPath,
+    uriEnv: answers.uriEnv,
+    keyFile,
+    interactive,
+    preset: answers.preset,
+  });
   return 0;
 }
 
@@ -124,6 +151,8 @@ interface WizardAnswers {
   readonly encryption: EncryptionChoice;
   readonly recipient: string | undefined;
   readonly keyFile: string;
+  /** From --preset only; the wizard does not ask for it. */
+  readonly preset: ConfigPresetName | undefined;
 }
 
 /** Non-interactive mode: flags, then defaults. */
@@ -144,7 +173,18 @@ function answersFromFlags(context: CommandContext): WizardAnswers {
     encryption: flags.boolean("keygen") ? "generate" : recipient ? "existing" : "none",
     recipient,
     keyFile: flags.string("key-file") ?? DEFAULTS.keyFile,
+    preset: presetFlag(flags.string("preset")),
   };
+}
+
+/** Validates --preset against the known preset names. */
+function presetFlag(value: string | undefined): ConfigPresetName | undefined {
+  if (value === undefined) return undefined;
+  if (isConfigPresetName(value)) return value;
+  throw usageError(
+    `Unknown preset "${value}". Use one of: ${CONFIG_PRESET_NAMES.join(", ")}.`,
+    NAME,
+  );
 }
 
 /** The interactive wizard. Flags given on the command line become the defaults. */
@@ -216,7 +256,7 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   }
 
   outro("Writing your configuration…", common);
-  return { storage, uriEnv, encryption, recipient, keyFile };
+  return { storage, uriEnv, encryption, recipient, keyFile, preset: defaults.preset };
 }
 
 /**
@@ -259,7 +299,13 @@ async function refuseIfConfigExists(cwd: string): Promise<void> {
 /** What to do now, including the key-safety reminders. */
 async function printNextSteps(
   context: CommandContext,
-  facts: { configPath: string; uriEnv: string; keyFile: string | undefined; interactive: boolean },
+  facts: {
+    configPath: string;
+    uriEnv: string;
+    keyFile: string | undefined;
+    interactive: boolean;
+    preset: ConfigPresetName | undefined;
+  },
 ): Promise<void> {
   const { out } = context;
   out.success(`Created ${facts.configPath}`);
@@ -272,7 +318,10 @@ async function printNextSteps(
   }
 
   const steps = [
-    `export ${facts.uriEnv}="mongodb://…"     # or set it in your secret manager`,
+    ...(facts.preset === undefined ? [] : ATLAS_SETUP_STEPS),
+    facts.preset === undefined
+      ? `export ${facts.uriEnv}="mongodb://…"     # or set it in your secret manager`
+      : `export ${facts.uriEnv}="mongodb+srv://…/?compressors=zlib"     # or set it in your secret manager`,
     "mongoshield backup",
     "mongoshield list",
     "mongoshield verify",
@@ -287,6 +336,12 @@ async function printNextSteps(
     out.result(`  ${index + 1}. ${step}`);
   });
 }
+
+/** The Atlas side of the setup, listed first in the next steps of the Atlas presets. */
+const ATLAS_SETUP_STEPS: readonly string[] = [
+  'Atlas → Database Access: add a user with the role "Only read any database" (readAnyDatabase)',
+  "Atlas → Network Access: allow the IP address backups run from",
+];
 
 /** Reminds the user to keep the key out of git, unless .gitignore already covers it. */
 async function remindGitignore(context: CommandContext, keyFile: string): Promise<void> {

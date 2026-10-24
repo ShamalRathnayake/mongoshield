@@ -512,11 +512,18 @@ function clusterTimeInMessage(message: string): ClusterTime | undefined {
  * change in an unrelated database costs a little bandwidth, and a change event there
  * that is too large to send would fail the stream (see `isEventTooLarge`). The
  * server applies a `$match` on `ns.db` before it builds the event.
+ *
+ * `regexOnly` writes the same filter with regular expressions instead of `$in` /
+ * `$nin`, because Atlas Free and Flex clusters accept only strings and regexes in
+ * `ns.db` filters (https://www.mongodb.com/docs/atlas/reference/free-shared-limitations/):
+ * `/^(?:a|b)$/` for "one of these", and a negative lookahead `/^(?!(?:a|b)$)/` for
+ * "none of these".
  */
 export function serverDatabaseFilter(
   rules: NamespaceRules,
   alsoKeep: Iterable<string>,
   internalDatabases: readonly string[],
+  options: { readonly regexOnly?: boolean } = {},
 ): Document {
   const kept = new Set(alsoKeep);
   const literal = rules.include.every((pattern) => pattern.literalDatabase !== undefined);
@@ -526,9 +533,23 @@ export function serverDatabaseFilter(
       if (pattern.literalDatabase !== undefined) databases.add(pattern.literalDatabase);
     }
     const names = [...databases].sort();
+    if (options.regexOnly === true) {
+      const oneOf = new RegExp(`^(?:${names.map(escapeRegExp).join("|")})$`);
+      return { $or: [{ "ns.db": oneOf }, { "to.db": oneOf }] };
+    }
     return { $or: [{ "ns.db": { $in: names } }, { "to.db": { $in: names } }] };
   }
-  return { "ns.db": { $nin: internalDatabases.filter((db) => !kept.has(db)) } };
+  const skipped = internalDatabases.filter((db) => !kept.has(db));
+  if (options.regexOnly === true) {
+    // With nothing to skip, `(?!(?:)$)` would reject only the empty name: still correct.
+    return { "ns.db": new RegExp(`^(?!(?:${skipped.map(escapeRegExp).join("|")})$)`) };
+  }
+  return { "ns.db": { $nin: skipped } };
+}
+
+/** Escapes the characters that mean something in a regular expression. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // ---------------------------------------------------------------------------

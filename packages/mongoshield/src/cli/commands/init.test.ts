@@ -281,3 +281,60 @@ describe("mongoshield init on a terminal", () => {
     expect(await exists(join(cwd, "mongoshield.config.ts"))).toBe(true);
   });
 });
+
+describe("mongoshield init --preset", () => {
+  it("writes a ready config for an Atlas Free cluster that loads and validates", async () => {
+    const run = await runTestCli(
+      ["init", "--preset", "atlas-free", "--keygen", "--storage", "s3://acme/atlas"],
+      { cwd },
+    );
+    expect(run.code, run.stderr).toBe(0);
+    const text = await configText();
+    expect(text).toContain('preset: "atlas-free",');
+    expect(text).toContain("backup: { parallelism: 2, maxBytesPerSecond: 4 * 1024 * 1024 },");
+    expect(text).toContain("retention: { last: 7, weekly: 4, monthly: 6 },");
+    expect(text).toContain("compressors=zlib");
+    expect(text).toMatch(/recipients: \["age1/);
+    expect(run.stdout).toContain("Only read any database");
+    expect(run.stdout).toContain("Network Access");
+    expect(run.stdout).toContain('export MONGODB_URI="mongodb+srv://');
+
+    // The written file is a valid config: load it the way the CLI does.
+    const { loadConfig } = await import("../../config/load.ts");
+    const { config } = await loadConfig({ cwd, env: { MONGODB_URI: "mongodb://localhost" } });
+    expect(config.preset).toBe("atlas-free");
+    expect(config.backup?.maxBytesPerSecond).toBe(4 * 1024 * 1024);
+    expect(config.retention).toEqual({ last: 7, weekly: 4, monthly: 6 });
+  });
+
+  it("writes the Flex read pace for atlas-flex and reports the preset in --json", async () => {
+    const run = await runTestCli(["init", "--preset", "atlas-flex", "--json"], { cwd });
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.json<Record<string, string>>().preset).toBe("atlas-flex");
+    const text = await configText();
+    expect(text).toContain('preset: "atlas-flex",');
+    expect(text).toContain("maxBytesPerSecond: 8 * 1024 * 1024");
+  });
+
+  it("refuses an unknown preset and lists the valid ones, writing nothing", async () => {
+    const run = await runTestCli(["init", "--preset", "atlas-m10"], { cwd });
+    expect(run.code).toBe(2);
+    expect(run.stderr).toContain('Unknown preset "atlas-m10"');
+    expect(run.stderr).toContain("atlas-free, atlas-flex");
+    expect(await exists(join(cwd, "mongoshield.config.ts"))).toBe(false);
+  });
+
+  it("keeps the preset through the interactive wizard", async () => {
+    const run = await runTestCli(["init", "--preset", "atlas-free"], {
+      cwd,
+      terminal: [
+        { when: "Where should backups be stored?", keys: KEYS.enter },
+        { when: "Which environment variable", keys: KEYS.enter },
+        { when: "Encrypt backups?", keys: KEYS.enter },
+        { when: "Where should the secret key file be written?", keys: KEYS.enter },
+      ],
+    });
+    expect(run.code, plain(run.stderr)).toBe(0);
+    expect(await configText()).toContain('preset: "atlas-free",');
+  });
+});

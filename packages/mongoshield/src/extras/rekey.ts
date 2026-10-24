@@ -202,6 +202,9 @@ export async function rekeyBackups(
   const selected = await selectBackups(storage, options.backups, {
     signal: options.signal,
     logger: run.logger,
+    // An incremental is only readable together with its chain, so the chain is
+    // rekeyed with it: otherwise restoring it would still need the old keys.
+    withChainAncestors: true,
   });
   const explicit = options.backups !== "all";
   const results: RekeyBackupResult[] = [];

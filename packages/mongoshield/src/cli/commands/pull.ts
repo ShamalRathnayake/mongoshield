@@ -114,7 +114,7 @@ function assertMaskingDecision(context: CommandContext): void {
   if (hasMask) return;
   if (!noMask) {
     throw new MongoShieldError("MS_CONFIG_INVALID", "pull needs a mask file (--mask ./mask.ts).", {
-      hint: "Write one (see docs/guides/staging-data.md), or pass --no-mask --yes to copy unmasked data on purpose.",
+      hint: "Draft one with `mongoshield mask suggest --mask ./mask.json --write` and review it (see docs/guides/staging-data.md), or pass --no-mask --yes to copy unmasked data on purpose.",
     });
   }
   if (!context.global.yes) {

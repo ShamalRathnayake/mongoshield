@@ -148,4 +148,46 @@ describe("mongoshield inspect", () => {
       'MS_BACKUP_NOT_FOUND  No backup with id "not-an-id" exists.',
     );
   });
+
+  it("marks upgrade rehearsals with the version they proved", async () => {
+    const { url, storage } = await namedMemoryStore();
+    const written = await writeTestBackup(storage, {
+      namespaces: [{ ns: "app.users", documents: [{ _id: 1 }] }],
+    });
+    const drill = {
+      backupId: written.id,
+      ok: true,
+      restored: true,
+      restoreDurationMs: 2000,
+      durationMs: 3000,
+      namespaces: 1,
+      documentsRestored: 1,
+      problemCount: 0,
+    };
+    await writeDrillRecord(storage, {
+      ...drill,
+      drilledAt: new Date(Date.now() - 2 * HOUR).toISOString(),
+    });
+    await writeDrillRecord(storage, {
+      ...drill,
+      drilledAt: new Date(Date.now() - HOUR).toISOString(),
+      targetVersion: "8.0.13",
+      sourceVersion: "7.0.32",
+      compatibility: { problems: 0, warnings: 1 },
+    });
+
+    const run = await runTestCli(["inspect", written.id, "--from", url]);
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.stdout).toMatch(
+      /Last drill\s+upgrade rehearsal on MongoDB 8\.0\.13 ✓ \(RTO 2s\) 1h ago/,
+    );
+    const drillLines = run.stdout.slice(run.stdout.indexOf("DRILLED")).split("\n");
+    expect(drillLines[0]).toMatch(/DRILLED\s+RESULT\s+MONGODB\s+RTO\s+DOCUMENTS\s+PROBLEMS/);
+    expect(drillLines[1]).toMatch(/1h ago\s+passed\s+→ 8\.0\.13\s+2s/);
+    expect(drillLines[2]).toMatch(/2h ago\s+passed\s+–\s+2s/);
+
+    const json = await runTestCli(["inspect", written.id, "--from", url, "--json"]);
+    const parsed = JSON.parse(json.stdout) as { drills: { targetVersion?: string }[] };
+    expect(parsed.drills.map((record) => record.targetVersion)).toEqual(["8.0.13", undefined]);
+  });
 });

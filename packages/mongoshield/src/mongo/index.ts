@@ -4,6 +4,17 @@
  */
 
 export {
+  ATLAS_ERROR_CODE,
+  ATLAS_SHARED_TIER_TUNING,
+  ATLAS_USERS_HINT,
+  type AtlasInfo,
+  type AtlasTier,
+  detectAtlas,
+  isAtlasHost,
+  isAtlasRefusal,
+  isAtlasSharedTier,
+} from "./atlas.ts";
+export {
   type MongoConnection,
   type OpenConnectionOptions,
   openConnection,

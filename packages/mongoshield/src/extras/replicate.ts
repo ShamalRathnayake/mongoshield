@@ -17,6 +17,10 @@
  *      catalog needs to describe the backup the same way
  *   4. `manifest.json`, byte for byte, LAST: the commit marker, as in a backup run
  *
+ * Incremental backups are copied with every backup they depend on (their chain, back to
+ * its full base), parents first, so an incremental is never at the destination
+ * without what it needs to be restored.
+ *
  * Backups already present at the destination are skipped when they are identical. A
  * backup rekeyed at the source since it was copied (src/extras/rekey.ts) has files with
  * new digests: only those files and the rekey record are copied ("updated").
@@ -164,6 +168,8 @@ export async function replicateBackups(
   const selected = await selectBackups(from, options.backups ?? "all", {
     signal: options.signal,
     logger: run.logger,
+    // Parents first (oldest first): see the file header.
+    withChainAncestors: true,
   });
   // What the destination already has, as its own catalog sees it (rekeys applied).
   const existing = new Map<string, Manifest>();

@@ -67,6 +67,11 @@ export const ERROR_CODES = {
     description:
       "The backup guard refused a backup that looks like data was lost since the previous one.",
   },
+  MS_BACKUP_PROTECTED: {
+    exitCode: 35,
+    description:
+      "The backup cannot be deleted: it is on hold, under an object lock, or other backups depend on it.",
+  },
   MS_ENCRYPTION_FAILED: { exitCode: 40, description: "Encrypting backup data failed." },
   MS_DECRYPTION_FAILED: {
     exitCode: 41,

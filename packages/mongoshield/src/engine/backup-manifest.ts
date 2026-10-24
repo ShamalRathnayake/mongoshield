@@ -4,8 +4,19 @@
  * stored; every field is documented in docs/specs/FORMAT.md.
  */
 
-import type { ClusterTime, Compression, ConsistencyMode } from "../format/manifest.ts";
-import { MANIFEST_FORMAT_VERSION, type Manifest, type NamespaceEntry } from "../format/manifest.ts";
+import type {
+  ChainInfo,
+  ClusterTime,
+  Compression,
+  ConsistencyMode,
+  Selection,
+} from "../format/manifest.ts";
+import {
+  FULL_BACKUP_FORMAT_VERSION,
+  INCREMENTAL_BACKUP_FORMAT_VERSION,
+  type Manifest,
+  type NamespaceEntry,
+} from "../format/manifest.ts";
 import type { DeploymentInfo } from "../mongo/index.ts";
 import { version } from "../version.ts";
 import type { FileEncryption } from "./backup-key.ts";
@@ -33,12 +44,40 @@ export interface ManifestInput {
   readonly namespaces: readonly NamespaceEntry[];
   /** End of write-once retention (`retainDays`), recorded as `immutableUntil`. */
   readonly immutableUntil?: Date | undefined;
+  /** The include/exclude selection, recorded so incrementals can continue the backup. */
+  readonly selection?: Selection | undefined;
+  /**
+   * Incremental backups only (backup-incremental.ts): their place in the chain. Makes
+   * the manifest `kind: "incremental"`, format version 2. The window's `from` must
+   * then be the parent's end time.
+   */
+  readonly chain?: ChainInfo | undefined;
+}
+
+/**
+ * The selection a backup records (see `SelectionSchema`): patterns sorted, so two
+ * backups of the same selection given in a different order compare equal.
+ */
+export function selectionOf(options: {
+  readonly include?: readonly string[] | undefined;
+  readonly exclude?: readonly string[] | undefined;
+  readonly query?: Readonly<Record<string, unknown>> | undefined;
+}): Selection {
+  return {
+    include: [...(options.include ?? [])].sort(),
+    exclude: [...(options.exclude ?? [])].sort(),
+    query: Object.keys(options.query ?? {}).sort(),
+  };
 }
 
 /** Assembles the manifest. It is validated against the schema when written. */
 export function buildManifest(input: ManifestInput): Manifest {
+  const incremental = input.chain !== undefined;
   return {
-    formatVersion: MANIFEST_FORMAT_VERSION,
+    // Full backups stay at version 1, readable by every 2.x release; incrementals need
+    // a reader that knows chains (see MANIFEST_FORMAT_VERSION).
+    formatVersion: incremental ? INCREMENTAL_BACKUP_FORMAT_VERSION : FULL_BACKUP_FORMAT_VERSION,
+    ...(incremental ? { kind: "incremental" as const, chain: input.chain } : {}),
     id: input.id,
     // Which program wrote the backup, so readers can work around known bugs of old writers.
     tool: `mongoshield@${version}`,
@@ -55,6 +94,7 @@ export function buildManifest(input: ManifestInput): Manifest {
     compression: input.compression,
     encryption: buildEncryption(input.encryption),
     labels: { ...input.labels },
+    ...(input.selection === undefined ? {} : { selection: input.selection }),
     namespaces: [...input.namespaces],
     ...(input.consistency.window === undefined ? {} : { changes: input.consistency.window.file }),
     ...(input.immutableUntil === undefined

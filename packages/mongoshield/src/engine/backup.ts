@@ -29,6 +29,7 @@
  *   backup-namespace.ts    writing one metadata file or one data part
  *   backup-reads.ts        read preference and batch sizes
  *   rate-limit.ts          maxDocumentsPerSecond / maxBytesPerSecond
+ *   atlas-adapt.ts         Atlas Free/Flex: gentler reads, refusing what the tier cannot do
  *   backup-budget.ts       the time budget of maxDurationMs
  *   backup-checkpoint.ts   the checkpoint format
  *   backup-resume.ts       finding, checking and saving checkpoints
@@ -36,6 +37,7 @@
  *   backup-manifest.ts     building the manifest
  *   backup-authz.ts        users and roles (includeUsersAndRoles)
  *   backup-errors.ts       translating driver errors
+ *   backup-incremental.ts  `incremental`: only the changes since a parent backup
  */
 
 import { isZstdAvailable } from "../compression/index.ts";
@@ -54,6 +56,7 @@ import {
   type CollectionSpec,
   describeDeployment,
   discoverNamespaces,
+  isAtlasSharedTier,
 } from "../mongo/index.ts";
 import { compileNamespaceRules, explicitlyNamedDatabases } from "../mongo/namespace-filter.ts";
 import type { StorageAdapter } from "../storage/types.ts";
@@ -64,6 +67,11 @@ import type {
   CompletedBackupResult,
   CompletingBackupOptions,
 } from "../types.ts";
+import {
+  adaptBackupReads,
+  assertUsersAndRolesBackupSupported,
+  logBackupAdaptation,
+} from "./atlas-adapt.ts";
 import { type AuthzScope, backupUsersAndRoles } from "./backup-authz.ts";
 import { TimeBudget } from "./backup-budget.ts";
 import {
@@ -88,8 +96,9 @@ import {
   vanishedNamespaces,
 } from "./backup-dump.ts";
 import { toBackupError } from "./backup-errors.ts";
+import { runIncrementalBackup } from "./backup-incremental.ts";
 import { type FileEncryption, prepareFileEncryption } from "./backup-key.ts";
-import { buildManifest } from "./backup-manifest.ts";
+import { buildManifest, selectionOf } from "./backup-manifest.ts";
 import type { NamespaceDumpContext } from "./backup-namespace.ts";
 import {
   assertQueriesMatchNamespaces,
@@ -152,13 +161,18 @@ export async function runBackup(
   context: BackupContext,
   options: BackupOptions = {},
 ): Promise<BackupResult> {
+  // Incremental backups store only the changes since a parent: their own engine.
+  if (options.incremental !== undefined && options.incremental !== false) {
+    // A full backup taken instead (fallbackToFull) is an ordinary run of this function.
+    return runIncrementalBackup(context, options, (full) => runBackup(context, full));
+  }
   const invokedAt = new Date();
   const clock = performance.now();
   const { client, logger, storage } = context;
   const { signal } = options;
 
   // 1. Everything that can be checked without reading data.
-  const parallelism = validateBackupOptions(options);
+  const requestedParallelism = validateBackupOptions(options);
   const settings = validateRunSettings(options);
   const encryptionPlan = planEncryption(context.encryption);
   assertCompressionAvailable(context.compression);
@@ -167,6 +181,12 @@ export async function runBackup(
 
   // 2. What are we backing up, from where, and may we?
   const deployment = await describeDeployment(client).catch(rethrowTyped);
+  // Atlas Free/Flex: refuse what the tier cannot do, and read more gently unless the
+  // caller chose the pace (atlas-adapt.ts).
+  assertUsersAndRolesBackupSupported(options, deployment);
+  const reads = adaptBackupReads(options, requestedParallelism, deployment);
+  logBackupAdaptation(logger, reads, deployment);
+  const { parallelism } = reads;
   const choice = settings.resumable
     ? resumableConsistency(options)
     : await chooseConsistency(client, options.consistency, deployment);
@@ -270,6 +290,8 @@ export async function runBackup(
         include: options.include,
         exclude: options.exclude,
         serverVersion: deployment.serverVersion,
+        // Atlas Free/Flex only accept strings and regexes in ns.db filters.
+        regexDatabaseFilter: isAtlasSharedTier(deployment),
         signal,
         retainUntil,
       });
@@ -288,7 +310,7 @@ export async function runBackup(
       readPreference,
       // Converge reads from secondaries must not see data older than T0.
       readAfter: readPreference.mode === "primary" ? undefined : windowStart,
-      rateLimiter: createRateLimiter(options),
+      rateLimiter: createRateLimiter(reads.rateLimits),
       retainUntil,
       writtenKeys,
       // A collection dropped or replaced mid-dump (see ReplacedCollectionPolicy).
@@ -375,6 +397,8 @@ export async function runBackup(
         ...authzEntries,
       ],
       immutableUntil: retainUntil,
+      // Lets an incremental backup check later that it continues the same selection.
+      selection: selectionOf(options),
     });
     // The caller's last word (e.g. the backup guard). A throw takes the failure path
     // below, so the files written so far are deleted and no manifest is committed.

@@ -30,7 +30,12 @@ import {
 import { MongoShieldError } from "../errors.ts";
 import type { ClusterTime, ConsistencyMode } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
-import type { CollectionSpec, DeploymentInfo } from "../mongo/index.ts";
+import {
+  type CollectionSpec,
+  type DeploymentInfo,
+  isAtlasRefusal,
+  isAtlasSharedTier,
+} from "../mongo/index.ts";
 import type { BackupOptions } from "../types.ts";
 import { toBackupError } from "./backup-errors.ts";
 
@@ -142,8 +147,9 @@ const UNAUTHORIZED_CODE = 13;
  * `aggregate` with `batchSize: 0` (it returns at once, reading nothing) and a
  * `killCursors`.
  *
- * Only "not authorized" makes `auto` fall back to `none`; any other probe failure
- * (network, server down) is a real problem and fails the backup.
+ * Only "not authorized", or an Atlas Free/Flex proxy refusing the stream (code 8000,
+ * `AtlasError`), makes `auto` fall back to `none`; any other probe failure (network,
+ * server down) is a real problem and fails the backup.
  */
 export async function chooseConsistency(
   client: MongoClient,
@@ -163,6 +169,13 @@ export async function chooseConsistency(
     };
   }
   if (await mayOpenChangeStream(client)) return { mode, warning: undefined };
+  if (isAtlasSharedTier(deployment)) {
+    return {
+      mode: "none",
+      warning:
+        'Consistency "auto" used "none" (collections may reflect different moments): this Atlas Free/Flex cluster did not let the user open a change stream on the whole deployment, which "converge" needs. Give the database user the readAnyDatabase role (Atlas: "Only read any database"), or back up while the application is idle.',
+    };
+  }
   return {
     mode: "none",
     warning:
@@ -193,6 +206,7 @@ async function mayOpenClusterChangeStream(client: MongoClient): Promise<boolean>
     return true;
   } catch (error) {
     if (error instanceof MongoServerError && error.code === UNAUTHORIZED_CODE) return false;
+    if (isAtlasRefusal(error)) return false;
     throw toBackupError(error);
   } finally {
     await session.endSession().catch(() => {});

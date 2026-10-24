@@ -218,5 +218,17 @@ async function loadManifest(
     // selectBackup only returns complete entries, which always carry a manifest.
     throw new MongoShieldError("MS_INTERNAL", `Backup ${selected.id} has no manifest.`);
   }
+  // An incremental holds change events, which mongodump's layout has no place for:
+  // exporting it would produce an empty dump that looks like a complete one.
+  const chain = selected.manifest.chain;
+  if (chain !== undefined) {
+    throw new MongoShieldError(
+      "MS_CONFIG_INVALID",
+      `Backup ${selected.id} is an incremental backup: it holds only the changes since ${chain.parent}, which a mongodump export cannot represent.`,
+      {
+        hint: `Export its full backup ${chain.base} (the data as of that backup), or restore the incremental into a scratch deployment and run mongodump there.`,
+      },
+    );
+  }
   return selected.manifest;
 }

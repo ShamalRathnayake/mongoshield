@@ -12,7 +12,24 @@ import { z } from "zod";
  * `MANIFEST_FORMAT_VERSION` and an RFC. See docs/specs/FORMAT.md.
  */
 
-export const MANIFEST_FORMAT_VERSION = 1;
+/**
+ * The highest manifest format version this release reads (and writes).
+ *
+ * Version 2 exists for incremental backups only: an incremental holds the changes
+ * since its parent, not the data, and a version-1 reader that ignored `kind` would
+ * restore it as an (empty) backup plus a replay, silently producing the wrong data.
+ * Version 2 makes such a reader stop with "please upgrade" instead. Full backups are
+ * still written as version 1 ({@link FULL_BACKUP_FORMAT_VERSION}), so every reader of
+ * the first format keeps reading them. See docs/specs/FORMAT.md, "Incremental backups".
+ */
+export const MANIFEST_FORMAT_VERSION = 2;
+
+/** The format version written for full backups (readable by every 2.x release). */
+export const FULL_BACKUP_FORMAT_VERSION = 1;
+
+/** The format version written for incremental backups (the first that knows `kind`). */
+export const INCREMENTAL_BACKUP_FORMAT_VERSION = 2;
+
 export const MANIFEST_FILENAME = "manifest.json";
 
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/, "expected a lowercase hex SHA-256 digest");
@@ -91,11 +108,62 @@ export const NamespaceEntrySchema = z.object({
   files: z.array(DataFileSchema),
   /** mongodump-compatible `<collection>.metadata.json` (options, indexes, uuid, type). */
   metadata: StoredFileSchema,
+  /**
+   * Incremental backups only (and required there): what the entry holds.
+   * `"metadata"`: the namespace's metadata file as of the backup (options, validators,
+   * indexes, a view's definition), no documents; its documents come from the chain.
+   * `"full"`: metadata and every document, as a full backup holds them (time series
+   * collections, which change events do not report, and users and roles).
+   * Absent in full backups, where every entry is complete.
+   */
+  content: z.enum(["full", "metadata"]).optional(),
+});
+
+/**
+ * What a backup was asked to back up: its include/exclude patterns and the namespaces
+ * it filtered with a `query`. Recorded so an incremental backup can check that it
+ * continues a chain of the same selection (a chain of `app.*` must not get an
+ * incremental of `*`). Added in MongoShield 2.0 without a format bump: readers that
+ * ignore it lose nothing.
+ */
+export const SelectionSchema = z.object({
+  include: z.array(z.string()),
+  exclude: z.array(z.string()),
+  /** The namespaces given a `query` (their filters are not recorded). */
+  query: z.array(z.string()),
+});
+
+/**
+ * Where an incremental backup sits in its chain (`kind: "incremental"` only).
+ * The changes it holds are those after its parent's end time (`consistency.from`,
+ * exclusive) up to its own (`consistency.to`, inclusive).
+ */
+export const ChainSchema = z.object({
+  /** The full backup the chain starts from. */
+  base: z.string().min(1),
+  /** The backup this one continues: the base itself, or the previous incremental. */
+  parent: z.string().min(1),
+  /** This backup's position after the base: 1 for the first incremental, 2 for the next, … */
+  length: z.number().int().positive(),
 });
 
 export const ManifestSchema = z
   .object({
-    formatVersion: z.literal(MANIFEST_FORMAT_VERSION),
+    /**
+     * 1 for full backups, 2 for incremental ones (see {@link MANIFEST_FORMAT_VERSION}).
+     * A reader also accepts a full backup written as version 2.
+     */
+    formatVersion: z.union([z.literal(1), z.literal(2)]),
+    /**
+     * `"incremental"` for a backup that holds only the changes since its parent
+     * (`chain`); absent (or `"full"`) for a backup that holds the data itself.
+     * Added with format version 2.
+     */
+    kind: z.enum(["full", "incremental"]).optional(),
+    /** Incremental backups only: their place in the chain. */
+    chain: ChainSchema.optional(),
+    /** The include/exclude selection the backup was taken with (see SelectionSchema). */
+    selection: SelectionSchema.optional(),
     /** Backup id, e.g. `2026-11-14T03-00-04Z_7f3a9c`. Also the directory name. */
     id: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z_[0-9a-f]{6}$/),
     /** Writer, e.g. `mongoshield@2.0.0`. */
@@ -166,7 +234,72 @@ export const ManifestSchema = z
   .refine((manifest) => Date.parse(manifest.completedAt) >= Date.parse(manifest.startedAt), {
     message: "completedAt must not be earlier than startedAt",
     path: ["completedAt"],
-  });
+  })
+  .superRefine(checkIncrementalFields);
+
+/**
+ * The fields an incremental backup cannot do without, and that only incrementals may
+ * carry: a reader must never mistake one kind for the other (see FORMAT.md).
+ */
+function checkIncrementalFields(
+  manifest: {
+    readonly formatVersion: number;
+    readonly kind?: "full" | "incremental" | undefined;
+    readonly namespaces: readonly {
+      readonly ns: string;
+      readonly content?: "full" | "metadata" | undefined;
+      readonly files: readonly unknown[];
+      readonly documents: number;
+    }[];
+    readonly chain?: unknown;
+    readonly changes?: unknown;
+    readonly consistency: {
+      readonly mode: string;
+      readonly from?: unknown;
+      readonly to?: unknown;
+    };
+  },
+  context: z.RefinementCtx,
+): void {
+  const issue = (message: string, path: string): void => {
+    context.addIssue({ code: "custom", message, path: [path] });
+  };
+  if (manifest.kind !== "incremental") {
+    if (manifest.chain !== undefined)
+      issue("chain is only allowed on incremental backups", "chain");
+    if (manifest.namespaces.some((entry) => entry.content === "metadata")) {
+      issue('only incremental backups hold "metadata" entries', "namespaces");
+    }
+    return;
+  }
+  for (const entry of manifest.namespaces) {
+    if (entry.content === undefined) {
+      issue(
+        `${entry.ns}: every entry of an incremental backup says what it holds (content)`,
+        "namespaces",
+      );
+    } else if (entry.content === "metadata" && (entry.files.length > 0 || entry.documents > 0)) {
+      issue(`${entry.ns}: a "metadata" entry holds no data files`, "namespaces");
+    }
+  }
+  if (manifest.formatVersion < INCREMENTAL_BACKUP_FORMAT_VERSION) {
+    issue("incremental backups need formatVersion 2", "formatVersion");
+  }
+  if (manifest.chain === undefined) issue("an incremental backup needs its chain", "chain");
+  if (manifest.changes === undefined)
+    issue("an incremental backup needs its changes file", "changes");
+  const { consistency } = manifest;
+  if (
+    consistency.mode !== "converge" ||
+    consistency.from === undefined ||
+    consistency.to === undefined
+  ) {
+    issue(
+      'an incremental backup records its change range as consistency "converge" with from and to',
+      "consistency",
+    );
+  }
+}
 
 export type ClusterTime = z.infer<typeof ClusterTimeSchema>;
 export type StoredFile = z.infer<typeof StoredFileSchema>;
@@ -201,5 +334,24 @@ export function collectionEntries(namespaces: readonly NamespaceEntry[]): Collec
   return namespaces.filter(isCollectionEntry);
 }
 export type Manifest = z.infer<typeof ManifestSchema>;
+/** Where an incremental backup sits in its chain. */
+export type ChainInfo = z.infer<typeof ChainSchema>;
+/** The include/exclude selection recorded in a manifest. */
+export type Selection = z.infer<typeof SelectionSchema>;
+/** An incremental backup's manifest: its `chain` and `changes` are always present. */
+export type IncrementalManifest = Manifest & {
+  readonly kind: "incremental";
+  readonly chain: ChainInfo;
+  readonly changes: ChangesFile;
+};
+
+/** True for the manifest of an incremental backup (one that holds only changes). */
+export function isIncrementalManifest(manifest: Manifest): manifest is IncrementalManifest {
+  return (
+    manifest.kind === "incremental" &&
+    manifest.chain !== undefined &&
+    manifest.changes !== undefined
+  );
+}
 export type Compression = Manifest["compression"];
 export type ConsistencyMode = Manifest["consistency"]["mode"];

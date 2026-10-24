@@ -6,6 +6,7 @@
 import type { CommandSpec } from "../command.ts";
 import { backupCommand } from "./backup.ts";
 import { copyCommand } from "./copy.ts";
+import { deleteCommand } from "./delete.ts";
 import { diffCommand } from "./diff.ts";
 import { drillCommand } from "./drill.ts";
 import { eraseCommand } from "./erase.ts";
@@ -20,8 +21,10 @@ import { inspectCommand } from "./inspect.ts";
 import { journalCommand } from "./journal.ts";
 import { keygenCommand } from "./keygen.ts";
 import { listCommand } from "./list.ts";
+import { maskCommand } from "./mask.ts";
 import { pruneCommand } from "./prune.ts";
 import { pullCommand } from "./pull.ts";
+import { rehearseUpgradeCommand } from "./rehearse-upgrade.ts";
 import { rekeyCommand } from "./rekey.ts";
 import { releaseCommand } from "./release.ts";
 import { replicateCommand } from "./replicate.ts";
@@ -46,10 +49,12 @@ export const COMMANDS: readonly CommandSpec[] = [
   diffCommand,
   copyCommand,
   pullCommand,
+  maskCommand,
   listCommand,
   inspectCommand,
   verifyCommand,
   drillCommand,
+  rehearseUpgradeCommand,
   importCommand,
   exportCommand,
   pruneCommand,
@@ -60,6 +65,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   journalCommand,
   holdCommand,
   releaseCommand,
+  deleteCommand,
   eraseCommand,
   erasuresCommand,
   keygenCommand,

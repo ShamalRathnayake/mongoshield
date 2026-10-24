@@ -19,6 +19,7 @@ import { CHUNK_SIZE, FILE_KEY_SIZE, PAYLOAD_NONCE_SIZE } from "./constants.ts";
 import { configError, encryptionError } from "./failures.ts";
 import { encodeHeader, type FileKeyWrapper, type Stanza } from "./header.ts";
 import { parseRecipient } from "./keys.ts";
+import { prepareChaCha20Poly1305 } from "./primitives.ts";
 import {
   DEFAULT_MAX_SCRYPT_WORK_FACTOR,
   DEFAULT_SCRYPT_WORK_FACTOR,
@@ -107,6 +108,10 @@ export function planKeyWrapping(options: EncryptStreamOptions): KeyWrapPlan {
 
 /** Builds the stanzas that wrap the file key according to the plan. */
 export async function wrapFileKey(plan: KeyWrapPlan, fileKey: Buffer): Promise<Stanza[]> {
+  // Loads the portable cipher on runtimes without a native one (see primitives.ts).
+  // Every encryption wraps its file key before sealing anything, so this covers
+  // the payload chunks too.
+  await prepareChaCha20Poly1305();
   if (plan.kind === "passphrase") {
     return [await wrapScrypt(fileKey, plan.passphrase, plan.workFactor)];
   }

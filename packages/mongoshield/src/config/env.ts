@@ -13,6 +13,11 @@
  * | MONGOSHIELD_PASSPHRASE      | encryption.passphrase and decryption.passphrase |
  * | MONGOSHIELD_IDENTITY        | decryption.identities (one identity) |
  * | MONGOSHIELD_IDENTITY_FILE   | decryption.identityFiles (one path) |
+ * | MONGOSHIELD_DRILL_URI       | drill.targetUri (and `mongoshield drill`'s --target-uri) |
+ *
+ * MONGOSHIELD_DRILL_URI lets the scratch deployment of a restore drill come from a
+ * secret (a Kubernetes Secret, a CI secret) while the rest of the `drill` section
+ * (sample, prefix, assertions) stays in the config file.
  */
 
 import type { MongoShieldConfigInput } from "./schema.ts";
@@ -24,6 +29,7 @@ export function readEnvironmentConfig(env: NodeJS.ProcessEnv): MongoShieldConfig
   const passphrase = value(env.MONGOSHIELD_PASSPHRASE);
   const identity = value(env.MONGOSHIELD_IDENTITY);
   const identityFile = value(env.MONGOSHIELD_IDENTITY_FILE);
+  const drillUri = value(env.MONGOSHIELD_DRILL_URI);
 
   return {
     source: uri ? { uri } : undefined,
@@ -40,6 +46,7 @@ export function readEnvironmentConfig(env: NodeJS.ProcessEnv): MongoShieldConfig
             passphrase,
           }
         : undefined,
+    drill: drillUri ? { targetUri: drillUri } : undefined,
   };
 }
 

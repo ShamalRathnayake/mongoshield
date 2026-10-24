@@ -35,7 +35,7 @@ import { BSON, type Document, ObjectId } from "mongodb";
 import type { EngineContext } from "../engine/context.ts";
 import { compileFilter } from "../engine/filter.ts";
 import { bsonTag, isDocument } from "../engine/filter-values.ts";
-import { matchingDocuments, openNamespace } from "../engine/find.ts";
+import { matchingDocuments, openNamespace, selectedBackupId } from "../engine/find.ts";
 import { compileProjection, type Projector } from "../engine/find-projection.ts";
 import { MongoShieldError } from "../errors.ts";
 import type { BackupSelector, DecryptionOptions } from "../types.ts";
@@ -130,7 +130,8 @@ export async function exportDocuments(
 
   await writeOutput(Readable.from(chunks()), options, context);
   const result: ExportDocumentsResult = {
-    backupId: opened.manifest.id,
+    // An incremental's own id, not its chain's base (see restore-chain.ts).
+    backupId: selectedBackupId(opened),
     namespace: options.namespace,
     format: options.format,
     documents: totals.documents,

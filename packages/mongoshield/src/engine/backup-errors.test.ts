@@ -69,3 +69,25 @@ describe("toBackupError", () => {
     expect(toBackupError(original)).toBe(original);
   });
 });
+
+describe("toBackupError on Atlas Free and Flex", () => {
+  it("reports a tier refusal as unsupported, with a hint, even when worded as Unauthorized", () => {
+    for (const refusal of [
+      serverError(8000, "AtlasError"),
+      new MongoServerError({
+        ok: 0,
+        code: 13,
+        codeName: "Unauthorized",
+        errmsg:
+          "command find is not allowed in this Atlas tier(Unauthorized) not authorized on admin",
+      }),
+    ]) {
+      const error = toBackupError(refusal, { ns: "app.orders" });
+      expect(error.code).toBe("MS_UNSUPPORTED_TOPOLOGY");
+      expect(error.message).toContain("Atlas refused");
+      expect(error.message).toContain("while reading app.orders");
+      expect(error.hint).toContain("atlas-free-tier");
+      expect(error.details).toEqual({ serverCode: refusal.code });
+    }
+  });
+});

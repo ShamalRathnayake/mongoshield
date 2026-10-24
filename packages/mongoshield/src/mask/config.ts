@@ -165,6 +165,37 @@ export function parseMaskRules(config: MaskConfig): ParsedRule[] {
   return rules;
 }
 
+/**
+ * The rules that apply to one namespace: every rule whose pattern matches it, but only
+ * one per path, the most specific (an exact namespace beats a pattern with `*`, then
+ * the first declared wins). Returned in declaration order, which is the order they are
+ * applied in. Shared by the masker and the mask suggester, so both agree on which rule
+ * masks a field.
+ *
+ * Works on anything that carries a rule (`ruleOf`), so the masker can select its
+ * per-rule counters directly.
+ */
+export function selectRulesForNamespace<T>(
+  items: readonly T[],
+  ns: string,
+  ruleOf: (item: T) => ParsedRule,
+): T[] {
+  const matching = items.filter((item) => ruleOf(item).matchesNamespace(ns));
+  matching.sort((left, right) => {
+    const [a, b] = [ruleOf(left), ruleOf(right)];
+    if (a.exact !== b.exact) return a.exact ? -1 : 1;
+    return a.order - b.order;
+  });
+  const byPath = new Map<string, T>();
+  for (const item of matching) {
+    const path = ruleOf(item).path;
+    if (!byPath.has(path)) byPath.set(path, item);
+  }
+  // Declaration order, so a rule on `profile` and one on `profile.email` run in the
+  // order the user wrote them.
+  return [...byPath.values()].sort((left, right) => ruleOf(left).order - ruleOf(right).order);
+}
+
 /** True when any rule needs the secret (custom functions may call `hash`/`fake`). */
 export function needsSecret(rules: readonly ParsedRule[]): boolean {
   return rules.some((rule) => ["hash", "fake", "custom"].includes(rule.operation.kind));

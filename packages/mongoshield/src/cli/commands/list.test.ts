@@ -39,13 +39,13 @@ describe("mongoshield list", () => {
     const run = await runTestCli(["list", "--from", url]);
     expect(run.code, run.stderr).toBe(0);
     const lines = run.stdout.trimEnd().split("\n");
-    expect(lines[0]).toMatch(/^ID\s+CREATED\s+STATUS\s+NS\s+DOCUMENTS\s+SIZE\s+ENCRYPTED/);
+    expect(lines[0]).toMatch(/^ID\s+CREATED\s+STATUS\s+KIND\s+NS\s+DOCUMENTS\s+SIZE\s+ENCRYPTED/);
     // Newest first: invalid (1h ago), incomplete (2h), complete (3h).
     expect(lines[1]).toContain(invalid);
     expect(lines[2]).toContain(incomplete);
     expect(lines[3]).toContain(complete.id);
     expect(lines[1]).toContain("–");
-    expect(lines[3]).toMatch(/complete\s+1\s+2\s/);
+    expect(lines[3]).toMatch(/complete\s+full\s+1\s+2\s/);
     // The footer counts complete backups and goes to stderr.
     expect(run.stderr).toContain("3 backups (1 complete)");
     expect(run.stderr).toContain(`in ${url}`);

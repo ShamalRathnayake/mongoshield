@@ -201,7 +201,8 @@ export async function restoreTenant(
   }
 
   const result: RestoreTenantResult = {
-    backupId: backup.manifest.id,
+    // An incremental's own id, not its chain's base (see restore-chain.ts).
+    backupId: backup.chain?.backupId ?? backup.manifest.id,
     mode,
     dryRun,
     namespaces: results,

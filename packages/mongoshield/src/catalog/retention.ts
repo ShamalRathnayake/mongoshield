@@ -36,8 +36,19 @@
  * 5. Incomplete runs are only removed after a grace period; invalid ones never.
  * 6. Backups dated in the future are kept.
  * 7. Immutable backups are kept until their `immutableUntil` has passed.
+ * 8. Chain integrity: a kept incremental backup keeps every backup it depends on
+ *    (its parent, the parent's parent, … down to the full backup it starts from).
  *
  * Each rule is explained where it is applied below.
+ *
+ * ## Incremental backups
+ *
+ * Incrementals count as backups like any other: `last: 24` keeps the 24 newest,
+ * whatever their kind, and `daily: 7` the newest backup of each day, which with hourly
+ * incrementals is usually that day's last one. Rule 8 then keeps what each of them
+ * needs to be restored, so a chain is only ever cut at its newest end: the members
+ * after the newest kept one are removed, never one in the middle. A whole chain goes
+ * once nothing keeps any of its members.
  */
 
 import { MongoShieldError } from "../errors.ts";
@@ -81,6 +92,16 @@ export interface RetentionBackup {
    * Until then the storage refuses to delete it, so the planner keeps it.
    */
   readonly immutableUntil?: Date;
+  /**
+   * Incremental backups: the backup this one continues (its manifest's `chain.parent`).
+   * Restoring this one needs the parent, so keeping this one keeps the parent (rule 8).
+   */
+  readonly parent?: string;
+  /**
+   * Set (to that backup's id) when a backup this plan does not cover, such as another
+   * scope's, depends on this one: it is kept like the parent of a kept backup.
+   */
+  readonly neededBy?: string;
 }
 
 /** Input of {@link planRetention}. */
@@ -239,7 +260,37 @@ export function planRetention(input: RetentionInput): RetentionPlan {
   // verified backups survive, even if they fell out of every bucket.
   keepMinimumVerified(input.backups, candidates, input.policy.minVerified ?? 0, reasons, warnings);
 
+  // Safety rule 8 comes last: whatever kept a backup above, deleting what it depends on
+  // would make it unrestorable.
+  keepChainParents(backups, reasons);
+
   return buildPlan(backups, reasons, graceMs, warnings);
+}
+
+/**
+ * Safety rule 8 (chain integrity): every backup a kept incremental depends on is kept
+ * too, transitively, and so is every backup that a backup outside the plan depends on
+ * (`neededBy`). A kept backup always has a parent in the same chain, so the walk ends
+ * at the chain's full backup.
+ */
+function keepChainParents(backups: readonly RetentionBackup[], reasons: KeepReasons): void {
+  const byId = new Map(backups.map((backup) => [backup.id, backup]));
+  for (const backup of backups) {
+    if (backup.neededBy !== undefined) {
+      reasons.add(backup.id, `needed by incremental ${backup.neededBy} (outside this scope)`);
+    }
+  }
+  // Each pass walks from every kept backup to its parent; parents are older, so a
+  // second pass is only needed for unusual clocks. Stops once nothing changes.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const backup of backups) {
+      const parent = backup.parent === undefined ? undefined : byId.get(backup.parent);
+      if (parent === undefined || !reasons.has(backup.id) || reasons.has(parent.id)) continue;
+      reasons.add(parent.id, `chain of kept incremental ${backup.id}`);
+      changed = true;
+    }
+  }
 }
 
 /**

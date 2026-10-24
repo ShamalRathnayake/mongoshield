@@ -5,13 +5,16 @@
  * `encryption` and `backup` sections. Progress is shown while it runs; the
  * summary (id, sizes, ratio, duration) goes to stdout, so
  * `ID=$(mongoshield backup --quiet)` captures just the backup id.
+ *
+ * `--incremental` stores only the changes since the newest backup of the same
+ * deployment and selection (or `--from <id>`): see docs/guides/incremental-backups.md.
  */
 
 import { backupTuningFromConfig } from "../../config/backup-tuning.ts";
 import type { MongoShieldConfig, MongoShieldConfigInput } from "../../config/schema.ts";
 import { withShapeLabel } from "../../engine/backup-guard.ts";
 import { MongoShieldError } from "../../errors.ts";
-import type { Manifest } from "../../format/manifest.ts";
+import { isIncrementalManifest, type Manifest } from "../../format/manifest.ts";
 import type {
   BackupOptions,
   BackupResult,
@@ -135,6 +138,16 @@ export const backupCommand: CommandSpec = {
       description:
         "Also back up users and custom roles (password hashes included: encrypt the backup)",
     },
+    incremental: {
+      type: "boolean",
+      description:
+        "Store only the changes since the newest backup of this deployment and selection (a chain: full → incremental → …)",
+    },
+    from: {
+      type: "string",
+      valueName: "<backup-id>",
+      description: "With --incremental: continue this backup instead of the newest one",
+    },
   },
   examples: [
     {
@@ -157,6 +170,10 @@ export const backupCommand: CommandSpec = {
     {
       description: "Go easy on production: read from secondaries at most 50 MiB/s",
       command: "mongoshield backup --read-preference secondary --max-bytes-per-second 50MiB",
+    },
+    {
+      description: "A full backup on Sunday, then only the changes since the previous backup",
+      command: "mongoshield backup && mongoshield backup --incremental",
     },
   ],
   run: runBackupCommand,
@@ -230,6 +247,11 @@ function backupOptions(
   progress: ProgressDisplay,
 ): BackupOptions {
   const resume = context.flags.string("resume");
+  const from = context.flags.string("from");
+  const incremental = context.flags.boolean("incremental");
+  if (from !== undefined && !incremental) {
+    throw usageError("--from only applies to incremental backups: add --incremental.", NAME);
+  }
   return {
     signal: context.signal,
     onProgress: progress.onProgress,
@@ -242,6 +264,7 @@ function backupOptions(
     labels: withShapeLabel(section?.labels, section ?? {}),
     ...backupTuningFromConfig(section),
     ...(resume === undefined ? {} : { resume }),
+    ...(incremental ? { incremental: { from: from ?? "latest" } } : {}),
   };
 }
 
@@ -262,14 +285,27 @@ function printBackupResult(
   }
 
   const manifest = result.manifest;
-  out.success("Backup complete.");
+  const chain = isIncrementalManifest(manifest) ? manifest.chain : undefined;
+  out.success(chain === undefined ? "Backup complete." : "Incremental backup complete.");
   out.result(
     renderDetails(
       [
         ["Backup id", out.style("bold", result.id)],
+        // Incrementals: what they continue, and how long the chain is now.
+        ...(chain === undefined
+          ? []
+          : ([
+              ["Parent", chain.parent],
+              ["Chain", `incremental #${chain.length} after full backup ${chain.base}`],
+            ] as [string, string][])),
         ["Storage", storage],
-        ["Namespaces", namespaceSummary(manifest)],
-        ["Documents", formatCount(manifest.totals.documents)],
+        // An incremental holds change events, not collections.
+        ...(chain === undefined
+          ? ([
+              ["Namespaces", namespaceSummary(manifest)],
+              ["Documents", formatCount(manifest.totals.documents)],
+            ] as [string, string][])
+          : ([["Changes", formatCount(manifest.changes?.events ?? 0)]] as [string, string][])),
         ["Data", sizeSummary(manifest)],
         ["Compression", manifest.compression],
         ["Encryption", encryptionLine(manifest)],
@@ -353,6 +389,8 @@ function namespaceSummary(manifest: Manifest): string {
 /** `1.2 GiB raw → 300.0 MiB stored (4.1×)`. */
 function sizeSummary(manifest: Manifest): string {
   const { bytesRaw, bytesStored } = manifest.totals;
+  // Change events are not counted as raw document bytes (FORMAT.md, totals).
+  if (isIncrementalManifest(manifest)) return `${formatBytes(bytesStored)} stored`;
   return `${formatBytes(bytesRaw)} raw → ${formatBytes(bytesStored)} stored (${formatRatio(bytesRaw, bytesStored)})`;
 }
 

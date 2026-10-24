@@ -52,20 +52,25 @@
   },
   "scripts": {
     "build": "tsdown",
+    "prepack": "node scripts/prepare-package-readme.ts",
     "dev": "tsdown --watch",
     "typecheck": "tsc",
     "test": "vitest run --project unit --project integration",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:topology": "vitest run --project topology",
+    "test:cloud": "vitest run --project cloud",
+    "test:runtimes": "tsdown && node test/runtimes/run.ts",
     "test:watch": "vitest --project unit --project integration",
     "coverage": "vitest run --project unit --project integration --coverage",
     "check:package": "publint --strict && attw --pack . --profile esm-only",
+    "bench": "node bench/compare.ts",
     "docs:errors": "node scripts/generate-error-docs.ts",
     "docs:errors:check": "node scripts/generate-error-docs.ts --check"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
+    "@noble/ciphers": "2.4.0",
     "croner": "^10.0.0",
     "jiti": "^2.7.0",
     "zod": "^4.6.7"
@@ -81,6 +86,7 @@
     "@google-cloud/storage": "^7.0.0 || ^8.0.0",
     "@opentelemetry/api": "^1.9.0",
     "mongodb": "^6.10.0 || ^7.0.0",
+    "mongodb-memory-server": "^10.0.0 || ^11.0.0",
     "ssh2": "^1.15.0"
   },
   "peerDependenciesMeta": {
@@ -111,12 +117,16 @@
     "@opentelemetry/api": {
       "optional": true
     },
+    "mongodb-memory-server": {
+      "optional": true
+    },
     "ssh2": {
       "optional": true
     }
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
+    "@aws-sdk/client-kms": "^3.1100.0",
     "@aws-sdk/client-s3": "^3.1100.0",
     "@aws-sdk/lib-storage": "^3.1100.0",
     "@testcontainers/minio": "^11.14.0",
@@ -130,7 +140,6 @@
     "testcontainers": "^11.14.0",
     "tsdown": "^0.23.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5",
-    "@aws-sdk/client-kms": "^3.1100.0"
+    "vitest": "^5.0.5"
   }
 }

@@ -35,6 +35,7 @@ import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { deserializeInStoredOrder, valueInStoredOrder } from "../format/field-order.ts";
 import { changesFileKey, resolveBackupKey } from "../format/layout.ts";
 import type { ChangesFile, ClusterTime, Compression } from "../format/manifest.ts";
+import { laterOf, predecessor } from "../journal/time.ts";
 import type { Logger } from "../logger.ts";
 import { type CollectionSpec, compileNamespaceFilter, splitNamespace } from "../mongo/index.ts";
 import { compileNamespaceRules } from "../mongo/namespace-filter.ts";
@@ -61,6 +62,7 @@ import {
 import {
   compareClusterTimes,
   formatClusterTime,
+  readClusterTime,
   readLatestClusterTime,
   toTimestamp,
 } from "./converge-time.ts";
@@ -130,12 +132,31 @@ export interface ChangeCaptureRequest {
   readonly exclude: BackupOptions["exclude"];
   /** Version of the source deployment, for the manifest warnings. */
   readonly serverVersion: string;
+  /**
+   * Write the server-side database filter with regexes only (no `$in` / `$nin`):
+   * Atlas Free and Flex clusters refuse operators in `ns.db` filters of change streams.
+   */
+  readonly regexDatabaseFilter?: boolean | undefined;
   /** The caller's signal. */
   readonly signal: AbortSignal | undefined;
   /** Write-once retention for the changes file (`backup({ retainDays })`). */
   readonly retainUntil?: Date | undefined;
   /** How the change stream is reopened after transient errors (tests shorten it). */
   readonly resume?: ResumePolicy | undefined;
+  /**
+   * What the window is for. `"converge"` (the default): the changes made while the
+   * collections are dumped. `"incremental"`: the changes since a parent backup ended
+   * (backup-incremental.ts), where nothing is dumped. Two things differ for those:
+   *
+   * - The restore of an incremental already holds every kept namespace as of `from`
+   *   (the chain before it restored them), so a rename out of a kept namespace never
+   *   needs its destination recorded as of the rename (see `#needsDestinationSnapshot`).
+   * - The drain catches up on everything since the parent, which can take a while on
+   *   a busy deployment; it only times out when the stream stops making progress.
+   */
+  readonly purpose?: "converge" | "incremental" | undefined;
+  /** How long the drain may take (or, for incrementals, stall). Defaults to {@link DRAIN_TIMEOUT_MS}. */
+  readonly drainTimeoutMs?: number | undefined;
 }
 
 /** The captured window, for the manifest. */
@@ -158,8 +179,12 @@ export interface ChangeCapture {
   readonly failure: MongoShieldError | undefined;
   /** Records that a namespace's dump has finished (see `#needsDestinationSnapshot`). */
   markDumped(ns: string): Promise<void>;
-  /** Reads T1, drains the stream up to it and completes the changes file. */
-  finish(): Promise<CapturedWindow>;
+  /**
+   * Reads T1, drains the stream up to it and completes the changes file. An
+   * incremental may name its end itself (`end`, the time of its time series snapshot;
+   * see backup-incremental.ts); it is never earlier than the window's start.
+   */
+  finish(end?: ClusterTime): Promise<CapturedWindow>;
   /** Stops capturing after a failure elsewhere. Never throws. */
   stop(): Promise<void>;
 }
@@ -183,7 +208,7 @@ export async function startChangeCapture(request: ChangeCaptureRequest): Promise
     client: request.client,
     startAt: request.from,
     match: scope.serverFilter,
-    comment: `mongoshield backup ${request.backupId} (converge)`,
+    comment: `mongoshield backup ${request.backupId} (${request.purpose ?? "converge"})`,
     logger: request.logger,
     signal,
     awaitDataMs: AWAIT_DATA_MS,
@@ -225,7 +250,7 @@ export interface CaptureScope {
  */
 export function createCaptureScope(
   specs: readonly CollectionSpec[],
-  patterns: Pick<ChangeCaptureRequest, "include" | "exclude">,
+  patterns: Pick<ChangeCaptureRequest, "include" | "exclude" | "regexDatabaseFilter">,
 ): CaptureScope {
   const backedUp = new Set(specs.map((spec) => spec.ns));
   const databases = new Set(specs.map((spec) => spec.db));
@@ -257,6 +282,7 @@ export function createCaptureScope(
       compileNamespaceRules(patterns),
       databases,
       INTERNAL_DATABASES,
+      { regexOnly: patterns.regexDatabaseFilter === true },
     ),
     keepsNamespace,
     keeps,
@@ -284,6 +310,8 @@ class CaptureRun implements ChangeCapture {
   /** T1, once `finish()` has read it. */
   #stopAt: ClusterTime | undefined;
   #drainStartedAt = 0;
+  /** When the stream last moved forward (incrementals time out on a stall, see the request). */
+  #lastProgressAt = 0;
   /** The latest time a rename's destination was read at after a refusal (see #extendEnd). */
   #latestDestinationRead: ClusterTime | undefined;
   #events = 0;
@@ -345,13 +373,12 @@ class CaptureRun implements ChangeCapture {
     this.#dumpedAt.set(ns, await readLatestClusterTime(this.#request.client));
   }
 
-  async finish(): Promise<CapturedWindow> {
+  async finish(end?: ClusterTime): Promise<CapturedWindow> {
     const { from } = this.#request;
     let digest: { readonly size: number; readonly sha256: string };
     try {
       if (this.#failure !== undefined) throw this.#failure;
-      // T1 must not be earlier than anything the dump read: see readLatestClusterTime.
-      const to = await readLatestClusterTime(this.#request.client);
+      const to = await this.#readEnd(end);
       // Never before a destination read at a later time (see #extendEnd).
       const latestRead = this.#latestDestinationRead;
       this.#stopAt =
@@ -384,6 +411,22 @@ class CaptureRun implements ChangeCapture {
       },
       warnings: this.#warnings,
     };
+  }
+
+  /**
+   * T1. A converge window must not end earlier than anything its dumps read, so it
+   * reads the logical clock, erring late (readLatestClusterTime). An incremental reads
+   * no documents: any end works as long as the drain records every event up to it, so
+   * it takes the time of the last write the node applied (operationTime), which the
+   * stream reaches at once. The logical clock can be ahead of the last oplog entry (a
+   * batched delete reserves a timestamp per document but writes one entry), and on an
+   * idle deployment the stream would only pass it at the next periodic no-op write, up
+   * to 10 s and more later. It never ends before the window starts.
+   */
+  async #readEnd(end: ClusterTime | undefined): Promise<ClusterTime> {
+    const { client, purpose, from } = this.#request;
+    if (purpose !== "incremental") return readLatestClusterTime(client);
+    return laterOf(end ?? (await readClusterTime(client)), predecessor(from));
   }
 
   async stop(): Promise<void> {
@@ -427,6 +470,9 @@ class CaptureRun implements ChangeCapture {
         if (this.#needsDestinationSnapshot(event)) yield* this.#destinationSnapshot(event);
       }
       if (passedEnd || this.#reachedEnd(batch)) return;
+      if (batch.events.length > 0 || batch.position !== undefined) {
+        this.#lastProgressAt = performance.now();
+      }
 
       throwIfAborted(this.signal);
       this.#assertDrainInTime();
@@ -458,10 +504,16 @@ class CaptureRun implements ChangeCapture {
 
   #assertDrainInTime(): void {
     if (this.#stopAt === undefined) return;
-    if (performance.now() - this.#drainStartedAt <= DRAIN_TIMEOUT_MS) return;
+    const timeoutMs = this.#request.drainTimeoutMs ?? DRAIN_TIMEOUT_MS;
+    // An incremental's drain is its whole job: only a stream that stops moving fails.
+    const incremental = this.#request.purpose === "incremental";
+    const since = incremental
+      ? Math.max(this.#drainStartedAt, this.#lastProgressAt)
+      : this.#drainStartedAt;
+    if (performance.now() - since <= timeoutMs) return;
     throw new MongoShieldError(
       "MS_TIMEOUT",
-      `The change stream did not reach the end of the backup window (${formatClusterTime(this.#stopAt)}) within ${DRAIN_TIMEOUT_MS / 60_000} minutes.`,
+      `The change stream did not reach the end of the backup window (${formatClusterTime(this.#stopAt)}) ${incremental ? "and made no progress for" : "within"} ${formatMinutes(timeoutMs)}.`,
       {
         hint: "The replica set's majority may be lagging far behind. Check replication, then run the backup again.",
       },
@@ -547,6 +599,17 @@ class CaptureRun implements ChangeCapture {
     const to = collectionNamespaceOf(event.to);
     // A rename out of the backed-up namespaces replays as a drop: always fine.
     if (from === undefined || to === undefined || !this.#scope.keepsNamespace(to)) return false;
+    // Incrementals: the chain before this window holds every kept namespace as of the
+    // window's start, and every later change of it is in the window, so the restore
+    // knows exactly what `from` held at the rename. Scratch collections are the
+    // exception: a chain replays them only when their rename lands in the same window.
+    if (
+      this.#request.purpose === "incremental" &&
+      this.#scope.keepsNamespace(from) &&
+      !splitNamespace(from).collection.startsWith(SCRATCH_COLLECTION_PREFIX)
+    ) {
+      return false;
+    }
     const createdAt = this.#createdAt.get(from);
     if (createdAt !== undefined && compareClusterTimes(createdAt, event.clusterTime) <= 0) {
       return false;
@@ -735,9 +798,11 @@ class CaptureRun implements ChangeCapture {
 function initialWarnings(request: ChangeCaptureRequest): string[] {
   const warnings: string[] = [];
   const timeSeries = request.specs.filter((spec) => spec.type === "timeseries");
-  if (timeSeries.length > 0) {
+  // Incrementals copy their time series whole, as of their end (backup-incremental.ts).
+  if (timeSeries.length > 0 && request.purpose !== "incremental") {
+    const names = timeSeries.map((spec) => spec.ns).join(", ");
     warnings.push(
-      `Time series collections are restored as read, without converging (change streams do not report their writes): ${timeSeries.map((spec) => spec.ns).join(", ")}.`,
+      `Time series collections are restored as read, without converging (change streams do not report their writes): ${names}.`,
     );
   }
   if (!hasDisambiguatedPaths(request.serverVersion)) {
@@ -746,6 +811,12 @@ function initialWarnings(request: ChangeCaptureRequest): string[] {
     );
   }
   return warnings;
+}
+
+/** `5 minutes`, `30 seconds`: a timeout for a message. */
+function formatMinutes(ms: number): string {
+  if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000} minutes`;
+  return `${Math.round(ms / 1000)} seconds`;
 }
 
 function hasDisambiguatedPaths(serverVersion: string): boolean {

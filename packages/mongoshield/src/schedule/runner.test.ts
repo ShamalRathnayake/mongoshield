@@ -885,6 +885,29 @@ describe("runScheduledJob retention scopes (jobs sharing one storage location)",
     );
   });
 
+  it("takes the scope labels from the config's retention.scopeLabels", async () => {
+    const storage = memoryStorage();
+    // How `mongoshield run` (and the Kubernetes operator) give two jobs that share a
+    // source, a selection and a storage location separate retention.
+    const forPlan = (plan: string): MongoShieldConfig => ({
+      ...BASE_CONFIG,
+      retention: { last: 1, scopeLabels: { "mongoshield.plan": plan } },
+    });
+    const { shield, backup } = fakeShield(storage);
+    const keptA = await runScheduledJob(shield, forPlan("a"), FAST);
+    await runScheduledJob(shield, forPlan("b"), FAST);
+    const keptB = await runScheduledJob(shield, forPlan("b"), FAST);
+
+    expect(backup.mock.calls[0]?.[0]?.labels).toMatchObject({ "mongoshield.plan": "a" });
+    expect((await idsIn(storage)).sort()).toEqual([keptA.backup?.id, keptB.backup?.id].sort());
+    // The option still wins over the config (the console passes its plan id).
+    await runScheduledJob(shield, forPlan("b"), {
+      ...FAST,
+      scopeLabels: { "mongoshield.plan": "c" },
+    });
+    expect(backup.mock.calls.at(-1)?.[0]?.labels).toMatchObject({ "mongoshield.plan": "c" });
+  });
+
   it("prunes after a checkpointed run with the cluster its checkpoint records", async () => {
     const storage = memoryStorage();
     await putJobBackup(storage, idAt("2026-10-17T03:00:00Z"));

@@ -69,6 +69,21 @@ export const DrillRecordSchema = z.object({
   documentsRestored: z.number().int().nonnegative(),
   problemCount: z.number().int().nonnegative(),
   tool: z.string(),
+  /**
+   * Upgrade rehearsals only (`mongoshield rehearse-upgrade`): the MongoDB version the
+   * backup was restored into, as the server reported it (e.g. `8.0.13`). Absent for
+   * ordinary drills, so older readers and records stay compatible.
+   */
+  targetVersion: z.string().optional(),
+  /** Upgrade rehearsals only: the source version recorded in the manifest. */
+  sourceVersion: z.string().optional(),
+  /** Upgrade rehearsals only: the static compatibility findings, counted by severity. */
+  compatibility: z
+    .object({
+      problems: z.number().int().nonnegative(),
+      warnings: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 
 /** The result of one verification run, as stored. */

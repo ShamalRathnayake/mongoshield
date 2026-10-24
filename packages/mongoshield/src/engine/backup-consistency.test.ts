@@ -157,6 +157,34 @@ describe("chooseConsistency", () => {
   });
 });
 
+describe("chooseConsistency on Atlas Free and Flex", () => {
+  const atlasFree: DeploymentInfo = {
+    ...replicaSet,
+    serverVersion: "8.0.15",
+    atlas: { tier: "shared", signals: ["host cluster0.abcde.mongodb.net"] },
+  };
+
+  it("falls back to none with an Atlas-specific warning when the tier refuses the stream", async () => {
+    const refused = fakeClient(() => {
+      throw new MongoServerError({
+        errmsg: "$changeStream is not allowed in this atlas tier",
+        code: 8000,
+        codeName: "AtlasError",
+      });
+    });
+    const choice = await chooseConsistency(refused.client, "auto", atlasFree);
+    expect(choice.mode).toBe("none");
+    expect(choice.warning).toContain("Atlas Free/Flex");
+    expect(choice.warning).toContain("readAnyDatabase");
+    expect(refused.sessionsEnded()).toBe(1);
+  });
+
+  it("uses converge on a shared tier that allows the stream", async () => {
+    const allowed = fakeClient(() => ({ cursor: { id: 0 } }));
+    expect((await chooseConsistency(allowed.client, "auto", atlasFree)).mode).toBe("converge");
+  });
+});
+
 describe("openReadConsistency", () => {
   const spec = (name: string, type: CollectionSpec["type"]): CollectionSpec => ({
     ns: `app.${name}`,

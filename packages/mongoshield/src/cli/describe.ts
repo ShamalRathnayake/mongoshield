@@ -7,7 +7,7 @@
 import type { DrillRecord, VerificationRecord } from "../catalog/annotations.ts";
 import { type CatalogEntry, immutableUntilOf } from "../catalog/catalog.ts";
 import { selectBackup } from "../catalog/select.ts";
-import type { Manifest } from "../format/manifest.ts";
+import { isIncrementalManifest, type Manifest } from "../format/manifest.ts";
 import type { MongoShield } from "../shield.ts";
 import { formatCount, formatDuration, formatRelative } from "./format.ts";
 import type { Output } from "./io.ts";
@@ -32,7 +32,40 @@ export function styledStatus(entry: CatalogEntry, out: Output): string {
 export function consistencySummary(manifest: Manifest): string {
   const { mode } = manifest.consistency;
   if (manifest.changes === undefined) return mode;
+  // An incremental's window is everything since its parent, not "during the backup".
+  if (isIncrementalManifest(manifest)) {
+    return `${mode} (${formatCount(manifest.changes.events)} changes since ${manifest.chain.parent}, replayed after the chain on restore)`;
+  }
   return `${mode} (${formatCount(manifest.changes.events)} changes during the backup, replayed on restore)`;
+}
+
+/**
+ * What kind of backup it is, for tables: `full`, or `incr #2` for the second
+ * incremental after a full backup; `–` without a manifest.
+ */
+export function kindSummary(manifest: Manifest | undefined): string {
+  if (manifest === undefined) return "–";
+  return isIncrementalManifest(manifest) ? `incr #${manifest.chain.length}` : "full";
+}
+
+/**
+ * The chain line of `inspect`: `incremental #2 after 2026-…_1a2b3c (base 2026-…_7f3a9c)`,
+ * or `full` (and how many incrementals continue it, when `entries` shows some).
+ */
+export function chainSummary(manifest: Manifest, entries: readonly CatalogEntry[] = []): string {
+  if (isIncrementalManifest(manifest)) {
+    const { length, parent, base } = manifest.chain;
+    const after = parent === base ? `after its base ${base}` : `after ${parent} (base ${base})`;
+    return `incremental #${length}, ${after}`;
+  }
+  let continued = 0;
+  for (const entry of entries) {
+    const chain = entry.manifest?.chain;
+    if (chain !== undefined && chain.base === manifest.id) continued += 1;
+  }
+  return continued === 0
+    ? "full"
+    : `full, base of ${formatCount(continued)} incremental backup${continued === 1 ? "" : "s"}`;
 }
 
 /** `yes (2 recipients)`, `yes (passphrase)`, `no`, or `–` when unknown. */
@@ -78,10 +111,15 @@ export function verificationRecordSummary(
 /** `drill ✓ (RTO 42s) 1d ago`, or `drill ✗ failed 3h ago`. */
 export function drillSummary(drill: DrillRecord, out: Output, now = new Date()): string {
   const when = formatRelative(new Date(drill.drilledAt), now);
+  // Upgrade rehearsals are drills into a newer server: say which version they proved.
+  const kind =
+    drill.targetVersion === undefined
+      ? "drill"
+      : `upgrade rehearsal on MongoDB ${drill.targetVersion}`;
   if (drill.ok) {
-    return `drill ${out.style("green", "✓")} (RTO ${formatRto(drill.restoreDurationMs)}) ${when}`;
+    return `${kind} ${out.style("green", "✓")} (RTO ${formatRto(drill.restoreDurationMs)}) ${when}`;
   }
-  return `drill ${out.style("red", "✗")} failed ${when}`;
+  return `${kind} ${out.style("red", "✗")} failed ${when}`;
 }
 
 /**

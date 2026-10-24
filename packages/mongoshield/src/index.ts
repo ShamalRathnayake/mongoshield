@@ -24,6 +24,7 @@ export type {
   CompletingBackupOptions,
   DecryptionOptions,
   EncryptionOptions,
+  IncrementalOptions,
   KmsKeyRef,
   PointInTimeResult,
   MongoShieldOptions,
@@ -61,12 +62,46 @@ export type {
 export { type DrillRecord, readDrills } from "./catalog/annotations.ts";
 export type { TelemetryOptions } from "./types.ts";
 
+// Upgrade rehearsals (shield.rehearseUpgrade, shield.checkUpgradeCompatibility).
+export type {
+  ShieldUpgradeRehearsalOptions,
+  UpgradeCompatibilityOptions,
+  UpgradeCompatibilityResult,
+  UpgradeRehearsalOptions,
+  UpgradeRehearsalReport,
+} from "./engine/upgrade-rehearsal.ts";
+export {
+  analyzeUpgradeCompatibility,
+  type BackedUpCollection,
+  COMPATIBILITY_RULES,
+  type CompatibilityFinding,
+  type CompatibilityInput,
+  type CompatibilityReport,
+  type CompatibilityRule,
+  type CompatibilitySeverity,
+  type StoredJavaScript,
+} from "./engine/upgrade-compat.ts";
+export type { UpgradeCheck, UpgradeCheckKind } from "./engine/upgrade-live.ts";
+
 // The backup catalog and retention.
 export type { HoldRecord, VerificationRecord } from "./catalog/annotations.ts";
 export { type CatalogEntry, type CatalogStatus, listBackups } from "./catalog/catalog.ts";
 export { selectBackup } from "./catalog/select.ts";
+// Incremental backup chains: full → incremental → … (docs/guides/incremental-backups.md).
+export {
+  backupKindOf,
+  type ChainInspection,
+  type ChainProblem,
+  type ChainRange,
+  chainRanges,
+  inspectChain,
+  type ResolvedChain,
+  resolveChain,
+} from "./catalog/chain.ts";
 export type { OutOfScopeBackup, OutOfScopeReason, PruneResult } from "./catalog/prune.ts";
 export { type PruneScope, PLAN_LABEL } from "./catalog/scope.ts";
+// Deleting one backup by id (shield.deleteBackup, `mongoshield delete`).
+export type { DeleteBackupOptions, DeleteBackupResult } from "./catalog/delete.ts";
 export {
   type KeptBackup,
   planRetention,
@@ -180,6 +215,23 @@ export {
   type MaskReport,
   type MaskRule,
 } from "./mask/index.ts";
+// Finding personal data and suggesting mask rules for it (`mongoshield mask suggest`).
+export {
+  type CollectionSuggestions,
+  type CoveringRule,
+  type DetectOptions,
+  detectPii,
+  type MaskSuggestion,
+  type MaskSuggestionReport,
+  type PiiFinding,
+  type PiiKind,
+  PII_KINDS,
+  type SkippedNamespace,
+  type SuggestedMaskRule,
+  type SuggestionStatus,
+  type SuggestMasksOptions,
+  suggestMasks,
+} from "./mask/suggest/index.ts";
 export { defineSubset, type FollowRule, type SubsetConfig } from "./subset/index.ts";
 
 // Moving data in and out of mongodump's formats.
@@ -198,6 +250,15 @@ export {
   type MongoShieldConfig,
   type MongoShieldConfigInput,
 } from "./config/schema.ts";
+export {
+  CONFIG_PRESET_NAMES,
+  CONFIG_PRESETS,
+  type ConfigPresetDefaults,
+  type ConfigPresetName,
+} from "./config/presets.ts";
+
+// MongoDB Atlas: recognising Atlas hosts and Free/Flex tier refusals.
+export { type AtlasInfo, type AtlasTier, isAtlasHost, isAtlasRefusal } from "./mongo/atlas.ts";
 
 // Encryption keys (age format).
 export {
@@ -220,6 +281,9 @@ export {
 export {
   type Compression,
   type ConsistencyMode,
+  type ChainInfo,
+  type IncrementalManifest,
+  isIncrementalManifest,
   MANIFEST_FORMAT_VERSION,
   type Manifest,
   ManifestSchema,

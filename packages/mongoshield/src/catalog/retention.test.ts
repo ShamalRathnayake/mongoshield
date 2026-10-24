@@ -639,3 +639,75 @@ describe("planRetention: invariants", () => {
     );
   });
 });
+
+describe("planRetention: incremental chains (rule 8)", () => {
+  // Chain A on Monday: a full backup and two incrementals; chain B on Tuesday.
+  const a = backup("2026-10-19T00:00:00Z");
+  const a1 = backup("2026-10-19T06:00:00Z", { parent: a.id });
+  const a2 = backup("2026-10-19T12:00:00Z", { parent: a1.id });
+  const b = backup("2026-10-20T00:00:00Z");
+  const b1 = backup("2026-10-20T06:00:00Z", { parent: b.id });
+  const all = [a, a1, a2, b, b1];
+
+  it("keeps the whole chain of a kept incremental, and drops the older chain whole", () => {
+    const result = plan(all, { last: 1 });
+    expect(keptIds(result)).toEqual([b1.id, b.id]);
+    expect(reasonsOf(result, b.id)).toEqual([`chain of kept incremental ${b1.id}`]);
+    expect(removedIds(result)).toEqual([a2.id, a1.id, a.id]);
+  });
+
+  it("keeps each day's newest backup with the chain it needs", () => {
+    const result = plan(all, { daily: 2 });
+    expect(removedIds(result)).toEqual([]);
+    expect(reasonsOf(result, a1.id)).toContain(`chain of kept incremental ${a2.id}`);
+  });
+
+  it("cuts a chain only at its newest end: a held middle member keeps what is before it", () => {
+    const result = plan(
+      all.map((item) => (item.id === a1.id ? { ...item, held: true } : item)),
+      { last: 1 },
+    );
+    expect(keptIds(result)).toEqual([b1.id, b.id, a1.id, a.id]);
+    expect(removedIds(result)).toEqual([a2.id]);
+  });
+
+  it("keeps what a backup outside the plan depends on (neededBy)", () => {
+    const result = plan([{ ...a, neededBy: "other-scope-incremental" }, b], { last: 1 });
+    expect(reasonsOf(result, a.id)).toEqual([
+      "needed by incremental other-scope-incremental (outside this scope)",
+    ]);
+  });
+
+  it("never removes a backup that a kept backup depends on (property)", () => {
+    const chains = fc
+      .array(
+        fc.record({
+          minutesAgo: fc.integer({ min: 0, max: 30 * 24 * 60 }),
+          parentOffset: fc.option(fc.integer({ min: 1, max: 5 }), { nil: undefined }),
+          held: fc.boolean(),
+        }),
+        { maxLength: 30 },
+      )
+      .map((items) => {
+        // Oldest first, so a parent (a few positions earlier) is always older.
+        const sorted = [...items].sort((x, y) => y.minutesAgo - x.minutesAgo);
+        return sorted.map((item, index) => {
+          const parentIndex = item.parentOffset === undefined ? -1 : index - item.parentOffset;
+          return backup(new Date(NOW.getTime() - item.minutesAgo * 60_000 - index).toISOString(), {
+            id: `b${index}`,
+            held: item.held,
+            ...(parentIndex >= 0 ? { parent: `b${parentIndex}` } : {}),
+          });
+        });
+      });
+    fc.assert(
+      fc.property(chains, policyArbitrary, (backups, policy) => {
+        const kept = new Set(keptIds(plan(backups, policy)));
+        for (const item of backups) {
+          if (kept.has(item.id) && item.parent !== undefined)
+            expect(kept.has(item.parent)).toBe(true);
+        }
+      }),
+    );
+  });
+});

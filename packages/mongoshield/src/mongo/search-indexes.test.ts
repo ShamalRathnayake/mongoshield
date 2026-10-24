@@ -152,3 +152,23 @@ describe("isSearchIndexUnsupported", () => {
     expect(isSearchIndexUnsupported(new Error("network"))).toBe(false);
   });
 });
+
+describe("listSearchIndexDefinitions on Atlas Free and Flex", () => {
+  it("warns once and stops asking when the tier refuses the listing", async () => {
+    const refusal = new MongoServerError({
+      errmsg: "$listSearchIndexes is not allowed in this atlas tier",
+      code: 8000,
+      codeName: "AtlasError",
+    });
+    const collection = fakeCollection(refusal);
+    const logger = recordingLogger();
+    const support: SearchIndexSupport = { supported: undefined };
+    for (const ns of ["app.a", "app.b", "app.c"]) {
+      expect(await listSearchIndexDefinitions(collection, { ns, support, logger })).toEqual([]);
+    }
+    expect(collection.calls()).toBe(1);
+    expect(support.supported).toBe(false);
+    expect(logger.warnings).toHaveLength(1);
+    expect(logger.warnings[0]).toContain("Atlas cluster tier refused");
+  });
+});

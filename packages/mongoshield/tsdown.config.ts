@@ -29,5 +29,7 @@ export default defineConfig({
     /^@azure\//,
     "ssh2",
     /^@opentelemetry\//,
+    // Ephemeral servers for upgrade rehearsals (src/engine/upgrade-target.ts).
+    "mongodb-memory-server",
   ],
 });

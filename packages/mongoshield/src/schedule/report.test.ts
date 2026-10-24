@@ -27,6 +27,25 @@ const BACKUP: NonNullable<RunReport["backup"]> = {
 };
 
 describe("summarizeReport", () => {
+  it("names the parent and the changes of an incremental backup", () => {
+    expect(
+      summarizeReport({
+        ...BASE,
+        backup: {
+          ...BACKUP,
+          kind: "incremental",
+          parent: "2026-10-20T02-00-00Z_bbbbbb",
+          changes: 4321,
+        },
+      }),
+    ).toBe(
+      "Incremental backup 2026-10-20T03-00-00Z_aaaaaa succeeded: 4,321 changes since 2026-10-20T02-00-00Z_bbbbbb.",
+    );
+    expect(summarizeReport({ ...BASE, backup: { ...BACKUP, kind: "incremental" } })).toContain(
+      "0 changes since its parent",
+    );
+  });
+
   it("names the lock holder of a skipped run when it is known", () => {
     expect(
       summarizeReport({

@@ -13,6 +13,13 @@
  *   5. cleanup   drop the temporary databases, always (also on failure or abort),
  *                unless `keep` is set
  *
+ * Incremental backups are drilled through their chain (restore-chain.ts): the names,
+ * the guard and the checks use the chain's base backup, the restore replays the whole
+ * chain, and the document counts are compared like a converge backup's (the changes
+ * replayed after the base make exact counts meaningless). Only the base backup's
+ * databases are restored: a database created later in the chain would have no
+ * temporary name.
+ *
  * Findings about the backup (damaged files, counts that do not match, missing
  * indexes, failed assertions) are collected as problems in the report. Errors about
  * the drill's setup (no connection, no privileges, missing keys, abort) are thrown.
@@ -45,9 +52,14 @@
 
 import { randomBytes } from "node:crypto";
 import { Binary, type Db, type Document, type MongoClient } from "mongodb";
-import { listBackups, selectBackup } from "../catalog/index.ts";
+import { type CatalogEntry, listBackups, selectBackup } from "../catalog/index.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import { collectionEntries, type Manifest, type NamespaceEntry } from "../format/manifest.ts";
+import {
+  collectionEntries,
+  isCollectionEntry,
+  type Manifest,
+  type NamespaceEntry,
+} from "../format/manifest.ts";
 import { describeDeployment } from "../mongo/deployment.ts";
 import type {
   BackupSelector,
@@ -66,8 +78,9 @@ import {
   isBackupDefect,
   messageOf,
 } from "./drill-checks.ts";
-import { openBackupSource, readMetadataFile, type StoredBackupSource } from "./read-pipeline.ts";
+import { readMetadataFile, type StoredBackupSource } from "./read-pipeline.ts";
 import { runRestore } from "./restore.ts";
+import { metadataReading, openReadableBackup, type ReadableBackup } from "./restore-chain.ts";
 
 export type { DrillNamespaceReport } from "./drill-checks.ts";
 
@@ -153,6 +166,20 @@ export interface DrillContext extends RestoreContext {
    * `clusterId` of `describeDeployment()`, the value manifests record; tests inject it.
    */
   readonly identifyDeployment?: (client: MongoClient) => Promise<string | undefined>;
+  /**
+   * More checks of the restored data, run after the built-in namespace checks and
+   * before the user's assertions, while the temporary databases still exist. Upgrade
+   * rehearsals (upgrade-rehearsal.ts) run their version-specific checks here. What
+   * it returns counts as the drill's problems.
+   */
+  readonly extraChecks?: (restored: RestoredScratch) => Promise<readonly DrillProblem[]>;
+}
+
+/** What `extraChecks` is given: the scratch client and where each namespace went. */
+export interface RestoredScratch {
+  readonly client: MongoClient;
+  /** The restore plan: backup namespace (`from`) → temporary namespace (`to`), and its type. */
+  readonly entries: readonly RestorePlanEntry[];
 }
 
 /** A database of the backup and its temporary name on the scratch deployment. */
@@ -212,12 +239,16 @@ export async function drillBackup(
   const prefix = validPrefix(options.prefix);
   throwIfAborted(options.signal);
 
-  const manifest = await loadManifest(context, options);
+  const { selected, entries } = await loadManifest(context, options);
   // Opened first: the guard reads collection UUIDs from the (encrypted) metadata, and
-  // missing keys should fail before anything else happens.
-  const source = await openBackupSource(context.storage, manifest, options.decryption, {
+  // missing keys should fail before anything else happens. An incremental opens its
+  // chain: `manifest` is then the chain's base, which holds the namespaces.
+  const readable = await openReadableBackup(context.storage, entries, selected, {
+    decryption: options.decryption,
     signal: options.signal,
   });
+  const { manifest, source } = readable;
+  const chained = readable.chain !== undefined;
   await assertScratchTarget(context, manifest, source, options);
   const databases = temporaryDatabaseNames(manifest, prefix, randomBytes(4).toString("hex"));
   await assertDatabasesUnused(context.client, databases);
@@ -229,24 +260,25 @@ export async function drillBackup(
   const keep = options.keep === true;
 
   context.logger.info("Drill: restoring into temporary databases", {
-    backupId: manifest.id,
+    backupId: selected.id,
     databases: databases.map((database) => database.target),
   });
   try {
-    outcome = await restoreIntoScratch(context, options, manifest, databases);
+    outcome = await restoreIntoScratch(context, options, selected, databases, chained);
     if (outcome.result === undefined) {
       problems.push({ subject: "restore", problem: outcome.failure });
     } else {
-      namespaces = await checkNamespaces(
-        context,
-        options,
-        manifest,
-        source,
-        outcome.result,
-        sampleSize,
-      );
+      namespaces = await checkNamespaces(context, options, readable, outcome.result, sampleSize);
       for (const namespace of namespaces) {
         for (const problem of namespace.problems) problems.push({ subject: namespace.ns, problem });
+      }
+      if (context.extraChecks !== undefined) {
+        problems.push(
+          ...(await context.extraChecks({
+            client: context.client,
+            entries: outcome.result.plan.entries,
+          })),
+        );
       }
       problems.push(
         ...(await runAssertions(context, options, manifest, databases, outcome.result)),
@@ -263,7 +295,7 @@ export async function drillBackup(
   }
 
   const report: DrillReport = {
-    backupId: manifest.id,
+    backupId: selected.id,
     ok: problems.length === 0,
     startedAt: startedAt.toISOString(),
     durationMs: Math.round(performance.now() - clock),
@@ -357,7 +389,11 @@ export function drillRenameRules(databases: readonly DrillDatabase[]): Record<st
 // Guards
 // ---------------------------------------------------------------------------
 
-async function loadManifest(context: DrillContext, options: DrillOptions): Promise<Manifest> {
+/** The selected backup's manifest, and the catalog (for an incremental's chain). */
+async function loadManifest(
+  context: DrillContext,
+  options: DrillOptions,
+): Promise<{ readonly selected: Manifest; readonly entries: readonly CatalogEntry[] }> {
   const entries = await listBackups(context.storage, {
     logger: context.logger,
     ...(options.signal ? { signal: options.signal } : {}),
@@ -366,7 +402,7 @@ async function loadManifest(context: DrillContext, options: DrillOptions): Promi
   if (selected.manifest === undefined) {
     throw new MongoShieldError("MS_INTERNAL", `Backup ${selected.id} has no manifest.`);
   }
-  return selected.manifest;
+  return { selected: selected.manifest, entries };
 }
 
 /** Most collections whose UUID the same-deployment guard compares (see the file header). */
@@ -526,7 +562,12 @@ async function restoreIntoScratch(
   options: DrillOptions,
   manifest: Manifest,
   databases: readonly DrillDatabase[],
+  chained: boolean,
 ): Promise<RestoreOutcome> {
+  // A chain may create databases the base does not have, which have no temporary
+  // name: only the base's databases are restored (see the file header).
+  const include =
+    options.include ?? (chained ? databases.map((database) => `${database.source}.*`) : undefined);
   const startedAt = performance.now();
   try {
     const result = await runRestore(
@@ -537,7 +578,7 @@ async function restoreIntoScratch(
         rename: drillRenameRules(databases),
         mode: "fail-if-exists",
         ...(options.decryption ? { decryption: options.decryption } : {}),
-        ...(options.include ? { include: options.include } : {}),
+        ...(include ? { include } : {}),
         ...(options.exclude ? { exclude: options.exclude } : {}),
         ...(options.parallelism === undefined ? {} : { parallelism: options.parallelism }),
         ...(options.insertWorkers === undefined ? {} : { insertWorkers: options.insertWorkers }),
@@ -560,24 +601,30 @@ async function restoreIntoScratch(
 async function checkNamespaces(
   context: DrillContext,
   options: DrillOptions,
-  manifest: Manifest,
-  source: StoredBackupSource,
+  readable: ReadableBackup,
   result: RestoreResult,
   sampleSize: number,
 ): Promise<DrillNamespaceReport[]> {
+  const { manifest } = readable;
   const entries = new Map<string, NamespaceEntry>();
   for (const entry of manifest.namespaces) entries.set(entry.ns, entry);
-  const replayedChanges = (manifest.changes?.events ?? 0) > 0;
+  // An incremental chain replays changes on top of the base, like a converge window.
+  const replayedChanges = readable.chain !== undefined || (manifest.changes?.events ?? 0) > 0;
 
   const reports: DrillNamespaceReport[] = [];
   for (const planned of result.plan.entries) {
     throwIfAborted(options.signal);
-    const entry = entries.get(planned.from);
-    if (entry === undefined) continue;
+    const found = entries.get(planned.from);
+    if (found === undefined) continue;
+    // A chain's newest metadata (and its time series copies) are the incremental's.
+    const metadata = isCollectionEntry(found)
+      ? metadataReading(readable, found)
+      : { file: found.metadata, source: readable.source };
+    const entry = { ...found, metadata: metadata.file };
     reports.push(
       await checkRestoredNamespace({
         client: context.client,
-        source,
+        source: metadata.source,
         planned,
         entry,
         sampleSize,

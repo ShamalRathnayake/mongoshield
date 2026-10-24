@@ -55,6 +55,21 @@ describe("readEnvironmentConfig edge cases", () => {
     );
   });
 
+  it("takes the drill's scratch deployment from MONGOSHIELD_DRILL_URI", () => {
+    expect(
+      readEnvironmentConfig({ MONGOSHIELD_DRILL_URI: " mongodb://scratch:27017 " }).drill,
+    ).toEqual({
+      targetUri: "mongodb://scratch:27017",
+    });
+    expect(readEnvironmentConfig({ MONGOSHIELD_DRILL_URI: "" }).drill).toBeUndefined();
+    // It merges with a config file's drill section, so only the URI is secret.
+    const merged = mergeConfigs(
+      { storage: "./b", drill: { sample: 5 } },
+      readEnvironmentConfig({ MONGOSHIELD_DRILL_URI: "mongodb://scratch" }),
+    );
+    expect(validateConfig(merged).drill).toEqual({ sample: 5, targetUri: "mongodb://scratch" });
+  });
+
   it("passes compression through, leaving unknown values to validation", () => {
     expect(readEnvironmentConfig({ MONGOSHIELD_COMPRESSION: "gzip" }).compression).toBe("gzip");
     const env = readEnvironmentConfig({ MONGOSHIELD_COMPRESSION: "lz4", MONGOSHIELD_STORAGE: "x" });

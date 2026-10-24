@@ -26,6 +26,11 @@
  * rename when X's dump cannot be trusted (synthesized drop + inserts right after the
  * rename), which this walk handles like any other drop.
  *
+ * Incremental backups (src/engine/restore-chain.ts): an opened namespace of an
+ * incremental is its chain's base backup plus the incrementals' windows (`chain`). They
+ * are read after the base's own window as one stream, so the overlay is the document
+ * as of the selected incremental's end, by the same rules.
+ *
  * Memory: only the affected `_id`s are held, never the whole collection. When their
  * events exceed `memoryBytes`, the overlay is split by a hash of the `_id` into
  * several partitions, each read in its own pass over the changes file and the dump
@@ -36,23 +41,16 @@
 
 import { BSON, type Document } from "mongodb";
 import { throwIfAborted } from "../errors.ts";
-import {
-  type ChangesFile,
-  collectionEntries,
-  type DataFile,
-  type Manifest,
-} from "../format/manifest.ts";
+import { collectionEntries, type DataFile, type Manifest } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
 import { splitNamespace } from "../mongo/index.ts";
 import {
   type ChangeEvent,
   collectionNamespaceOf,
   needsFullDocument,
-  readChangeEvents,
   type StoredChangeEvent,
   type UpdateDescription,
 } from "./converge-events.ts";
-import { eventsUntil } from "./converge-targets.ts";
 import type { MatchedDocument, OpenedNamespace } from "./find.ts";
 import { parseBackedUpDocument } from "./find-parse.ts";
 import {
@@ -63,6 +61,7 @@ import {
   replacesDocument,
 } from "./find-window-apply.ts";
 import { openDocumentStream } from "./read-pipeline.ts";
+import { type ChangeWindowSource, chainEvents } from "./restore-chain.ts";
 
 /**
  * Raw bytes of the namespace's change events held in memory at once before the
@@ -85,6 +84,32 @@ export function hasChangeWindow(manifest: Manifest): boolean {
 }
 
 /**
+ * True when reading the opened namespace needs an overlay: the backup's own window
+ * has events, or it was opened through an incremental chain.
+ */
+export function needsOverlay(opened: Pick<OpenedNamespace, "manifest" | "chain">): boolean {
+  return hasChangeWindow(opened.manifest) || (opened.chain?.windows.length ?? 0) > 0;
+}
+
+/** The opened namespace's windows, in order: the backup's own, then the chain's. */
+function windowsOf(opened: OpenedNamespace): ChangeWindowSource[] {
+  const own = opened.manifest.changes;
+  return [
+    ...(own === undefined
+      ? []
+      : [
+          {
+            backupId: opened.manifest.id,
+            source: opened.source,
+            file: own,
+            until: opened.manifest.consistency.to,
+          },
+        ]),
+    ...(opened.chain?.windows ?? []),
+  ];
+}
+
+/**
  * Every document of the opened namespace as it was at the end of the backup window
  * (see the file header), unfiltered. Stopping the iteration closes the open files.
  */
@@ -92,12 +117,12 @@ export async function* documentsAtWindowEnd(
   opened: OpenedNamespace,
   options: WindowReadOptions,
 ): AsyncGenerator<MatchedDocument> {
-  const file = opened.manifest.changes;
-  if (file === undefined) {
+  const windows = windowsOf(opened);
+  if (windows.length === 0) {
     yield* dumpedDocuments(opened.entry.files, opened, options.signal);
     return;
   }
-  const window = new ChangeWindow(opened, file, options.signal);
+  const window = new ChangeWindow(opened, windows, options.signal);
   const lineage = await window.lineage();
   const base = baseFiles(opened, lineage.base);
   const memoryBytes = options.memoryBytes ?? DEFAULT_WINDOW_MEMORY_BYTES;
@@ -230,23 +255,26 @@ interface PartitionPass {
   readonly memoryBytes: number;
 }
 
-/** One namespace's view of a changes file. */
+/** One namespace's view of its changes files (one window, or a chain's windows). */
 class ChangeWindow {
   readonly #opened: OpenedNamespace;
-  readonly #file: ChangesFile;
+  readonly #windows: readonly ChangeWindowSource[];
   readonly #signal: AbortSignal | undefined;
 
-  constructor(opened: OpenedNamespace, file: ChangesFile, signal: AbortSignal | undefined) {
+  constructor(
+    opened: OpenedNamespace,
+    windows: readonly ChangeWindowSource[],
+    signal: AbortSignal | undefined,
+  ) {
     this.#opened = opened;
-    this.#file = file;
+    this.#windows = windows;
     this.#signal = signal;
   }
 
-  /** The window's events up to the manifest's end of it, numbered. */
+  /** The windows' events, each up to its end (`consistency.to`), numbered. */
   async *#events(): AsyncGenerator<{ readonly index: number; readonly stored: StoredChangeEvent }> {
-    const events = readChangeEvents(this.#opened.source, this.#file, this.#signal);
     let index = 0;
-    for await (const stored of eventsUntil(events, this.#opened.manifest.consistency.to)) {
+    for await (const stored of chainEvents(this.#windows, this.#signal)) {
       throwIfAborted(this.#signal);
       yield { index, stored };
       index += 1;

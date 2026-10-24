@@ -5,6 +5,7 @@
  *   selectBackup   resolve "latest", an id, or { before } to one complete backup
  *   planRetention  pure keep/remove decision for a retention policy
  *   pruneBackups   list + plan + delete (optionally within one scope, see scope.ts)
+ *   resolveChain   an incremental backup's chain back to its full base (chain.ts)
  */
 
 export {
@@ -22,6 +23,24 @@ export {
 } from "./annotations.ts";
 export type { CatalogEntry, CatalogStatus, ListBackupsOptions } from "./catalog.ts";
 export { completedAtOf, immutableUntilOf, listBackups } from "./catalog.ts";
+export {
+  backupKindOf,
+  type ChainInspection,
+  type ChainProblem,
+  chainAncestorIds,
+  chainEndTime,
+  chainPositionOf,
+  chainUntil,
+  inspectChain,
+  type ResolvedChain,
+  resolveChain,
+} from "./chain.ts";
+export {
+  type DeleteBackupOptions,
+  type DeleteBackupResult,
+  deleteBackupById,
+  dependentsOf,
+} from "./delete.ts";
 export type { OutOfScopeBackup, OutOfScopeReason, PruneOptions, PruneResult } from "./prune.ts";
 export { pruneBackups } from "./prune.ts";
 export type {

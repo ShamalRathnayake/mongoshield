@@ -27,12 +27,16 @@
  *
  * The baseline does not have to be verified: the guard is about the source
  * data shrinking, not about the previous backup's integrity.
+ *
+ * Incremental backups hold change events, not collections: they are never a baseline,
+ * and an incremental candidate is not checked (it has no document counts to compare).
+ * The next full backup is compared with the previous full one.
  */
 
 import { createHash } from "node:crypto";
 import { listBackups } from "../catalog/catalog.ts";
 import { MongoShieldError } from "../errors.ts";
-import type { Manifest } from "../format/manifest.ts";
+import { isIncrementalManifest, type Manifest } from "../format/manifest.ts";
 import { type Logger, silentLogger } from "../logger.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 
@@ -194,6 +198,8 @@ export async function findGuardBaseline(
 /** True if `other` is a valid baseline for `candidate` (rules 1–4 of the file header). */
 export function isComparable(other: Manifest, candidate: Manifest): boolean {
   if (other.id === candidate.id) return false;
+  // Incrementals list no collections, so every collection would look missing.
+  if (isIncrementalManifest(other)) return false;
   if (Date.parse(other.startedAt) >= Date.parse(candidate.startedAt)) return false;
   if (other.labels[GUARD_SHAPE_LABEL] !== candidate.labels[GUARD_SHAPE_LABEL]) return false;
 
@@ -222,6 +228,12 @@ export interface EnforceGuardOptions {
 export async function evaluateBackupGuard(options: EnforceGuardOptions): Promise<GuardResult> {
   const logger = options.logger ?? silentLogger;
   const action = options.policy.action ?? "fail";
+  if (isIncrementalManifest(options.candidate)) {
+    logger.debug("Backup guard: incremental backups are not checked", {
+      id: options.candidate.id,
+    });
+    return { ok: true, findings: [], baselineId: undefined, action };
+  }
   const baseline = await findGuardBaseline(options.storage, options.candidate, {
     logger,
     ...(options.signal ? { signal: options.signal } : {}),

@@ -17,6 +17,12 @@
  *                    pipelines read adjusted for renames (restore-views.ts)
  *   5. users/roles   only with `usersAndRoles` "create" / "replace" (restore-authz.ts)
  *
+ * Incremental backups (restore-chain.ts): the plan restores the chain's base full
+ * backup, and every incremental's changes are replayed after the base's own window, in
+ * order, exactly like a converge window (documents, then all the changes, then the
+ * indexes). With `at`, the last window stops at that time. Users and roles come from
+ * the newest member of the chain that holds them.
+ *
  * Safety: the default mode never touches existing data, every failure before step 3
  * leaves the target untouched, and a failure during steps 3–4 is reported with the
  * namespaces that were completed and the ones that may be partial. Restores cannot
@@ -31,35 +37,45 @@ import {
   type WriteConcernSettings,
 } from "mongodb";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
-import type { ChangesFile, ClusterTime, StoredFile } from "../format/manifest.ts";
+import { isAuthzEntry, type Manifest, type StoredFile } from "../format/manifest.ts";
 import type { CollectionMetadata } from "../format/metadata.ts";
+import { toJournalTime } from "../journal/time.ts";
 import type { Logger } from "../logger.ts";
 import {
   assertPrivileges,
   type CollectionSpec,
   checkPrivileges,
   compileNamespaceFilter,
+  describeDeployment,
   orderForRestore,
   splitNamespace,
+  toConnectionError,
 } from "../mongo/index.ts";
 import { withEngineSpan } from "../telemetry/engine-spans.ts";
 import { ATTRIBUTES, ENGINE_SPANS } from "../telemetry/names.ts";
 import type { Telemetry } from "../telemetry/telemetry.ts";
 import type { RestoreOptions, RestoreResult, SearchIndexRef } from "../types.ts";
+import { adaptRestoreConcurrency, assertUsersAndRolesRestoreSupported } from "./atlas-adapt.ts";
 import type { RestoreContext } from "./context.ts";
 import { applyIndexChanges } from "./converge-indexes.ts";
-import { replayChanges } from "./converge-replay.ts";
+import { replayChangeEvents } from "./converge-replay.ts";
 import {
   type ChangeWindowSummary,
   checkWindowTargets,
   planReplayTargets,
   type ReplayTargets,
-  scanChangeWindow,
+  summarizeChangeEvents,
 } from "./converge-targets.ts";
 import { mapWithConcurrency } from "./pool.ts";
 import { ProgressTracker } from "./progress.ts";
 import { openBackupSource, readMetadataFile, type StoredBackupSource } from "./read-pipeline.ts";
 import { planUsersAndRoles, restoreUsersAndRoles } from "./restore-authz.ts";
+import {
+  CHAIN_PROGRESS_LABEL,
+  type ChangeWindowSource,
+  chainEvents,
+  openIncrementalWindows,
+} from "./restore-chain.ts";
 import {
   createNamespace,
   createOptionsFrom,
@@ -68,6 +84,7 @@ import {
 } from "./restore-collections.ts";
 import { loadDocuments, type WriteMode } from "./restore-documents.ts";
 import { prepareIndexSpecs, restoreIndexes } from "./restore-indexes.ts";
+import { alignWithLatestMetadata } from "./restore-metadata.ts";
 import {
   assertNoConflicts,
   buildRestorePlan,
@@ -94,13 +111,22 @@ const METADATA_READ_CONCURRENCY = 8;
 interface RestoreItem {
   readonly planned: PlannedNamespace;
   readonly metadata: CollectionMetadata;
+  /** The backup holding the item's files: the base, or a chain's state member. */
+  readonly source: StoredBackupSource;
 }
 
-/** A converge backup's change replay, planned during pre-flight. */
+/**
+ * The change replay, planned during pre-flight: a converge backup's window, followed by
+ * the windows of an incremental chain (restore-chain.ts).
+ */
 interface PlannedReplay {
-  readonly file: ChangesFile;
-  /** The end of the window (`consistency.to`): events after it are never replayed. */
-  readonly until: ClusterTime | undefined;
+  /**
+   * The windows in order, each bounded by its end (`consistency.to`, or `at`): events
+   * after it are never replayed.
+   */
+  readonly windows: readonly ChangeWindowSource[];
+  /** True when incremental backups are part of the replay (for progress and logs). */
+  readonly chained: boolean;
   readonly summary: ChangeWindowSummary;
   readonly targets: ReplayTargets;
   /** Targets of collections created during the window that `drop` mode replaces. */
@@ -137,6 +163,8 @@ interface RestoreRun {
     readonly notCreated: SearchIndexRef[];
   };
   documentsRestored: number;
+  /** Change events read by the replay (converge windows and incremental chains). */
+  eventsReplayed: number;
 }
 
 /**
@@ -152,12 +180,12 @@ export async function runRestore(
   options: RestoreOptions,
 ): Promise<RestoreResult> {
   const startedAt = performance.now();
-  const parallelism = positiveInteger(
+  const requestedParallelism = positiveInteger(
     options.parallelism,
     DEFAULT_RESTORE_PARALLELISM,
     "parallelism",
   );
-  const insertWorkers = positiveInteger(
+  const requestedInsertWorkers = positiveInteger(
     options.insertWorkers,
     DEFAULT_INSERT_WORKERS,
     "insertWorkers",
@@ -168,20 +196,44 @@ export async function runRestore(
   const { plan, manifest } = detailed;
   assertNoConflicts(plan);
 
+  // The target: Atlas refuses users and roles, and its Free/Flex tiers get gentler
+  // concurrency unless the caller chose it (atlas-adapt.ts).
+  const target = await describeDeployment(context.client).catch((error: unknown) => {
+    throw toConnectionError(error, { location: "the restore target" });
+  });
+  assertUsersAndRolesRestoreSupported(options, target);
+  const concurrency = adaptRestoreConcurrency(
+    options,
+    { parallelism: requestedParallelism, insertWorkers: requestedInsertWorkers },
+    target,
+  );
+  const { parallelism, insertWorkers } = concurrency;
+  if (concurrency.adjustments.length > 0) {
+    context.logger.info(
+      `Atlas Free/Flex tier detected: ${concurrency.adjustments.join(", ")} to stay within the tier's throughput. Set parallelism or insertWorkers to override.`,
+    );
+  }
+
   // 2. Pre-flight: everything that can fail without writing, fails here.
   // Checks the keys and, for passphrase backups, unlocks the key envelope once.
   const source = await openBackupSource(context.storage, manifest, options.decryption, {
     signal: options.signal,
   });
-  const items = await readAllMetadata(source, detailed.namespaces, options.signal);
+  // A chain: every incremental opened once too (each has its own keys).
+  const sources = await openChainSources(context, options, detailed, source);
+  const items = await readAllMetadata(sources, detailed.namespaces, options.signal);
   // Converge backups: the whole changes file is read now, so a damaged one is found
   // while the target is still untouched.
-  const replay = await planReplay(context, options, detailed, source);
-  // Users and roles (opt-in): read and checked now too, written last (step 5).
+  const replay = await planReplay(context, options, detailed, sources);
+  // Chains: the newest metadata of each collection, applied after the replay.
+  const latest = await readLatestMetadata(detailed, sources, replay, options.signal);
+  // Users and roles (opt-in): read and checked now too, written last (step 5). In a
+  // chain, the newest member holding them wins (incrementals may carry fresh copies).
+  const authz = authzSourceOf(manifest, source, detailed.incrementals, replay);
   const usersAndRoles = await planUsersAndRoles({
     mode: options.usersAndRoles,
-    manifest,
-    source,
+    manifest: authz.manifest,
+    source: authz.source,
     filter: compileNamespaceFilter({ include: options.include, exclude: options.exclude }),
     rename: compileRenameMap(options.rename),
     logger: context.logger,
@@ -196,12 +248,17 @@ export async function runRestore(
   // verifyFirst: every data file to be read is checksummed now, so a file damaged
   // late in a large collection cannot stop the restore halfway (restore-verify-first.ts).
   if (options.verifyFirst === true) {
-    await verifyBeforeWriting({
-      source,
-      files: filesToRead(items, replay),
-      logger: context.logger,
-      signal: options.signal,
-    });
+    // Each backup of a chain through its own source.
+    for (const [backupId, backupSource] of sources) {
+      const files = filesToRead(items, replay, backupId);
+      if (files.length === 0) continue;
+      await verifyBeforeWriting({
+        source: backupSource,
+        files,
+        logger: context.logger,
+        signal: options.signal,
+      });
+    }
   }
 
   if (options.dryRun === true) {
@@ -223,6 +280,7 @@ export async function runRestore(
     inProgress: new Set(),
     searchIndexes: { created: [], notCreated: [] },
     documentsRestored: 0,
+    eventsReplayed: 0,
   };
   context.logger.info("Restoring backup", {
     backupId: plan.backupId,
@@ -240,7 +298,11 @@ export async function runRestore(
         { concurrency: parallelism, signal: options.signal },
       );
     } else {
-      await restoreConverged(run, storageItems, replay, { insertWorkers, parallelism });
+      await restoreConverged(run, storageItems, replay, {
+        insertWorkers,
+        parallelism,
+        latest,
+      });
     }
     // 4. Views last, one by one in dependency order (a view may read from another view).
     for (const item of orderViews(items)) {
@@ -275,6 +337,7 @@ export async function runRestore(
     dryRun: false,
     documentsRestored: run.documentsRestored,
     durationMs,
+    ...(plan.chain === undefined ? {} : { eventsReplayed: run.eventsReplayed }),
     ...(created.length + notCreated.length === 0 ? {} : { searchIndexes: { created, notCreated } }),
     ...(authzReport === undefined ? {} : { usersAndRoles: authzReport }),
   };
@@ -290,37 +353,134 @@ export async function runRestore(
  * still untouched.
  */
 async function readAllMetadata(
-  source: StoredBackupSource,
+  sources: ReadonlyMap<string, StoredBackupSource>,
   namespaces: readonly PlannedNamespace[],
   signal: AbortSignal | undefined,
 ): Promise<RestoreItem[]> {
   return mapWithConcurrency(
     namespaces,
-    async (planned, _index, jobSignal) => ({
-      planned,
-      metadata: await readMetadataFile(source, planned.source.metadata, { signal: jobSignal }),
-    }),
+    async (planned, _index, jobSignal) => {
+      const source = sourceOf(sources, planned.backupId);
+      return {
+        planned,
+        source,
+        metadata: await readMetadataFile(source, planned.source.metadata, { signal: jobSignal }),
+      };
+    },
     { concurrency: METADATA_READ_CONCURRENCY, signal },
   );
 }
 
-/** The data files (and changes file) the restore will read: what `verifyFirst` checks. */
+/** The opened source of one backup of the restore (the base, or a chain member). */
+function sourceOf(
+  sources: ReadonlyMap<string, StoredBackupSource>,
+  backupId: string,
+): StoredBackupSource {
+  const source = sources.get(backupId);
+  if (source === undefined) {
+    throw new MongoShieldError("MS_INTERNAL", `Backup ${backupId} was not opened for the restore.`);
+  }
+  return source;
+}
+
+/**
+ * The sources of every backup the restore reads: the restored backup, and for a chain
+ * each incremental (its keys checked, a key envelope unlocked once).
+ */
+async function openChainSources(
+  context: RestoreContext,
+  options: RestoreOptions,
+  detailed: DetailedRestorePlan,
+  source: StoredBackupSource,
+): Promise<Map<string, StoredBackupSource>> {
+  const sources = new Map([[detailed.manifest.id, source]]);
+  for (const incremental of detailed.incrementals) {
+    throwIfAborted(options.signal);
+    sources.set(
+      incremental.id,
+      await openBackupSource(context.storage, incremental, options.decryption, {
+        signal: options.signal,
+      }),
+    );
+  }
+  return sources;
+}
+
+/**
+ * Chains: the state member's metadata of every collection the restore writes (base
+ * collections and collections created later in the chain), by target namespace, read
+ * and decrypted now like every other file. Empty for other restores.
+ */
+async function readLatestMetadata(
+  detailed: DetailedRestorePlan,
+  sources: ReadonlyMap<string, StoredBackupSource>,
+  replay: PlannedReplay | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Map<string, CollectionMetadata>> {
+  const latest = new Map<string, CollectionMetadata>();
+  const stateId = detailed.stateBackupId;
+  if (stateId === undefined) return latest;
+  const source = sourceOf(sources, stateId);
+  const targets = new Map<string, string>();
+  for (const planned of detailed.namespaces) {
+    // Existing targets (insert, upsert) keep their own options, as in any restore.
+    const created = planned.entry.action === "create" || planned.entry.action === "drop-and-create";
+    if (created && planned.entry.type === "collection")
+      targets.set(planned.entry.from, planned.entry.to);
+  }
+  for (const [from, to] of replay?.targets.windowTargets ?? []) targets.set(from, to);
+  for (const [from, to] of targets) {
+    throwIfAborted(signal);
+    const file = detailed.latestMetadata.get(from);
+    if (file === undefined) continue;
+    const metadata = await readMetadataFile(source, file, { signal });
+    if (metadata.type === "collection") latest.set(to, metadata);
+  }
+  return latest;
+}
+
+/**
+ * The files of backup `backupId` that the restore will read: what `verifyFirst` checks.
+ */
 function filesToRead(
   items: readonly RestoreItem[],
   replay: PlannedReplay | undefined,
+  backupId: string,
 ): StoredFile[] {
   const files: StoredFile[] = [];
   for (const item of items) {
-    if (item.planned.entry.action === "skip") continue;
+    if (item.planned.entry.action === "skip" || item.planned.backupId !== backupId) continue;
     files.push(...item.planned.source.files);
   }
-  if (replay !== undefined) files.push(replay.file);
+  for (const window of replay?.windows ?? []) {
+    if (window.backupId === backupId) files.push(window.file);
+  }
   return files;
 }
 
 /**
- * For converge backups: scans the changes file (integrity, decryption) and decides
- * where its events are replayed. `undefined` for other backups.
+ * Where users and roles come from: the newest member of the chain that holds them
+ * (an incremental taken with `includeUsersAndRoles` stores a fresh copy), else the
+ * restored backup itself.
+ */
+function authzSourceOf(
+  manifest: Manifest,
+  source: StoredBackupSource,
+  incrementals: DetailedRestorePlan["incrementals"],
+  replay: PlannedReplay | undefined,
+): { readonly manifest: Manifest; readonly source: StoredBackupSource } {
+  for (const incremental of [...incrementals].reverse()) {
+    if (!incremental.namespaces.some(isAuthzEntry)) continue;
+    const window = replay?.windows.find((candidate) => candidate.backupId === incremental.id);
+    if (window !== undefined) return { manifest: incremental, source: window.source };
+  }
+  return { manifest, source };
+}
+
+/**
+ * For converge backups and incremental chains: scans every changes file once
+ * (integrity, decryption) and decides where its events are replayed. `undefined` when
+ * there is nothing to replay.
  *
  * @throws MongoShieldError read-pipeline errors for a damaged changes file,
  *   `MS_RESTORE_CONFLICT` when collections created during the window would overwrite data.
@@ -329,19 +489,38 @@ async function planReplay(
   context: RestoreContext,
   options: RestoreOptions,
   detailed: DetailedRestorePlan,
-  source: StoredBackupSource,
+  sources: ReadonlyMap<string, StoredBackupSource>,
 ): Promise<PlannedReplay | undefined> {
-  const file = detailed.manifest.changes;
-  if (file === undefined) return undefined;
-  // The manifest's T1 bounds the replay, not the file: see eventsUntil.
-  const until = detailed.manifest.consistency.to;
-  const summary = await scanChangeWindow(source, file, options.signal, until);
+  const { manifest } = detailed;
+  const source = sourceOf(sources, manifest.id);
+  const chained = detailed.plan.chain !== undefined;
+  const own = manifest.changes;
+  const windows: ChangeWindowSource[] = [
+    // The manifest's T1 bounds the replay, not the file: see eventsUntil.
+    ...(own === undefined
+      ? []
+      : [{ backupId: manifest.id, source, file: own, until: manifest.consistency.to }]),
+    ...(await openIncrementalWindows(context.storage, detailed.incrementals, {
+      decryption: options.decryption,
+      // A point-in-time restore inside a chain stops its last window at `at`.
+      until: chained && options.at !== undefined ? toJournalTime(options.at) : undefined,
+      signal: options.signal,
+      sources,
+    })),
+  ];
+  if (windows.length === 0) return undefined;
+  const summary = await summarizeChangeEvents(chainEvents(windows, options.signal));
   const restored = new Map<string, string>();
+  const backedUp = new Set(detailed.manifest.namespaces.map((entry) => entry.ns));
   for (const planned of detailed.namespaces) {
+    backedUp.add(planned.entry.from);
+    // A chain's views and time series come from its state member, which already
+    // reflects every change up to its end: the windows' events must not touch them.
+    if (planned.backupId !== manifest.id) continue;
     if (planned.entry.action !== "skip") restored.set(planned.entry.from, planned.entry.to);
   }
   const targets = planReplayTargets({
-    backedUp: new Set(detailed.manifest.namespaces.map((entry) => entry.ns)),
+    backedUp,
     restored,
     filter: compileNamespaceFilter({ include: options.include, exclude: options.exclude }),
     rename: compileRenameMap(options.rename),
@@ -353,11 +532,17 @@ async function planReplay(
     detailed.plan.mode,
     options.signal,
   );
-  context.logger.info("The backup holds changes made while it ran; they are replayed", {
-    events: summary.events,
-    createdDuringBackup: [...targets.windowTargets.values()],
-  });
-  return { file, until, summary, targets, dropFirst };
+  context.logger.info(
+    chained
+      ? "Replaying the changes of the incremental backups after the base backup"
+      : "The backup holds changes made while it ran; they are replayed",
+    {
+      events: summary.events,
+      windows: windows.length,
+      createdDuringBackup: [...targets.windowTargets.values()],
+    },
+  );
+  return { windows, chained, summary, targets, dropFirst };
 }
 
 /**
@@ -460,7 +645,12 @@ async function restoreConverged(
   run: RestoreRun,
   storageItems: readonly RestoreItem[],
   replay: PlannedReplay,
-  limits: { readonly insertWorkers: number; readonly parallelism: number },
+  limits: {
+    readonly insertWorkers: number;
+    readonly parallelism: number;
+    /** Chains: the newest metadata of each collection, by target namespace. */
+    readonly latest: ReadonlyMap<string, CollectionMetadata>;
+  },
 ): Promise<void> {
   const { signal } = run.options;
   const loaded = await mapWithConcurrency(
@@ -481,12 +671,13 @@ async function restoreConverged(
     ENGINE_SPANS.restoreReplay,
     () => ({}),
     async (span) => {
-      const replayed = await replayChanges({
+      const replayed = await replayChangeEvents({
         client: run.client,
         logger: run.logger,
-        source: run.source,
-        file: replay.file,
-        until: replay.until,
+        // Each window is already bounded by its own end (restore-chain.ts).
+        events: chainEvents(replay.windows, signal),
+        until: undefined,
+        ...(replay.chained ? { progressLabel: CHAIN_PROGRESS_LABEL } : {}),
         targets: replay.targets,
         writeConcern: run.writeConcern,
         bypassDocumentValidation: run.bypassDocumentValidation,
@@ -495,6 +686,7 @@ async function restoreConverged(
         signal,
       });
       span.setAttributes({ [ATTRIBUTES.events]: replayed.applied });
+      run.eventsReplayed += replayed.events;
       return replayed;
     },
   );
@@ -517,13 +709,30 @@ async function restoreConverged(
 
   // Index changes made during the window, on top of the dumped indexes; for
   // collections created during the window they are the only ones (converge-indexes.ts).
-  if (run.options.skipIndexes === true) return;
-  for (const [target, plan] of result.indexChanges) {
+  if (run.options.skipIndexes !== true) {
+    for (const [target, plan] of result.indexChanges) {
+      throwIfAborted(signal);
+      await applyIndexChanges(run.client, target, plan, {
+        writeConcern: run.writeConcern,
+        logger: run.logger,
+      });
+    }
+  }
+
+  // Chains: options and index properties changed after the base (collMod), from the
+  // chain's newest metadata (restore-metadata.ts).
+  for (const [target, metadata] of limits.latest) {
     throwIfAborted(signal);
-    await applyIndexChanges(run.client, target, plan, {
-      writeConcern: run.writeConcern,
-      logger: run.logger,
-    });
+    if (result.removedTargets.has(target)) continue;
+    const { database, collection } = splitNamespace(target);
+    const aligned = await inStep(target, "Updating the options of", () =>
+      alignWithLatestMetadata(run.client.db(database), collection, metadata, {
+        writeConcern: run.writeConcern,
+        includeIndexes: run.options.skipIndexes !== true,
+        logger: run.logger,
+      }),
+    );
+    for (const warning of aligned.warnings) run.logger.warn(warning);
   }
 }
 
@@ -550,7 +759,8 @@ async function loadCollection(
     prepareTarget(run, db, collection, item),
   );
   const loaded = await loadDocuments({
-    source: run.source,
+    // The base's files, or a chain's state member's (time series).
+    source: item.source,
     files: source.files,
     collection: db.collection(collection),
     mode: writeModeFor(entry.action),

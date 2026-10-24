@@ -16,6 +16,7 @@
 import { type Document, MongoServerError } from "mongodb";
 import { isSearchIndexType, type SearchIndexDefinition } from "../format/metadata.ts";
 import type { Logger } from "../logger.ts";
+import { isAtlasRefusal } from "./atlas.ts";
 
 /**
  * The part of a driver `Collection` that lists search indexes. A real collection
@@ -74,6 +75,16 @@ export async function listSearchIndexDefinitions(
     if (isSearchIndexUnsupported(error)) {
       context.support.supported = false;
       context.logger.debug("The server has no Atlas Search; no search indexes to back up");
+      return [];
+    }
+    if (isAtlasRefusal(error)) {
+      // An Atlas tier that refuses the listing (Free and Flex restrict search index
+      // commands) refuses it for every collection: say so once, not 500 times.
+      context.support.supported = false;
+      context.logger.warn(
+        "This Atlas cluster tier refused to list search indexes; their definitions are not backed up. Recreate them in Atlas after a restore.",
+        { error: error.message },
+      );
       return [];
     }
     context.logger.warn(

@@ -9,17 +9,18 @@
  * Opening once matters for passphrase and KMS backups: unlocking the key envelope
  * costs a scrypt run or a KMS call, so a command that reads many namespaces of one
  * backup must not unlock it per namespace (as `openNamespace` in find.ts would).
+ *
+ * An incremental backup is opened through its chain (src/engine/restore-chain.ts): the
+ * base backup's namespaces and files, with every incremental's changes overlaid when
+ * documents are read (`matchingDocuments`, `documentsAtWindowEnd`).
  */
 
 import { BSON, type Document } from "mongodb";
 import { type CatalogEntry, listBackups, selectBackup } from "../catalog/index.ts";
 import type { EngineContext } from "../engine/context.ts";
 import type { OpenedNamespace } from "../engine/find.ts";
-import {
-  openBackupSource,
-  openDocumentStream,
-  type StoredBackupSource,
-} from "../engine/read-pipeline.ts";
+import { openDocumentStream, type StoredBackupSource } from "../engine/read-pipeline.ts";
+import { namespaceReading, type OpenedChain, openReadableBackup } from "../engine/restore-chain.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
 import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
 import {
@@ -32,8 +33,11 @@ import type { BackupSelector, DecryptionOptions } from "../types.ts";
 
 /** A selected backup, opened for reading. */
 export interface OpenedBackup {
+  /** The backup holding the documents (for an incremental: its chain's base). */
   readonly manifest: Manifest;
   readonly source: StoredBackupSource;
+  /** Set when an incremental backup was selected: its chain's windows to overlay. */
+  readonly chain?: OpenedChain | undefined;
 }
 
 /** What `openSelectedBackup` needs to know. */
@@ -58,10 +62,10 @@ export async function openSelectedBackup(
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const manifest = manifestOf(selectBackup(entries, options.backup));
-  const source = await openBackupSource(context.storage, manifest, options.decryption, {
+  return openReadableBackup(context.storage, entries, manifest, {
+    decryption: options.decryption,
     signal: options.signal,
   });
-  return { manifest, source };
 }
 
 /** The manifest of a selected (complete) catalog entry. */
@@ -90,7 +94,8 @@ export function documentNamespace(
 
 /** The shape `matchingDocuments` (find.ts) reads from. */
 export function openedNamespace(backup: OpenedBackup, entry: CollectionEntry): OpenedNamespace {
-  return { manifest: backup.manifest, entry, source: backup.source };
+  // A chain's time series come from the incremental's own copy (restore-chain.ts).
+  return namespaceReading(backup, entry);
 }
 
 /**

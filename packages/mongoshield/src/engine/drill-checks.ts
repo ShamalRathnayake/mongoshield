@@ -132,7 +132,12 @@ export async function checkRestoredNamespace(
     const metadata = await readMetadataFile(input.source, input.entry.metadata, {
       signal: input.signal,
     });
-    indexes = await checkIndexes(metadata, collection, problems);
+    indexes = await checkIndexes(
+      metadata,
+      collection,
+      problems,
+      input.replayedChanges ? notes : undefined,
+    );
     sampled = await compareSample(input, metadata, collection, problems, notes);
   } catch (error) {
     if (!isBackupDefect(error)) throw error;
@@ -212,10 +217,16 @@ async function checkView(input: NamespaceCheckInput, problems: string[]): Promis
  * collection. Indexes are compared by name: restore keeps names, and the server
  * may legitimately normalise an index's other fields (version, collation).
  */
+/**
+ * Every index the metadata lists must exist on the restored collection. With replayed
+ * changes (`notes` given), a missing index is only a note: the changes may have dropped
+ * it (or the whole collection) after the dump, as an incremental chain often does.
+ */
 async function checkIndexes(
   metadata: CollectionMetadata,
   collection: Collection,
   problems: string[],
+  notes?: string[],
 ): Promise<{ expected: number; found: number }> {
   const expectedNames: string[] = [];
   for (const index of metadata.indexes) {
@@ -232,7 +243,9 @@ async function checkIndexes(
   let found = 0;
   for (const name of expectedNames) {
     if (existing.has(name)) found += 1;
-    else problems.push(`index "${name}" is missing`);
+    else if (notes !== undefined) {
+      notes.push(`index "${name}" is missing (the replayed changes may have dropped it)`);
+    } else problems.push(`index "${name}" is missing`);
   }
   return { expected: expectedNames.length, found };
 }

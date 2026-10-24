@@ -46,11 +46,14 @@ describe("mongoshield restore, before connecting", () => {
     expectUsageError(run, message);
   });
 
-  it("refuses a backup id next to --at: the journal picks the base backup", async () => {
-    const url = await storeWithBackup();
+  it("refuses a full backup's id next to --at: the journal picks the base backup", async () => {
+    const { url, storage } = await namedMemoryStore();
+    const full = await writeTestBackup(storage, {
+      namespaces: [{ ns: "app.users", documents: [{ _id: 1 }] }],
+    });
     const run = await runTestCli([
       "restore",
-      "2026-01-01T00-00-00Z_abcdef",
+      full.id,
       "--at",
       "2026-01-02T00:00:00Z",
       "--from",

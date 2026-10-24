@@ -10,7 +10,11 @@ import {
   writeCheckpoint,
 } from "../engine/backup-checkpoint.ts";
 import { backupIdToDate, manifestKey, resolveBackupKey } from "../format/layout.ts";
-import type { Manifest } from "../format/manifest.ts";
+import {
+  type IncrementalManifest,
+  isIncrementalManifest,
+  type Manifest,
+} from "../format/manifest.ts";
 import { writeManifest } from "../format/manifest-io.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 
@@ -39,6 +43,58 @@ export function makeManifest(id: string, overrides: Partial<Manifest> = {}): Man
     totals: { namespaces: 0, documents: 0, bytesRaw: 0, bytesStored: 0 },
     ...overrides,
   };
+}
+
+/** The deployment id the chain fixtures share. */
+export const CHAIN_CLUSTER_ID = "c0ffee";
+
+/**
+ * A full backup a chain can start from: consistency converge, ending at cluster time
+ * `{ t: endSeconds, i: 1 }`, with the recorded selection of `app.*`.
+ */
+export function makeChainBase(
+  id: string,
+  endSeconds: number,
+  overrides: Partial<Manifest> = {},
+): Manifest {
+  return makeManifest(id, {
+    source: { topology: "replicaSet", serverVersion: "8.0.0", clusterId: CHAIN_CLUSTER_ID },
+    consistency: {
+      mode: "converge",
+      from: { t: endSeconds - 5, i: 1 },
+      to: { t: endSeconds, i: 1 },
+    },
+    selection: { include: ["app.*"], exclude: [], query: [] },
+    ...overrides,
+  });
+}
+
+/**
+ * An incremental backup continuing `parent`: its window starts at the parent's end and
+ * ends at `{ t: endSeconds, i: 1 }`.
+ */
+export function makeIncremental(
+  id: string,
+  parent: Manifest,
+  endSeconds: number,
+  overrides: Partial<Manifest> = {},
+): IncrementalManifest {
+  const from = parent.consistency.to ?? { t: 0, i: 0 };
+  const chain = isIncrementalManifest(parent)
+    ? { base: parent.chain.base, parent: parent.id, length: parent.chain.length + 1 }
+    : { base: parent.id, parent: parent.id, length: 1 };
+  const manifest = makeManifest(id, {
+    formatVersion: 2,
+    kind: "incremental",
+    chain,
+    source: { topology: "replicaSet", serverVersion: "8.0.0", clusterId: CHAIN_CLUSTER_ID },
+    consistency: { mode: "converge", from, to: { t: endSeconds, i: 1 } },
+    selection: { include: ["app.*"], exclude: [], query: [] },
+    changes: { key: "_changes/window.bson", size: 0, sha256: "0".repeat(64), events: 0 },
+    ...overrides,
+  });
+  if (!isIncrementalManifest(manifest)) throw new Error("fixture is not an incremental");
+  return manifest;
 }
 
 /** Writes a data file and then a valid manifest, like a successful backup run. */

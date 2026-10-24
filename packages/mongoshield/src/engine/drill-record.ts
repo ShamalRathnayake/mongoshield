@@ -35,7 +35,12 @@ export async function recordDrill(
   report: DrillReport,
   drilledAt: Date = new Date(),
 ): Promise<DrillRecord> {
-  const record: DrillRecord = {
+  return storeDrillRecord(storage, drillRecordOf(report, drilledAt));
+}
+
+/** The stored summary of a drill report (upgrade rehearsals add their fields to it). */
+export function drillRecordOf(report: DrillReport, drilledAt: Date): DrillRecord {
+  return {
     backupId: report.backupId,
     drilledAt: drilledAt.toISOString(),
     ok: report.ok,
@@ -47,10 +52,17 @@ export async function recordDrill(
     problemCount: report.problems.length,
     tool: `mongoshield@${version}`,
   };
+}
+
+/** Writes a drill record under `annotations/<backup id>/drills/<time>.json`. */
+export async function storeDrillRecord(
+  storage: StorageAdapter,
+  record: DrillRecord,
+): Promise<DrillRecord> {
   // "2026-11-14T03:00:04.123Z" → "2026-11-14T03-00-04-123Z": safe in keys, still sortable.
   const stamp = record.drilledAt.replaceAll(":", "-").replace(".", "-");
   const body = Buffer.from(`${JSON.stringify(record, null, 2)}\n`, "utf8");
-  await storage.put(`${drillRecordsPrefix(report.backupId)}${stamp}.json`, body, {
+  await storage.put(`${drillRecordsPrefix(record.backupId)}${stamp}.json`, body, {
     contentType: "application/json",
     sizeHint: body.length,
   });

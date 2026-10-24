@@ -186,6 +186,37 @@ describe("serverDatabaseFilter", () => {
   });
 });
 
+describe("serverDatabaseFilter with regexOnly (Atlas Free and Flex)", () => {
+  const internal = ["admin", "config", "local"];
+  const regexOnly = { regexOnly: true };
+
+  it("matches exactly the listed databases with one anchored regex", () => {
+    const rules = compileNamespaceRules({ include: ["app.*", "sh+op.orders"] });
+    const filter = serverDatabaseFilter(rules, ["extra"], internal, regexOnly);
+    const oneOf = /^(?:app|extra|sh\+op)$/;
+    expect(filter).toEqual({ $or: [{ "ns.db": oneOf }, { "to.db": oneOf }] });
+    expect(["app", "extra", "sh+op"].every((db) => oneOf.test(db))).toBe(true);
+    expect(["apps", "shhop", "xapp"].some((db) => oneOf.test(db))).toBe(false);
+  });
+
+  it("skips the internal databases with a negative lookahead", () => {
+    const filter = serverDatabaseFilter(compileNamespaceRules({}), ["admin"], internal, regexOnly);
+    const regex: unknown = filter["ns.db"];
+    expect(regex).toBeInstanceOf(RegExp);
+    const skips = regex as RegExp;
+    expect(skips.test("app")).toBe(true);
+    expect(skips.test("admin")).toBe(true);
+    expect(skips.test("localish")).toBe(true);
+    expect(skips.test("config")).toBe(false);
+    expect(skips.test("local")).toBe(false);
+  });
+
+  it("keeps every named database when nothing is skipped", () => {
+    const filter = serverDatabaseFilter(compileNamespaceRules({}), [], [], regexOnly);
+    expect((filter["ns.db"] as RegExp).test("app")).toBe(true);
+  });
+});
+
 describe("serializeChangeEvent", () => {
   it("serializes events larger than js-bson's default 17 MiB buffer intact", () => {
     const payload = "x".repeat(20 * 1024 * 1024);

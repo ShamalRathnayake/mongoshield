@@ -36,6 +36,17 @@
  * The live side is read without a snapshot, so a deployment that is being written to
  * gives an approximate answer. Collections whose `_id` is not unique (time series) are
  * compared approximately: duplicate `_id`s collapse into one record.
+ *
+ * Two options shape a diff for previewing a restore (the console's "Preview changes"):
+ *
+ *   rename   each `from` namespace is compared with the `to` namespace the restore
+ *            rename rules map it to; the `to` side is then limited to those targets
+ *   sample   against a live `to` side, a namespace above a size is compared by a sample:
+ *            the first N documents of the `from` side are looked up on the live side by
+ *            `_id` (one `$in` query per batch), and the counts are extrapolated. Reading
+ *            the whole live collection is what makes an exact diff of a big collection
+ *            slow and heavy on the target; the sample costs N indexed lookups instead.
+ *            "Added" (live-only) is then estimated from the live count, and has no examples.
  */
 
 import { createHash } from "node:crypto";
@@ -45,8 +56,10 @@ import { join } from "node:path";
 import { Binary, BSON, type Document, type MongoClient } from "mongodb";
 import type { EngineContext } from "../engine/context.ts";
 import { orderedEntries } from "../engine/filter-values.ts";
-import { documentsAtWindowEnd, hasChangeWindow } from "../engine/find-window.ts";
+import { documentsAtWindowEnd, needsOverlay } from "../engine/find-window.ts";
 import { readMetadataFile } from "../engine/read-pipeline.ts";
+import { metadataReading, namespaceReading } from "../engine/restore-chain.ts";
+import { compileRenameMap, type NamespaceMapper } from "../engine/restore-rename.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
 import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
 import { type CollectionEntry, collectionEntries } from "../format/manifest.ts";
@@ -66,6 +79,12 @@ export const DEFAULT_DIFF_EXAMPLES = 10;
 
 /** Documents per side compared fully in memory; larger collections spill to disk. */
 export const DEFAULT_MAX_RECORDS_IN_MEMORY = 250_000;
+
+/** Documents compared per sampled namespace when `sample.size` is not given. */
+export const DEFAULT_DIFF_SAMPLE_SIZE = 1000;
+
+/** `_id`s per `$in` lookup of a sampled comparison (small enough for any `_id` type). */
+const SAMPLE_LOOKUP_BATCH = 500;
 
 /** Upper bound on bucket files per side, to keep file handles and pending buffers small. */
 const MAX_BUCKETS = 4096;
@@ -102,6 +121,23 @@ export interface DiffOptions {
   readonly maxRecordsInMemory?: number;
   /** Where spill files go. Defaults to the OS temp directory. Removed afterwards. */
   readonly workDirectory?: string;
+  /**
+   * Compare each `from` namespace with the `to` namespace these rules map it to, in the
+   * restore `rename` syntax: `{ "app.*": "app_restored.*", "app.users": "app.people" }`.
+   * `include`/`exclude` select `from` namespaces by their own name; the `to` side is then
+   * limited to the namespaces they map to (nothing else there is compared, so no
+   * namespace is "only-to"). Results keep the `from` name in `namespace` and give the
+   * other one in `targetNamespace` when it differs.
+   */
+  readonly rename?: Readonly<Record<string, string>>;
+  /**
+   * Compare namespaces with more than `above` documents (on either side) by a sample
+   * instead of reading them fully: the first `size` documents of the `from` side
+   * (default {@link DEFAULT_DIFF_SAMPLE_SIZE}) are looked up by `_id` on the `to` side.
+   * Only for a live `to` side. Sampled namespaces carry `sampled`, and their counts are
+   * estimates (see the file header).
+   */
+  readonly sample?: { readonly above: number; readonly size?: number };
   readonly signal?: AbortSignal;
 }
 
@@ -152,6 +188,13 @@ export interface NamespaceDiff {
   /** Collection options (validator, collation, …) whose values differ. */
   readonly options: readonly string[];
   readonly identical: boolean;
+  /** The `to` side's name, when the `rename` option maps `namespace` elsewhere. */
+  readonly targetNamespace?: string;
+  /**
+   * Set when the documents were compared by a sample (`DiffOptions.sample`): `documents`
+   * of the `from` side's `of` were compared, and the counts are extrapolated from them.
+   */
+  readonly sampled?: { readonly documents: number; readonly of: number };
 }
 
 /** The result of `diffBackups`. */
@@ -182,6 +225,8 @@ interface SideNamespace {
   readonly atWindowEnd: boolean;
   metadata(): Promise<{ readonly options: Document; readonly indexes: readonly Document[] }>;
   documents(): AsyncIterable<Uint8Array>;
+  /** Live collections only: the raw documents with these `_id`s (for sampling). */
+  lookup?(ids: readonly unknown[]): AsyncIterable<Uint8Array>;
 }
 
 /** One opened side. */
@@ -210,25 +255,39 @@ export async function diffBackups(
     1,
   );
 
+  const sample = validateSample(options);
+  const mapper = options.rename === undefined ? undefined : compileRenameMap(options.rename);
+
   const fromBackup = await openSelectedBackup(context, { ...options, backup: options.from });
   const from = backupSide(fromBackup, options);
+  // With rename rules the `to` side is exactly the namespaces the `from` side maps to.
+  const targets =
+    mapper === undefined ? undefined : new Set([...from.namespaces.keys()].map(mapper));
   const to = isLive(options.to)
-    ? await liveSide(options.to.live, fromBackup, options)
-    : backupSide(await openSelectedBackup(context, { ...options, backup: options.to }), options);
+    ? await liveSide(options.to.live, fromBackup, options, targets)
+    : backupSide(
+        await openSelectedBackup(context, { ...options, backup: options.to }),
+        options,
+        targets,
+      );
 
-  const names = [...new Set([...from.namespaces.keys(), ...to.namespaces.keys()])].sort();
   const namespaces: NamespaceDiff[] = [];
   let spilled = false;
-  for (const name of names) {
+  for (const pair of namespacePairs(from, to, mapper)) {
     throwIfAborted(options.signal);
-    const compared = await diffNamespace(from.namespaces.get(name), to.namespaces.get(name), {
+    const compared = await diffNamespace(pair.from, pair.to, {
       examples,
       maxRecords,
+      sample,
       workDirectory: options.workDirectory ?? tmpdir(),
       signal: options.signal,
     });
     spilled ||= compared.spilled;
-    namespaces.push(compared.diff);
+    namespaces.push(
+      pair.targetNamespace === undefined
+        ? compared.diff
+        : { ...compared.diff, targetNamespace: pair.targetNamespace },
+    );
   }
 
   const result: DiffResult = {
@@ -248,6 +307,58 @@ export async function diffBackups(
 
 function isLive(side: BackupSelector | LiveDeployment): side is LiveDeployment {
   return typeof side === "object" && "live" in side;
+}
+
+/** The namespaces to compare: one side's and the other's under the same (or mapped) name. */
+interface NamespacePair {
+  readonly from: SideNamespace | undefined;
+  readonly to: SideNamespace | undefined;
+  /** The `to` name, when rename rules give it another name than `from`. */
+  readonly targetNamespace?: string;
+}
+
+/**
+ * Without rename rules, every namespace of either side by name (sorted). With them,
+ * every `from` namespace (sorted) with the `to` namespace it maps to.
+ */
+function namespacePairs(
+  from: OpenedSide,
+  to: OpenedSide,
+  mapper: NamespaceMapper | undefined,
+): NamespacePair[] {
+  if (mapper === undefined) {
+    const names = [...new Set([...from.namespaces.keys(), ...to.namespaces.keys()])].sort();
+    return names.map((name) => ({ from: from.namespaces.get(name), to: to.namespaces.get(name) }));
+  }
+  return [...from.namespaces.keys()].sort().map((name) => {
+    const target = mapper(name);
+    return {
+      from: from.namespaces.get(name),
+      to: to.namespaces.get(target),
+      ...(target === name ? {} : { targetNamespace: target }),
+    };
+  });
+}
+
+/** Sampling settings after validation (`undefined`: compare everything fully). */
+interface SampleSettings {
+  readonly above: number;
+  readonly size: number;
+}
+
+function validateSample(options: DiffOptions): SampleSettings | undefined {
+  if (options.sample === undefined) return undefined;
+  if (!isLive(options.to)) {
+    throw new MongoShieldError(
+      "MS_CONFIG_INVALID",
+      "sample needs the live deployment as the `to` side.",
+      { hint: "Sampling looks documents up by _id, which only a live collection can do." },
+    );
+  }
+  return {
+    above: validateCount(options.sample.above, 0, "sample.above", 0),
+    size: validateCount(options.sample.size, DEFAULT_DIFF_SAMPLE_SIZE, "sample.size", 1),
+  };
 }
 
 function validateCount(
@@ -270,16 +381,28 @@ function validateCount(
 // Sides
 // ---------------------------------------------------------------------------
 
-/** The namespaces of a backup, filtered by include/exclude. */
-function backupSide(backup: OpenedBackup, options: DiffOptions): OpenedSide {
-  const selected = compileNamespaceFilter({ include: options.include, exclude: options.exclude });
+/**
+ * The namespaces of a backup, filtered by include/exclude, or exactly `only` (the
+ * rename targets) when given.
+ */
+function backupSide(
+  backup: OpenedBackup,
+  options: DiffOptions,
+  only?: ReadonlySet<string>,
+): OpenedSide {
+  const filter = compileNamespaceFilter({ include: options.include, exclude: options.exclude });
+  const selected = (ns: string): boolean => (only === undefined ? filter(ns) : only.has(ns));
   const namespaces = new Map<string, SideNamespace>();
   // Users and roles entries are not collections and are not compared.
   for (const entry of collectionEntries(backup.manifest.namespaces)) {
     if (selected(entry.ns))
       namespaces.set(entry.ns, backupNamespace(backup, entry, options.signal));
   }
-  return { info: { kind: "backup", backupId: backup.manifest.id }, namespaces };
+  // An incremental's own id, not its chain's base (see restore-chain.ts).
+  return {
+    info: { kind: "backup", backupId: backup.chain?.backupId ?? backup.manifest.id },
+    namespaces,
+  };
 }
 
 function backupNamespace(
@@ -287,17 +410,21 @@ function backupNamespace(
   entry: CollectionEntry,
   signal: AbortSignal | undefined,
 ): SideNamespace {
-  const atWindowEnd = hasChangeWindow(backup.manifest) && entry.type !== "view";
+  // Converge windows and incremental chains are read as of their end; a chain's time
+  // series and newest metadata come from the incremental itself (restore-chain.ts).
+  const reading = namespaceReading(backup, entry);
+  const metadata = metadataReading(backup, entry);
+  const atWindowEnd = needsOverlay(reading) && entry.type !== "view";
   return {
     ns: entry.ns,
     type: entry.type,
-    documentCount: entry.documents,
+    documentCount: reading.entry.documents,
     atWindowEnd,
-    metadata: () => readMetadataFile(backup.source, entry.metadata, { signal }),
+    metadata: () => readMetadataFile(metadata.source, metadata.file, { signal }),
     documents: () =>
       atWindowEnd
         ? documentsAtT1(backup, entry, signal)
-        : rawDocumentsOf(backup.source, entry.files, signal),
+        : rawDocumentsOf(reading.source, reading.entry.files, signal),
   };
 }
 
@@ -338,24 +465,34 @@ function isPlainDocument(value: unknown): value is Document {
   return Reflect.get(value, "_bsontype") === undefined;
 }
 
-/** The live deployment's namespaces (by default within the databases of the `from` backup). */
+/**
+ * The live deployment's namespaces: by default within the databases of the `from`
+ * backup, or exactly `only` (the rename targets) when given.
+ */
 async function liveSide(
   client: MongoClient,
   fromBackup: OpenedBackup,
   options: DiffOptions,
+  only?: ReadonlySet<string>,
 ): Promise<OpenedSide> {
-  const include = options.include ?? [
-    ...new Set(fromBackup.manifest.namespaces.map((entry) => `${entry.db}.*`)),
-  ];
+  // Exact namespaces are valid patterns; the result is still checked against `only`
+  // below, in case a collection name contains a wildcard character.
+  const include =
+    only === undefined
+      ? (options.include ?? [
+          ...new Set(fromBackup.manifest.namespaces.map((entry) => `${entry.db}.*`)),
+        ])
+      : [...only];
   const namespaces = new Map<string, SideNamespace>();
   // A backup without namespaces gives no default scope; then there is nothing to compare.
   if (include.length === 0) return { info: { kind: "live" }, namespaces };
   const specs = await discoverNamespaces(client, {
     include,
-    exclude: options.exclude,
+    ...(only === undefined ? { exclude: options.exclude } : {}),
     signal: options.signal,
   });
   for (const spec of specs) {
+    if (only !== undefined && !only.has(spec.ns)) continue;
     namespaces.set(spec.ns, {
       ns: spec.ns,
       type: spec.type,
@@ -364,19 +501,24 @@ async function liveSide(
       metadata: async () => ({ options: spec.options, indexes: spec.indexes }),
       documents: () =>
         spec.type === "view" ? emptyDocuments() : liveDocuments(client, spec.ns, options.signal),
+      lookup: (ids) =>
+        spec.type === "view"
+          ? emptyDocuments()
+          : liveDocuments(client, spec.ns, options.signal, { _id: { $in: [...ids] } }),
     });
   }
   return { info: { kind: "live" }, namespaces };
 }
 
-/** Raw BSON of every document of a live collection (`raw: true` skips parsing). */
+/** Raw BSON of the documents of a live collection (`raw: true` skips parsing); all by default. */
 async function* liveDocuments(
   client: MongoClient,
   namespace: string,
   signal: AbortSignal | undefined,
+  filter: Document = {},
 ): AsyncGenerator<Uint8Array> {
   const { database, collection } = splitNamespace(namespace);
-  const cursor = client.db(database).collection(collection).find({}, { raw: true });
+  const cursor = client.db(database).collection(collection).find(filter, { raw: true });
   try {
     for await (const document of cursor) {
       throwIfAborted(signal);
@@ -405,6 +547,7 @@ async function* emptyDocuments(): AsyncGenerator<Uint8Array> {}
 interface CompareSettings {
   readonly examples: number;
   readonly maxRecords: number;
+  readonly sample: SampleSettings | undefined;
   readonly workDirectory: string;
   readonly signal: AbortSignal | undefined;
 }
@@ -424,10 +567,14 @@ async function diffNamespace(
   const [fromMetadata, toMetadata] = [await from.metadata(), await to.metadata()];
   const indexes = compareIndexes(fromMetadata.indexes, toMetadata.indexes);
   const options = compareOptions(fromMetadata.options, toMetadata.options);
-  const compared = await compareDocumentStreams(from.documents(), to.documents(), {
-    ...settings,
-    expected: Math.max(from.documentCount, to.documentCount),
-  });
+  const expected = Math.max(from.documentCount, to.documentCount);
+  // Large namespaces are sampled when asked to and the `to` side can look documents up.
+  const { sample } = settings;
+  const lookup = to.lookup;
+  const compared =
+    sample !== undefined && lookup !== undefined && expected > sample.above
+      ? await compareBySample(from, to, lookup, sample.size, settings)
+      : await compareDocumentStreams(from.documents(), to.documents(), { ...settings, expected });
   const { counts } = compared;
   const identical =
     from.type === to.type &&
@@ -444,6 +591,7 @@ async function diffNamespace(
       indexes,
       options,
       identical,
+      ...(compared.sampled === undefined ? {} : { sampled: compared.sampled }),
     },
     spilled: compared.spilled,
   };
@@ -557,7 +705,7 @@ interface DocumentRecord {
 }
 
 /** What `compareDocumentStreams` needs besides the two streams. */
-interface StreamCompareOptions extends CompareSettings {
+interface StreamCompareOptions extends Omit<CompareSettings, "sample"> {
   /** The larger side's expected document count, to choose in-memory vs spill. */
   readonly expected: number;
 }
@@ -567,6 +715,8 @@ interface DocumentComparison {
   readonly counts: DocumentDiffCounts;
   readonly examples: DiffExamples;
   readonly spilled: boolean;
+  /** Set for a sampled comparison: how many `from` documents of how many were compared. */
+  readonly sampled?: { readonly documents: number; readonly of: number };
 }
 
 /** Reduces a raw document to its record. */
@@ -658,6 +808,85 @@ async function matchAgainst(
     }
   }
   for (const key of fromRecords.keys()) tally.note("removed", key);
+}
+
+/**
+ * Compares a namespace by a sample (see the file header): the first `size` documents of
+ * the `from` side, looked up by `_id` on the live side in batches. A sampled document
+ * is unchanged, changed, or missing on the live side ("removed"); the counts of the
+ * whole namespace are those shares scaled to the `from` side's count. Live documents
+ * the sample cannot see ("added") are estimated from the live count: whatever exceeds
+ * the `from` documents that are estimated to be there. Documents without `_id` cannot
+ * be looked up and are not sampled.
+ */
+async function compareBySample(
+  from: SideNamespace,
+  to: SideNamespace,
+  lookup: (ids: readonly unknown[]) => AsyncIterable<Uint8Array>,
+  size: number,
+  settings: CompareSettings,
+): Promise<DocumentComparison> {
+  const tally = new Tally(settings.examples);
+  let batch = new Map<string, { readonly id: unknown; readonly digest: string }>();
+
+  // Looks one batch up and sorts each of its documents into a category.
+  const flush = async (): Promise<void> => {
+    if (batch.size === 0) return;
+    const ids = [...batch.values()].map((entry) => entry.id);
+    for await (const raw of lookup(ids)) {
+      throwIfAborted(settings.signal);
+      const record = recordOf(raw);
+      const key = record.key.toString("latin1");
+      const sampled = batch.get(key);
+      // `$in` matches by value (an Int32 1 finds a Double 1): such a document is not the
+      // sampled one by its exact `_id` bytes, as in a full diff, so it does not count.
+      if (sampled === undefined) continue;
+      if (sampled.digest === record.digest.toString("latin1")) tally.unchanged += 1;
+      else tally.note("changed", key);
+      batch.delete(key);
+    }
+    for (const key of batch.keys()) tally.note("removed", key);
+    batch = new Map();
+  };
+
+  let taken = 0;
+  for await (const raw of from.documents()) {
+    throwIfAborted(settings.signal);
+    const document = parseRawDocument(raw);
+    if (document._id === undefined) continue;
+    const record = recordOf(raw);
+    batch.set(record.key.toString("latin1"), {
+      id: document._id,
+      digest: record.digest.toString("latin1"),
+    });
+    taken += 1;
+    if (batch.size >= SAMPLE_LOOKUP_BATCH) await flush();
+    // Leaving the loop closes the backup stream: the rest is never downloaded.
+    if (taken >= size) break;
+  }
+  await flush();
+
+  const sample = tally.counts();
+  const total = Math.max(from.documentCount, taken);
+  const scale = taken === 0 ? 0 : total / taken;
+  const removed = Math.round(sample.removed * scale);
+  const changed = Math.round(sample.changed * scale);
+  const examples = tally.decodedExamples();
+  return {
+    counts: {
+      from: total,
+      to: to.documentCount,
+      // Live documents beyond the `from` documents estimated to exist there.
+      added: Math.max(0, to.documentCount - (total - removed)),
+      removed,
+      changed,
+      unchanged: Math.max(0, total - removed - changed),
+    },
+    // The sample never sees live-only documents, so it has no examples of them.
+    examples: { ...examples, added: [] },
+    spilled: false,
+    sampled: { documents: taken, of: total },
+  };
 }
 
 /** One bucket when the larger side fits in memory; otherwise buckets about half full. */

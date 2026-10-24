@@ -4,7 +4,13 @@
  * Kept apart from the wizard so the template reads top to bottom like the
  * file it produces. Values are inserted with `JSON.stringify`, which always
  * yields a valid (escaped) TypeScript string literal.
+ *
+ * With a preset (`--preset atlas-free`), the file names it and also spells out the
+ * values that matter most on that kind of deployment (read pace, retention), so the
+ * user sees them and can change them without looking up what the preset does.
  */
+
+import { CONFIG_PRESETS, type ConfigPresetName } from "../../config/presets.ts";
 
 /** What the template needs to know. */
 export interface InitAnswers {
@@ -16,7 +22,12 @@ export interface InitAnswers {
   readonly recipient?: string;
   /** Where the matching secret key was written (shown in a comment only). */
   readonly keyFile?: string;
+  /** A config preset to start from (src/config/presets.ts). */
+  readonly preset?: ConfigPresetName;
 }
+
+/** The default retention, when no preset brings its own. */
+const DEFAULT_RETENTION = "{ last: 3, daily: 7, weekly: 4, monthly: 12 }";
 
 /** Renders the config file. */
 export function generateConfigText(answers: InitAnswers): string {
@@ -28,7 +39,9 @@ export function generateConfigText(answers: InitAnswers): string {
     'import { defineConfig } from "mongoshield";',
     "",
     "export default defineConfig({",
+    ...presetSection(answers.preset),
     `  // The database to back up (and the default restore target).`,
+    ...sourceComment(answers.preset),
     `  source: { uri: process.env.${answers.uriEnv} },`,
     "",
     "  // Where backups are stored: a directory, or s3://bucket/prefix",
@@ -39,8 +52,9 @@ export function generateConfigText(answers: InitAnswers): string {
     "",
     ...encryptionSection(answers),
     "",
+    ...backupSection(answers.preset),
     "  // What `mongoshield prune` keeps. Preview with `mongoshield prune --dry-run`.",
-    "  retention: { last: 3, daily: 7, weekly: 4, monthly: 12 },",
+    `  retention: ${retentionText(answers.preset)},`,
     "});",
     "",
   ].join("\n");
@@ -64,4 +78,48 @@ function encryptionSection(answers: InitAnswers): string[] {
     "  // Keep the secret key offline, never on the machines that run backups.",
     `  encryption: { recipients: [${JSON.stringify(answers.recipient)}] },`,
   ];
+}
+
+/** The `preset` line and what it means, or nothing without a preset. */
+function presetSection(preset: ConfigPresetName | undefined): string[] {
+  if (preset === undefined) return [];
+  return [
+    "  // Defaults for MongoDB Atlas Free / Flex clusters (docs/guides/atlas-free-tier.md).",
+    "  // Everything set in this file wins over them. MongoShield also recognises these",
+    "  // tiers when it connects and avoids the commands they refuse.",
+    `  preset: ${JSON.stringify(preset)},`,
+    "",
+  ];
+}
+
+/** Where to find the Atlas connection string, for Atlas presets. */
+function sourceComment(preset: ConfigPresetName | undefined): string[] {
+  if (preset === undefined) return [];
+  return [
+    '  // Atlas: Connect → Drivers, for a database user with the role "Only read any',
+    '  // database". Adding `compressors=zlib` to it compresses reads on the wire,',
+    "  // which saves Free-tier data transfer (10 GB out per 7 days):",
+    "  //   mongodb+srv://backup:<password>@cluster0.abcde.mongodb.net/?compressors=zlib",
+  ];
+}
+
+/** The read pace of a preset, written out so it is easy to find and change. */
+function backupSection(preset: ConfigPresetName | undefined): string[] {
+  if (preset === undefined) return [];
+  const { parallelism, maxBytesPerSecond } = CONFIG_PRESETS[preset].backup;
+  const mebibytes = maxBytesPerSecond / (1024 * 1024);
+  return [
+    `  // Go easy on a shared cluster: ${parallelism} collections at a time, at most ${mebibytes} MiB/s.`,
+    `  backup: { parallelism: ${parallelism}, maxBytesPerSecond: ${mebibytes} * 1024 * 1024 },`,
+    "",
+  ];
+}
+
+/** The retention policy as TypeScript text: the preset's, or the default one. */
+function retentionText(preset: ConfigPresetName | undefined): string {
+  if (preset === undefined) return DEFAULT_RETENTION;
+  const fields = Object.entries(CONFIG_PRESETS[preset].retention).map(
+    ([key, value]) => `${key}: ${String(value)}`,
+  );
+  return `{ ${fields.join(", ")} }`;
 }

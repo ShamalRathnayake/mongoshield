@@ -17,19 +17,31 @@
  *
  * `_id`s are compared with query equality (`$eq`), so `42` finds an `_id` stored as
  * Int32, Long or Double 42. Memory: one document per backup plus the matching events.
+ *
+ * Incremental backups count as backups that hold the namespace when their chain's base
+ * holds it: the document is looked up in the base and the chain's changes are overlaid
+ * (src/engine/restore-chain.ts), so each incremental shows the document as of its end.
  */
 
 import { BSON, type Document, MaxKey } from "mongodb";
-import { listBackups } from "../catalog/index.ts";
+import { type CatalogEntry, listBackups, resolveChain } from "../catalog/index.ts";
+import { fromCanonical } from "../engine/backup-parts.ts";
 import type { EngineContext } from "../engine/context.ts";
 import { type ChangeEvent, collectionNamespaceOf } from "../engine/converge-events.ts";
 import { compareClusterTimes } from "../engine/converge-time.ts";
 import { compileFilter, type DocumentMatcher } from "../engine/filter.ts";
 import { compareValues, isDocument } from "../engine/filter-values.ts";
 import { matchingDocuments } from "../engine/find.ts";
-import { openBackupSource } from "../engine/read-pipeline.ts";
+import { namespaceReading, openReadableBackup } from "../engine/restore-chain.ts";
+import { planningEntries } from "../engine/restore-plan.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import type { ClusterTime, CollectionEntry, DataFile, Manifest } from "../format/manifest.ts";
+import {
+  type ClusterTime,
+  type CollectionEntry,
+  type DataFile,
+  isIncrementalManifest,
+  type Manifest,
+} from "../format/manifest.ts";
 import { baseTimeOf, loadJournalCoverage, readJournalSegments } from "../journal/index.ts";
 import { clusterTimeOfDate, dateOfClusterTime, isAfter } from "../journal/time.ts";
 import type { DecryptionOptions } from "../types.ts";
@@ -137,12 +149,17 @@ export async function documentHistory(
   // `$eq` keeps an id that is itself a document (`{ a: 1 }`) from being read as operators.
   const idMatcher = compileFilter({ _id: { $eq: options.id } });
 
-  const holding = await backupsHolding(context, options.namespace, limit, options.signal);
+  const { holding, entries } = await backupsHolding(
+    context,
+    options.namespace,
+    limit,
+    options.signal,
+  );
   const manifests = holding.map((backup) => backup.manifest);
   const versions: HistoryVersion[] = [];
   for (const backup of holding) {
     throwIfAborted(options.signal);
-    versions.push(await versionInBackup(context, backup, idMatcher, options));
+    versions.push(await versionInBackup(context, entries, backup, idMatcher, options));
   }
 
   const journal =
@@ -189,19 +206,25 @@ function validateBackupLimit(backups: "all" | number | undefined): number {
   return backups;
 }
 
-/** A backup that holds the namespace, with the namespace's manifest entry. */
+/**
+ * A backup that holds the namespace, with the namespace's manifest entry (for an
+ * incremental: the entry of its chain's base).
+ */
 interface HoldingBackup {
   readonly manifest: Manifest;
   readonly entry: CollectionEntry;
 }
 
-/** The newest `limit` complete backups that hold `namespace` with documents. */
+/**
+ * The newest `limit` complete backups that hold `namespace` with documents, and the
+ * catalog (incrementals are opened through their chain).
+ */
 async function backupsHolding(
   context: EngineContext,
   namespace: string,
   limit: number,
   signal: AbortSignal | undefined,
-): Promise<HoldingBackup[]> {
+): Promise<{ holding: HoldingBackup[]; entries: readonly CatalogEntry[] }> {
   const entries = await listBackups(context.storage, {
     logger: context.logger,
     ...(signal ? { signal } : {}),
@@ -210,13 +233,28 @@ async function backupsHolding(
   for (const catalogEntry of entries) {
     if (catalogEntry.status !== "complete") continue;
     const manifest = manifestOf(catalogEntry);
-    const entry = documentNamespace(manifest, namespace);
+    const entry = documentNamespace(dataManifestOf(entries, manifest), namespace);
     if (entry !== undefined) holding.push({ manifest, entry });
   }
   holding.sort((left, right) =>
     compareClusterTimes(backupTime(right.manifest), backupTime(left.manifest)),
   );
-  return holding.slice(0, limit);
+  return { holding: holding.slice(0, limit), entries };
+}
+
+/**
+ * The manifest that lists a backup's documents: its own, or for an incremental its
+ * chain's base. An incremental whose chain is broken holds nothing that can be read.
+ */
+function dataManifestOf(entries: readonly CatalogEntry[], manifest: Manifest): Manifest {
+  if (!isIncrementalManifest(manifest)) return manifest;
+  try {
+    // The base's collections and the incremental's own time series copies.
+    const base = resolveChain(entries, manifest).base;
+    return { ...base, namespaces: [...planningEntries(base, manifest).entries] };
+  } catch {
+    return { ...manifest, namespaces: [] };
+  }
 }
 
 /** The cluster time a backup stands for (see the file header). */
@@ -227,6 +265,7 @@ function backupTime(manifest: Manifest): ClusterTime {
 /** Looks the document up in one backup. */
 async function versionInBackup(
   context: EngineContext,
+  entries: readonly CatalogEntry[],
   backup: HoldingBackup,
   idMatcher: DocumentMatcher,
   options: DocumentHistoryOptions,
@@ -239,11 +278,18 @@ async function versionInBackup(
     completedAt: new Date(manifest.completedAt),
   } as const;
 
-  const source = await openBackupSource(context.storage, manifest, options.decryption, {
+  // An incremental is read as its chain's base with the chain's changes overlaid.
+  const readable = await openReadableBackup(context.storage, entries, manifest, {
+    decryption: options.decryption,
     signal: options.signal,
   });
-  const narrowed: CollectionEntry = { ...entry, files: partsThatMayHold(entry.files, options.id) };
-  const opened = { manifest, entry: narrowed, source };
+  // A chain's time series are read from the incremental's own copy.
+  const reading = namespaceReading(readable, entry);
+  const narrowed: CollectionEntry = {
+    ...reading.entry,
+    files: partsThatMayHold(reading.entry.files, options.id),
+  };
+  const opened = { ...reading, entry: narrowed };
   // `_id`s are unique, so the first match is the document; returning closes the file.
   const matches = matchingDocuments(opened, idMatcher, options.signal, {
     logger: context.logger,
@@ -274,10 +320,17 @@ export function partsThatMayHold(files: readonly DataFile[], id: unknown): DataF
   });
 }
 
-/** A range bound, stored as canonical Extended JSON, as a BSON value. */
+/**
+ * A range bound, stored as canonical Extended JSON, as a BSON value.
+ *
+ * Field order matters here: an embedded-document `_id` such as `{ b: 1, "2": 1 }` sorts
+ * by `b` first. The manifest reader keeps the stored order of the bound (manifest-io.ts)
+ * and `fromCanonical` carries it onto the BSON value, which `compareValues` then
+ * compares field by field in that order, as the server does. (`BSON.EJSON` would list
+ * the integer-like key first and compare a different `_id`.)
+ */
 function fromCanonicalJson(value: unknown): unknown {
-  const wrapped: unknown = BSON.EJSON.deserialize({ value }, { relaxed: false });
-  return isDocument(wrapped) ? wrapped.value : undefined;
+  return fromCanonical(value);
 }
 
 // ---------------------------------------------------------------------------

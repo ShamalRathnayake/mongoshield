@@ -49,6 +49,42 @@ async function project(extra: Record<string, unknown> = {}) {
   return { dbName, cwd, storage };
 }
 
+describe("mongoshield run: retention.scopeLabels", () => {
+  it("keeps two plans with the same source and selection in one storage apart", async () => {
+    const { dbName, cwd, storage } = await project();
+    // A second config: same source, same selection, same storage, another plan label.
+    const base = {
+      source: { uri: mongoUri() },
+      storage,
+      compression: "gzip",
+      schedule: { cron: "15 3 * * *" },
+    };
+    const write = (file: string, plan: string): Promise<void> =>
+      writeFile(
+        join(cwd, file),
+        JSON.stringify({
+          ...base,
+          backup: { include: [`${dbName}.*`] },
+          retention: { last: 1, scopeLabels: { "mongoshield.plan": plan } },
+        }),
+      );
+    await write("nightly.json", "nightly");
+    await write("hourly.json", "hourly");
+    try {
+      for (const config of ["nightly.json", "hourly.json", "hourly.json", "nightly.json"]) {
+        const run = await runTestCli(["run", "--config", config, "--quiet"], { cwd });
+        expect(run.code, run.stderr).toBe(0);
+      }
+      const backups = await listBackups(fileStorage({ path: storage }));
+      const plans = backups.map((entry) => entry.manifest?.labels["mongoshield.plan"]).sort();
+      // "last: 1" per plan: one each, not one in total.
+      expect(plans).toEqual(["hourly", "nightly"]);
+    } finally {
+      await client().db(dbName).dropDatabase();
+    }
+  });
+});
+
 describe("mongoshield run (human output)", () => {
   it("prints the summary on stderr and the details on stdout", async () => {
     const { dbName, cwd } = await project({ retention: { last: 1 } });

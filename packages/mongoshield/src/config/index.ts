@@ -13,6 +13,13 @@ export {
   validateConfig,
 } from "./load.ts";
 export {
+  CONFIG_PRESET_NAMES,
+  CONFIG_PRESETS,
+  type ConfigPresetDefaults,
+  type ConfigPresetName,
+  isConfigPresetName,
+} from "./presets.ts";
+export {
   ConfigSchema,
   type MongoShieldConfig,
   type MongoShieldConfigInput,

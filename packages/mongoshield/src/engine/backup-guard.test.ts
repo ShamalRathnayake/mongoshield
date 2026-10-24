@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { idAt, makeManifest, putCompleteBackup } from "../catalog/test-fixtures.ts";
+import {
+  idAt,
+  makeChainBase,
+  makeIncremental,
+  makeManifest,
+  putCompleteBackup,
+} from "../catalog/test-fixtures.ts";
 import { isMongoShieldError } from "../errors.ts";
 import type { Manifest, NamespaceEntry } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
@@ -148,6 +154,32 @@ describe("findGuardBaseline", () => {
     await putCompleteBackup(storage, candidate.id);
     await putCompleteBackup(storage, idAt("2026-10-21T03:00:00Z"));
     expect(await findGuardBaseline(storage, candidate)).toBeUndefined();
+  });
+});
+
+describe("the guard and incremental backups", () => {
+  it("never uses an incremental as the baseline, and does not check one", async () => {
+    const storage = memoryStorage();
+    const full = backupAt(BEFORE, [entry("app.users", 100)]);
+    await putCompleteBackup(storage, full.id, full);
+    // An incremental lists no collections: as a baseline, everything would look missing.
+    const incremental = makeIncremental(
+      idAt("2026-10-19T04:00:00Z"),
+      makeChainBase(full.id, 10),
+      20,
+    );
+    await putCompleteBackup(storage, incremental.id, incremental);
+
+    const candidate = backupAt(NOW, [entry("app.users", 100)]);
+    expect((await findGuardBaseline(storage, candidate))?.id).toBe(full.id);
+
+    const later = makeIncremental(idAt("2026-10-20T04:00:00Z"), incremental, 30);
+    const result = await enforceBackupGuard({
+      storage,
+      candidate: later,
+      policy: { maxDocumentDropPercent: 10 },
+    });
+    expect(result).toMatchObject({ ok: true, findings: [], baselineId: undefined });
   });
 });
 

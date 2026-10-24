@@ -2,14 +2,20 @@
 // commands that write them are tested against a real server in
 // test/integration/users-and-roles.test.ts.
 
-import { type Document, UUID } from "mongodb";
+import { type Document, type MongoClient, MongoServerError, UUID } from "mongodb";
 import { describe, expect, it } from "vitest";
+import { isMongoShieldError } from "../errors.ts";
 import type { Manifest } from "../format/manifest.ts";
-import type { Logger } from "../logger.ts";
+import { type Logger, silentLogger } from "../logger.ts";
 import { compileNamespaceFilter } from "../mongo/index.ts";
 import { memoryStorage } from "../storage/memory.ts";
 import { sourceFromManifest } from "./read-pipeline.ts";
-import { planUsersAndRoles, readUsersAndRoles, selectUsersAndRoles } from "./restore-authz.ts";
+import {
+  planUsersAndRoles,
+  readUsersAndRoles,
+  restoreRoles,
+  selectUsersAndRoles,
+} from "./restore-authz.ts";
 import { compileRenameMap } from "./restore-rename.ts";
 
 const userId = new UUID();
@@ -239,5 +245,34 @@ describe("planUsersAndRoles", () => {
     const planned = await plan("create", manifestWith([USERS_ENTRY]), messages);
     expect(planned).toEqual({ mode: "create", users: [], roles: [] });
     expect(messages).toEqual(["info: Users and roles to restore"]);
+  });
+});
+
+describe("restoring users and roles into an unrecognised Atlas cluster", () => {
+  it("explains that Atlas manages users itself when its proxy refuses the commands", async () => {
+    // Atlas behind a host name MongoShield did not recognise: restore.ts could not
+    // refuse up front, so the first user-management command meets the proxy.
+    const atlas = {
+      db: () => ({
+        command: async () => {
+          throw new MongoServerError({
+            errmsg: "rolesInfo is not allowed in this atlas tier",
+            code: 8000,
+            codeName: "AtlasError",
+          });
+        },
+      }),
+    } as unknown as MongoClient;
+    const error: unknown = await restoreRoles(
+      atlas,
+      [{ _id: "app.reporting", role: "reporting", db: "app" }],
+      {
+        mode: "create",
+        logger: silentLogger,
+      },
+    ).catch((caught: unknown) => caught);
+    expect(isMongoShieldError(error, "MS_UNSUPPORTED_TOPOLOGY")).toBe(true);
+    expect(isMongoShieldError(error) && error.message).toContain("refused by Atlas");
+    expect(isMongoShieldError(error) && error.hint).toContain("atlas customDbRoles list");
   });
 });

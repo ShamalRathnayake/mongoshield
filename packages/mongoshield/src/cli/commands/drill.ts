@@ -52,7 +52,8 @@ export const DRILL_OPTIONS: Readonly<Record<string, OptionSpec>> = {
   "target-uri": {
     type: "string",
     valueName: "<mongodb-uri>",
-    description: "Scratch deployment to restore into (required; never the configured source)",
+    description:
+      "Scratch deployment to restore into (required, or MONGOSHIELD_DRILL_URI; never the configured source)",
   },
   sample: {
     type: "string",
@@ -115,10 +116,14 @@ export const drillCommand: CommandSpec = {
 
 /** Runs a drill from the parsed flags. Also used by `mongoshield verify --drill`. */
 export async function runDrillCommand(context: CommandContext): Promise<number> {
-  const targetUri = context.flags.string("target-uri");
+  // The environment variable keeps the URI (and its password) out of the command
+  // line, e.g. when it comes from a Kubernetes Secret.
+  const targetUri =
+    context.flags.string("target-uri") ??
+    (context.io.env.MONGOSHIELD_DRILL_URI?.trim() || undefined);
   if (!targetUri) {
     throw usageError(
-      "A drill needs a scratch deployment to restore into: pass --target-uri.",
+      "A drill needs a scratch deployment to restore into: pass --target-uri (or set MONGOSHIELD_DRILL_URI).",
       NAME,
     );
   }
@@ -231,7 +236,8 @@ function printReport(out: Output, report: DrillReport): void {
   for (const warning of report.warnings) out.warn(warning);
 }
 
-function namespaceTable(out: Output, report: DrillReport): string {
+/** One row per drilled namespace. Also printed by `rehearse-upgrade`. */
+export function namespaceTable(out: Output, report: DrillReport): string {
   const rows = report.namespaces.map((namespace) => [
     namespace.ns,
     namespace.type,

@@ -21,6 +21,7 @@
  */
 
 import { z } from "zod";
+import { CONFIG_PRESET_NAMES } from "./presets.ts";
 
 /** A non-empty string; empty strings usually mean an environment variable was set to "". */
 const nonEmpty = z.string().trim().min(1);
@@ -50,6 +51,17 @@ export const RetentionConfigSchema = z
     yearly: z.number().int().positive().optional(),
     /** Never prune below this many verified backups. */
     minVerified: z.number().int().nonnegative().optional(),
+    /**
+     * Labels that mark this job's backups and scope its retention to them (together
+     * with the source's cluster). `mongoshield run` and `schedule` add them to every
+     * backup they write and prune only backups that carry all of them;
+     * `mongoshield prune` scopes by them too (unless --scope-label is given).
+     * Without them the scope is the `mongoshield.shape` label (the include/exclude
+     * selection), so two jobs with the same source and selection that share a
+     * storage location need different scope labels, e.g.
+     * `{ "mongoshield.plan": "nightly" }`, or they prune each other's backups.
+     */
+    scopeLabels: z.record(z.string().min(1), z.string()).optional(),
   })
   .strict();
 
@@ -131,6 +143,13 @@ export const ReplicateTargetSchema = z
 
 export const ConfigSchema = z
   .object({
+    /**
+     * Defaults for a kind of deployment, applied under everything else the config,
+     * environment and flags set: `"atlas-free"` (Atlas Free / M0, legacy M2/M5) or
+     * `"atlas-flex"`. See src/config/presets.ts and docs/guides/atlas-free-tier.md.
+     */
+    preset: z.enum(CONFIG_PRESET_NAMES).optional(),
+
     /** The database to back up (and the default restore target). */
     source: z
       .object({
@@ -219,8 +238,30 @@ export const ConfigSchema = z
          * backups). Off by default. See `BackupOptions.includeUsersAndRoles`.
          */
         usersAndRoles: z.boolean().optional(),
+        /**
+         * Incremental backups for scheduled runs (`mongoshield run` / `schedule`, console
+         * plans): each run stores only the changes since the previous backup, and a full
+         * backup starts a new chain when there is none to continue, the chain's full
+         * backup is older than `fullEveryDays`, or the chain reached `maxChainLength`.
+         * "Full weekly, incremental hourly" is `schedule.cron: "0 * * * *"` with
+         * `incremental: { fullEveryDays: 7 }`. See docs/guides/incremental-backups.md.
+         */
+        incremental: z
+          .object({
+            /** Start a new chain once its full backup is this many days old. Defaults to 7. */
+            fullEveryDays: z.number().positive().max(366).optional(),
+            /** Start a new chain once it holds this many incrementals. No limit by default. */
+            maxChainLength: z.number().int().min(1).max(100_000).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
+      // An incremental only records changes; a time budget would only apply to the fulls.
+      .refine((value) => value.incremental === undefined || value.maxDurationMs === undefined, {
+        message: "incremental cannot be combined with maxDurationMs",
+        path: ["incremental"],
+      })
       .optional(),
 
     /** Policy used by `mongoshield prune`. */

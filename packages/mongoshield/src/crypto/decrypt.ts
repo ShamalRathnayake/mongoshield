@@ -51,6 +51,7 @@ import {
   verifyHeaderMac,
 } from "./header.ts";
 import { parseIdentity } from "./keys.ts";
+import { prepareChaCha20Poly1305 } from "./primitives.ts";
 import { DEFAULT_MAX_SCRYPT_WORK_FACTOR, SCRYPT_STANZA_TYPE, unwrapScrypt } from "./scrypt.ts";
 import { ChunkCipher, derivePayloadKey } from "./stream-cipher.ts";
 import { unwrapX25519, X25519_STANZA_TYPE, type X25519KeyPair } from "./x25519.ts";
@@ -136,6 +137,10 @@ export function prepareKeys(options: DecryptStreamOptions): UnwrapKeys {
  * who knew the passphrase.
  */
 export async function unwrapFileKey(header: ParsedHeader, keys: UnwrapKeys): Promise<Buffer> {
+  // Loads the portable cipher on runtimes without a native one (see primitives.ts).
+  // Every decryption unwraps its file key before opening anything, so this covers
+  // the payload chunks too.
+  await prepareChaCha20Poly1305();
   const { stanzas } = header;
   const scryptStanza = stanzas.find((stanza) => stanza.args[0] === SCRYPT_STANZA_TYPE);
   if (scryptStanza !== undefined) {

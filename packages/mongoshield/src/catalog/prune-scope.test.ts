@@ -13,7 +13,10 @@ import { listBackups } from "./catalog.ts";
 import { pruneBackups } from "./prune.ts";
 import { isInScope, type PruneScope, validateScope } from "./scope.ts";
 import {
+  CHAIN_CLUSTER_ID,
   idAt,
+  makeChainBase,
+  makeIncremental,
   putCheckpoint,
   putCompleteBackup,
   putIncompleteBackup,
@@ -87,6 +90,55 @@ describe("validateScope", () => {
     );
     expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
     expect(await remainingIds(storage)).toHaveLength(2);
+  });
+});
+
+describe("pruneBackups and incremental chains", () => {
+  it("deletes an old chain whole and keeps the chain of the newest incremental", async () => {
+    const storage = memoryStorage();
+    const oldBase = makeChainBase(idAt("2026-10-18T00:00:00Z"), 1000);
+    const oldInc = makeIncremental(idAt("2026-10-18T01:00:00Z"), oldBase, 2000);
+    const base = makeChainBase(idAt("2026-10-19T00:00:00Z"), 3000);
+    const first = makeIncremental(idAt("2026-10-19T01:00:00Z"), base, 4000);
+    const second = makeIncremental(idAt("2026-10-19T02:00:00Z"), first, 5000);
+    for (const manifest of [oldBase, oldInc, base, first, second]) {
+      await putCompleteBackup(storage, manifest.id, manifest);
+    }
+
+    const result = await pruneBackups(storage, { last: 1 }, { now: NOW });
+
+    expect(await remainingIds(storage)).toEqual([base.id, first.id, second.id]);
+    // Deleted newest first: a prune stopped halfway never leaves a hole in a chain.
+    expect(result.plan.remove.map((removed) => removed.id)).toEqual([oldInc.id, oldBase.id]);
+  });
+
+  it("keeps an in-scope backup that another scope's incremental depends on", async () => {
+    const storage = memoryStorage();
+    const base = makeChainBase(idAt("2026-10-18T00:00:00Z"), 1000, {
+      labels: { [SHAPE]: "mine" },
+    });
+    const newer = makeChainBase(idAt("2026-10-19T00:00:00Z"), 3000, {
+      labels: { [SHAPE]: "mine" },
+    });
+    // Chained explicitly (`--from`) by a job with other labels: out of this scope.
+    const theirs = makeIncremental(idAt("2026-10-18T05:00:00Z"), base, 2000, {
+      labels: { [SHAPE]: "theirs" },
+    });
+    for (const manifest of [base, newer, theirs]) {
+      await putCompleteBackup(storage, manifest.id, manifest);
+    }
+
+    const result = await pruneBackups(
+      storage,
+      { last: 1 },
+      { now: NOW, scope: { clusterId: CHAIN_CLUSTER_ID, labels: { [SHAPE]: "mine" } } },
+    );
+
+    expect(result.plan.remove).toEqual([]);
+    expect(result.plan.keep.find((kept) => kept.id === base.id)?.reasons).toEqual([
+      `needed by incremental ${theirs.id} (outside this scope)`,
+    ]);
+    expect(await remainingIds(storage)).toEqual([base.id, theirs.id, newer.id].sort());
   });
 });
 

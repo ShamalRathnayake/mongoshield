@@ -43,6 +43,7 @@ import {
   matchingDocuments,
   type OpenedNamespace,
   openNamespace,
+  selectedBackupId,
 } from "./find.ts";
 import { readMetadataFile } from "./read-pipeline.ts";
 import { createNamespace, createOptionsFrom } from "./restore-collections.ts";
@@ -177,7 +178,7 @@ export async function restoreDocuments(
   }
 
   const result: RestoreDocumentsResult = {
-    backupId: opened.manifest.id,
+    backupId: selectedBackupId(opened),
     namespace: options.namespace,
     targetNamespace,
     mode,

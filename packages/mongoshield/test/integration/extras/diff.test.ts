@@ -215,3 +215,138 @@ describe("diffBackups against the live deployment", () => {
     expect(parsed.identical).toBe(false);
   });
 });
+
+describe("diffBackups for a restore preview (rename rules and sampling)", () => {
+  let database: string;
+  let workDir: string;
+  let storageDir: string;
+  const storage = () => fileStorage({ path: storageDir });
+
+  beforeAll(async () => {
+    database = uniqueDb("diffprev");
+    workDir = await mkdtemp(join(tmpdir(), "mongoshield-diffprev-"));
+    storageDir = join(workDir, "backups");
+    const items = client().db(database).collection<{ _id: number; qty: number }>("items");
+    await items.insertMany(Array.from({ length: 200 }, (_, id) => ({ _id: id, qty: id })));
+    await backupDatabaseForTest(client(), storage(), { include: [`${database}.*`] });
+
+    // The rename target: a copy of the backup with 0-9 deleted, 10-19 changed and
+    // 500-504 added. The source collection itself stays as backed up.
+    const copy = client().db(database).collection<{ _id: number; qty: number }>("items_copy");
+    await copy.insertMany(
+      Array.from({ length: 190 }, (_, index) => {
+        const id = index + 10;
+        return { _id: id, qty: id < 20 ? -id : id };
+      }),
+    );
+    await copy.insertMany(Array.from({ length: 5 }, (_, index) => ({ _id: 500 + index, qty: 0 })));
+    // Never compared: it is not the target of any rule.
+    await client().db(database).collection<{ _id: number }>("unrelated").insertOne({ _id: 1 });
+  });
+
+  afterAll(async () => {
+    await client().db(database).dropDatabase();
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it("compares each backed-up namespace with the namespace the rename rules map it to", async () => {
+    const result = await diffBackups(
+      { storage: storage(), logger: silentLogger },
+      {
+        from: "latest",
+        to: { live: client() },
+        include: [`${database}.items`],
+        rename: { [`${database}.items`]: `${database}.items_copy` },
+      },
+    );
+    expect(result.namespaces).toHaveLength(1);
+    const [items] = result.namespaces;
+    expect(items).toMatchObject({
+      namespace: `${database}.items`,
+      targetNamespace: `${database}.items_copy`,
+      presence: "both",
+    });
+    expect(items?.documents).toEqual({
+      from: 200,
+      to: 195,
+      added: 5,
+      removed: 10,
+      changed: 10,
+      unchanged: 180,
+    });
+    expect(items?.sampled).toBeUndefined();
+  });
+
+  it("reports a rename target that does not exist yet as only in the backup", async () => {
+    const result = await diffBackups(
+      { storage: storage(), logger: silentLogger },
+      {
+        from: "latest",
+        to: { live: client() },
+        include: [`${database}.items`],
+        rename: { [`${database}.*`]: `${database}_missing.*` },
+      },
+    );
+    expect(result.namespaces.map((entry) => [entry.targetNamespace, entry.presence])).toEqual([
+      [`${database}_missing.items`, "only-from"],
+    ]);
+  });
+
+  it("estimates large namespaces from a sample looked up by _id", async () => {
+    const result = await diffBackups(
+      { storage: storage(), logger: silentLogger },
+      {
+        from: "latest",
+        to: { live: client() },
+        include: [`${database}.items`],
+        rename: { [`${database}.items`]: `${database}.items_copy` },
+        sample: { above: 50, size: 100 },
+      },
+    );
+    const [items] = result.namespaces;
+    // The first 100 backed-up documents are 0-99: 10 missing live, 10 changed, 80 equal,
+    // scaled by 200/100. Live-only documents follow from the live count: 195 - (200 - 20).
+    expect(items?.sampled).toEqual({ documents: 100, of: 200 });
+    expect(items?.documents).toEqual({
+      from: 200,
+      to: 195,
+      added: 15,
+      removed: 20,
+      changed: 20,
+      unchanged: 160,
+    });
+    expect(items?.examples.added).toEqual([]);
+    expect((items?.examples.changed ?? []).map(Number).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 10 }, (_, index) => index + 10),
+    );
+  });
+
+  it("compares namespaces at or below the sampling size exactly", async () => {
+    const result = await diffBackups(
+      { storage: storage(), logger: silentLogger },
+      {
+        from: "latest",
+        to: { live: client() },
+        include: [`${database}.items`],
+        sample: { above: 1000 },
+      },
+    );
+    expect(result.namespaces[0]?.sampled).toBeUndefined();
+    expect(result.namespaces[0]?.identical).toBe(true);
+  });
+
+  it("refuses sampling against another backup and invalid sample sizes", async () => {
+    await expect(
+      diffBackups(
+        { storage: storage(), logger: silentLogger },
+        { from: "latest", to: "latest", sample: { above: 1 } },
+      ),
+    ).rejects.toThrow(/sample needs the live deployment/);
+    await expect(
+      diffBackups(
+        { storage: storage(), logger: silentLogger },
+        { from: "latest", to: { live: client() }, sample: { above: 1, size: 0 } },
+      ),
+    ).rejects.toThrow(/sample.size must be a whole number/);
+  });
+});

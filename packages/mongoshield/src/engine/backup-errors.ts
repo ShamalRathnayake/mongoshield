@@ -7,6 +7,7 @@
 
 import { MongoNetworkError, MongoServerError, MongoServerSelectionError } from "mongodb";
 import { MongoShieldError } from "../errors.ts";
+import { isAtlasRefusal } from "../mongo/atlas.ts";
 
 /**
  * Server error codes the backup engine recognises
@@ -37,6 +38,8 @@ export function toBackupError(error: unknown, context: BackupErrorContext = {}):
 
   if (isCatalogChangedUnderSnapshot(error)) return catalogChangedError(error, where);
   if (isSnapshotExpired(error)) return snapshotExpiredError(error, where);
+  // Before "not authorized": Atlas words some tier refusals as Unauthorized too.
+  if (isAtlasRefusal(error)) return atlasRefusalError(error, where);
 
   if (error instanceof MongoServerError && error.code === SERVER_ERROR_CODES.Unauthorized) {
     return new MongoShieldError(
@@ -137,6 +140,24 @@ function catalogChangedError(error: MongoServerError, where: string): MongoShiel
     {
       cause: error,
       hint: 'This depends on timing: run the backup again. On sharded clusters, avoid $out and renameCollection into backed-up collections during converge backups, or use consistency "none".',
+      details: { serverCode: error.code },
+    },
+  );
+}
+
+/**
+ * Atlas Free and Flex clusters refuse some commands and operators outright (code 8000,
+ * `AtlasError`). MongoShield avoids the ones it knows about there, so one reaching this
+ * point is either a tier restriction it did not know about, or one the backup's own
+ * options asked for (a `query` with `$where`, say).
+ */
+function atlasRefusalError(error: MongoServerError, where: string): MongoShieldError {
+  return new MongoShieldError(
+    "MS_UNSUPPORTED_TOPOLOGY",
+    `MongoDB Atlas refused an operation on this cluster tier${where}: ${error.message}`,
+    {
+      cause: error,
+      hint: 'Atlas Free and Flex clusters do not support every command (see docs/guides/atlas-free-tier.md). Remove the feature that needs it (e.g. a $where query), use consistency "none", or report it so MongoShield can avoid it on this tier.',
       details: { serverCode: error.code },
     },
   );

@@ -7,6 +7,7 @@
 import { BSON, type Document } from "mongodb";
 import type { MongoShieldConfigInput } from "../../config/schema.ts";
 import { MongoShieldError } from "../../errors.ts";
+import { parseExtendedJson } from "../../format/ordered-json.ts";
 import type { CommandContext } from "../command.ts";
 import { readPassphraseEnv } from "../setup.ts";
 import { listOrUndefined } from "./shared-options.ts";
@@ -16,11 +17,13 @@ const PREVIEW_LENGTH = 80;
 
 /**
  * Parses an Extended JSON value (canonical types kept: `1` is an Int32, `1.5` a Double;
- * `{"$oid": …}` an ObjectId). `what` names the argument in the error.
+ * `{"$oid": …}` an ObjectId). `what` names the argument in the error. Documents keep
+ * the field order they were typed in (src/format/ordered-json.ts), so an `_id` such as
+ * `{"b":1,"2":1}` stays that `_id` instead of becoming `{"2":1,"b":1}`.
  */
 export function parseEjsonValue(text: string, what: string): unknown {
   try {
-    return BSON.EJSON.parse(text, { relaxed: false });
+    return parseExtendedJson(text, { relaxed: false });
   } catch (error) {
     throw new MongoShieldError(
       "MS_CONFIG_INVALID",

@@ -1,0 +1,638 @@
+{
+  "schema": 1,
+  "scale": "small",
+  "startedAt": "2026-10-24T10:10:21.410Z",
+  "durationSeconds": 65,
+  "runsPerVariant": 5,
+  "machine": {
+    "cpu": "Apple M5 Pro",
+    "logicalCpus": 15,
+    "memoryGiB": 24,
+    "freeMemoryGiBAtEnd": 2,
+    "loadAverageAtEnd": [3.97, 4.15, 3.28],
+    "os": "darwin 27.0.0 arm64",
+    "node": "v24.15.0",
+    "mongod": "7.0.32",
+    "wiredTigerCacheGiB": 6,
+    "mongoshield": "1.0.1-alpha.1",
+    "mongoshieldGit": "3162676-dirty",
+    "mongodump": "100.16.0"
+  },
+  "settings": {
+    "consistency": "auto",
+    "restore": true,
+    "measurement": "rusage (/usr/bin/time)",
+    "deployment": "local single-node replica set",
+    "scale": {
+      "users": 15000,
+      "orders": 35000,
+      "events": 49960,
+      "attachments": 40
+    }
+  },
+  "dataset": {
+    "collections": [
+      {
+        "name": "attachments",
+        "documents": 40,
+        "dataBytes": 21258241,
+        "indexes": 2
+      },
+      {
+        "name": "events",
+        "documents": 49960,
+        "dataBytes": 8342933,
+        "indexes": 3
+      },
+      {
+        "name": "orders",
+        "documents": 35000,
+        "dataBytes": 35024592,
+        "indexes": 3
+      },
+      {
+        "name": "users",
+        "documents": 15000,
+        "dataBytes": 13596357,
+        "indexes": 4
+      }
+    ],
+    "totalDocuments": 100000,
+    "totalDataBytes": 78222123,
+    "storageBytes": 15921152,
+    "indexBytes": 5689344
+  },
+  "variants": [
+    {
+      "id": "mongoshield-zstd",
+      "label": "mongoshield (zstd)",
+      "runs": [
+        {
+          "run": 1,
+          "backup": {
+            "wallMs": 1306.0201670000001,
+            "peakRssBytes": 436846592,
+            "cpuMs": 830,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1628.5437499999998,
+            "peakRssBytes": 488144896,
+            "cpuMs": 1250,
+            "method": "rusage"
+          },
+          "outputBytes": 33231953
+        },
+        {
+          "run": 2,
+          "backup": {
+            "wallMs": 1184.0336669999997,
+            "peakRssBytes": 437665792,
+            "cpuMs": 850,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1168.4090410000026,
+            "peakRssBytes": 489897984,
+            "cpuMs": 1190.0000000000002,
+            "method": "rusage"
+          },
+          "outputBytes": 33231945
+        },
+        {
+          "run": 3,
+          "backup": {
+            "wallMs": 1178.4912499999991,
+            "peakRssBytes": 451657728,
+            "cpuMs": 820,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1026.070249999997,
+            "peakRssBytes": 477495296,
+            "cpuMs": 1180.0000000000002,
+            "method": "rusage"
+          },
+          "outputBytes": 33231947
+        },
+        {
+          "run": 4,
+          "backup": {
+            "wallMs": 1193.7227910000001,
+            "peakRssBytes": 430653440,
+            "cpuMs": 990,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1072.864791,
+            "peakRssBytes": 461586432,
+            "cpuMs": 1190.0000000000002,
+            "method": "rusage"
+          },
+          "outputBytes": 33231953
+        },
+        {
+          "run": 5,
+          "backup": {
+            "wallMs": 1188.0335419999974,
+            "peakRssBytes": 456523776,
+            "cpuMs": 840,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1208.9116250000006,
+            "peakRssBytes": 471711744,
+            "cpuMs": 1270,
+            "method": "rusage"
+          },
+          "outputBytes": 33231953
+        }
+      ],
+      "median": {
+        "backupWallMs": 1188.0335419999974,
+        "backupPeakRssBytes": 437665792,
+        "backupCpuMs": 840,
+        "outputBytes": 33231953,
+        "restoreWallMs": 1168.4090410000026,
+        "restorePeakRssBytes": 477495296,
+        "restoreCpuMs": 1190.0000000000002
+      }
+    },
+    {
+      "id": "mongoshield-zstd-none",
+      "label": "mongoshield (zstd, consistency none)",
+      "runs": [
+        {
+          "run": 1,
+          "backup": {
+            "wallMs": 441.4704160000001,
+            "peakRssBytes": 430587904,
+            "cpuMs": 799.9999999999999,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1428.5889159999997,
+            "peakRssBytes": 474497024,
+            "cpuMs": 1260,
+            "method": "rusage"
+          },
+          "outputBytes": 33231643
+        },
+        {
+          "run": 2,
+          "backup": {
+            "wallMs": 402.64470800000163,
+            "peakRssBytes": 416890880,
+            "cpuMs": 760,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1091.8033749999995,
+            "peakRssBytes": 468664320,
+            "cpuMs": 1240,
+            "method": "rusage"
+          },
+          "outputBytes": 33231643
+        },
+        {
+          "run": 3,
+          "backup": {
+            "wallMs": 392.52441700000054,
+            "peakRssBytes": 429326336,
+            "cpuMs": 740,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1072.741958000006,
+            "peakRssBytes": 479821824,
+            "cpuMs": 1210.0000000000002,
+            "method": "rusage"
+          },
+          "outputBytes": 33231643
+        },
+        {
+          "run": 4,
+          "backup": {
+            "wallMs": 410.2363340000011,
+            "peakRssBytes": 429064192,
+            "cpuMs": 760,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1119.5185839999976,
+            "peakRssBytes": 467730432,
+            "cpuMs": 1240.0000000000002,
+            "method": "rusage"
+          },
+          "outputBytes": 33231643
+        },
+        {
+          "run": 5,
+          "backup": {
+            "wallMs": 430.5715829999972,
+            "peakRssBytes": 415465472,
+            "cpuMs": 780,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1400.4331250000032,
+            "peakRssBytes": 501153792,
+            "cpuMs": 1290,
+            "method": "rusage"
+          },
+          "outputBytes": 33231643
+        }
+      ],
+      "median": {
+        "backupWallMs": 410.2363340000011,
+        "backupPeakRssBytes": 429064192,
+        "backupCpuMs": 760,
+        "outputBytes": 33231643,
+        "restoreWallMs": 1119.5185839999976,
+        "restorePeakRssBytes": 474497024,
+        "restoreCpuMs": 1240.0000000000002
+      }
+    },
+    {
+      "id": "mongoshield-zstd-age",
+      "label": "mongoshield (zstd + age)",
+      "runs": [
+        {
+          "run": 1,
+          "backup": {
+            "wallMs": 1180.2409580000003,
+            "peakRssBytes": 458096640,
+            "cpuMs": 870,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1144.060207999999,
+            "peakRssBytes": 500695040,
+            "cpuMs": 1270,
+            "method": "rusage"
+          },
+          "outputBytes": 33241992
+        },
+        {
+          "run": 2,
+          "backup": {
+            "wallMs": 1178.2899580000012,
+            "peakRssBytes": 451035136,
+            "cpuMs": 840,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1107.5936660000007,
+            "peakRssBytes": 482967552,
+            "cpuMs": 1260,
+            "method": "rusage"
+          },
+          "outputBytes": 33241984
+        },
+        {
+          "run": 3,
+          "backup": {
+            "wallMs": 1186.2688750000016,
+            "peakRssBytes": 461766656,
+            "cpuMs": 840,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1194.180375,
+            "peakRssBytes": 466632704,
+            "cpuMs": 1310,
+            "method": "rusage"
+          },
+          "outputBytes": 33241990
+        },
+        {
+          "run": 4,
+          "backup": {
+            "wallMs": 1187.4233750000058,
+            "peakRssBytes": 463716352,
+            "cpuMs": 850,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1397.4733330000017,
+            "peakRssBytes": 448020480,
+            "cpuMs": 1529.9999999999998,
+            "method": "rusage"
+          },
+          "outputBytes": 33241992
+        },
+        {
+          "run": 5,
+          "backup": {
+            "wallMs": 1192.0794170000008,
+            "peakRssBytes": 470122496,
+            "cpuMs": 840,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1532.469041999997,
+            "peakRssBytes": 498581504,
+            "cpuMs": 1250,
+            "method": "rusage"
+          },
+          "outputBytes": 33241984
+        }
+      ],
+      "median": {
+        "backupWallMs": 1186.2688750000016,
+        "backupPeakRssBytes": 461766656,
+        "backupCpuMs": 840,
+        "outputBytes": 33241990,
+        "restoreWallMs": 1194.180375,
+        "restorePeakRssBytes": 482967552,
+        "restoreCpuMs": 1270
+      }
+    },
+    {
+      "id": "mongoshield-gzip",
+      "label": "mongoshield (gzip)",
+      "runs": [
+        {
+          "run": 1,
+          "backup": {
+            "wallMs": 1184.4919580000005,
+            "peakRssBytes": 433324032,
+            "cpuMs": 1780,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1083.960583,
+            "peakRssBytes": 458063872,
+            "cpuMs": 1250,
+            "method": "rusage"
+          },
+          "outputBytes": 33746351
+        },
+        {
+          "run": 2,
+          "backup": {
+            "wallMs": 1164.7800419999985,
+            "peakRssBytes": 431554560,
+            "cpuMs": 1819.9999999999998,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1179.6095410000016,
+            "peakRssBytes": 455131136,
+            "cpuMs": 1240,
+            "method": "rusage"
+          },
+          "outputBytes": 33746359
+        },
+        {
+          "run": 3,
+          "backup": {
+            "wallMs": 1176.0691660000011,
+            "peakRssBytes": 428621824,
+            "cpuMs": 1750,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1072.247666999996,
+            "peakRssBytes": 455655424,
+            "cpuMs": 1240,
+            "method": "rusage"
+          },
+          "outputBytes": 33746359
+        },
+        {
+          "run": 4,
+          "backup": {
+            "wallMs": 1188.5628750000033,
+            "peakRssBytes": 422739968,
+            "cpuMs": 1760,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1167.4318340000027,
+            "peakRssBytes": 460931072,
+            "cpuMs": 1240,
+            "method": "rusage"
+          },
+          "outputBytes": 33746361
+        },
+        {
+          "run": 5,
+          "backup": {
+            "wallMs": 1172.6929170000003,
+            "peakRssBytes": 439189504,
+            "cpuMs": 1770,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1090.3852079999997,
+            "peakRssBytes": 463585280,
+            "cpuMs": 1259.9999999999998,
+            "method": "rusage"
+          },
+          "outputBytes": 33746359
+        }
+      ],
+      "median": {
+        "backupWallMs": 1176.0691660000011,
+        "backupPeakRssBytes": 431554560,
+        "backupCpuMs": 1770,
+        "outputBytes": 33746359,
+        "restoreWallMs": 1090.3852079999997,
+        "restorePeakRssBytes": 458063872,
+        "restoreCpuMs": 1240
+      }
+    },
+    {
+      "id": "mongodump",
+      "label": "mongodump (plain)",
+      "runs": [
+        {
+          "run": 1,
+          "backup": {
+            "wallMs": 127.78324999999859,
+            "peakRssBytes": 130236416,
+            "cpuMs": 230,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1033.8424579999992,
+            "peakRssBytes": 298500096,
+            "cpuMs": 490,
+            "method": "rusage"
+          },
+          "outputBytes": 78223639
+        },
+        {
+          "run": 2,
+          "backup": {
+            "wallMs": 128.04149999999936,
+            "peakRssBytes": 130875392,
+            "cpuMs": 230,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 930.6584170000024,
+            "peakRssBytes": 332791808,
+            "cpuMs": 480,
+            "method": "rusage"
+          },
+          "outputBytes": 78223639
+        },
+        {
+          "run": 3,
+          "backup": {
+            "wallMs": 120.0527080000029,
+            "peakRssBytes": 130252800,
+            "cpuMs": 230,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 860.0838750000039,
+            "peakRssBytes": 276054016,
+            "cpuMs": 480,
+            "method": "rusage"
+          },
+          "outputBytes": 78223639
+        },
+        {
+          "run": 4,
+          "backup": {
+            "wallMs": 114.64433299999655,
+            "peakRssBytes": 129712128,
+            "cpuMs": 210,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 902.983917000005,
+            "peakRssBytes": 335134720,
+            "cpuMs": 470,
+            "method": "rusage"
+          },
+          "outputBytes": 78223639
+        },
+        {
+          "run": 5,
+          "backup": {
+            "wallMs": 125.8783340000009,
+            "peakRssBytes": 130744320,
+            "cpuMs": 250,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 962.5488750000004,
+            "peakRssBytes": 268353536,
+            "cpuMs": 580.0000000000001,
+            "method": "rusage"
+          },
+          "outputBytes": 78223639
+        }
+      ],
+      "median": {
+        "backupWallMs": 125.8783340000009,
+        "backupPeakRssBytes": 130252800,
+        "backupCpuMs": 230,
+        "outputBytes": 78223639,
+        "restoreWallMs": 930.6584170000024,
+        "restorePeakRssBytes": 298500096,
+        "restoreCpuMs": 480
+      }
+    },
+    {
+      "id": "mongodump-gzip",
+      "label": "mongodump (--gzip)",
+      "runs": [
+        {
+          "run": 1,
+          "backup": {
+            "wallMs": 871.3882919999996,
+            "peakRssBytes": 138985472,
+            "cpuMs": 2130,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 907.4087090000012,
+            "peakRssBytes": 306249728,
+            "cpuMs": 540,
+            "method": "rusage"
+          },
+          "outputBytes": 33770870
+        },
+        {
+          "run": 2,
+          "backup": {
+            "wallMs": 910.6343749999978,
+            "peakRssBytes": 139280384,
+            "cpuMs": 2110,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 982.9010419999977,
+            "peakRssBytes": 312410112,
+            "cpuMs": 530,
+            "method": "rusage"
+          },
+          "outputBytes": 33770870
+        },
+        {
+          "run": 3,
+          "backup": {
+            "wallMs": 850.9498749999984,
+            "peakRssBytes": 122683392,
+            "cpuMs": 2090,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1028.8819999999978,
+            "peakRssBytes": 287965184,
+            "cpuMs": 530,
+            "method": "rusage"
+          },
+          "outputBytes": 33770870
+        },
+        {
+          "run": 4,
+          "backup": {
+            "wallMs": 896.6568340000013,
+            "peakRssBytes": 138772480,
+            "cpuMs": 2120,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1273.846709000005,
+            "peakRssBytes": 309280768,
+            "cpuMs": 620,
+            "method": "rusage"
+          },
+          "outputBytes": 33770870
+        },
+        {
+          "run": 5,
+          "backup": {
+            "wallMs": 899.7928339999999,
+            "peakRssBytes": 140001280,
+            "cpuMs": 2250,
+            "method": "rusage"
+          },
+          "restore": {
+            "wallMs": 1058.043458,
+            "peakRssBytes": 312098816,
+            "cpuMs": 559.9999999999999,
+            "method": "rusage"
+          },
+          "outputBytes": 33770870
+        }
+      ],
+      "median": {
+        "backupWallMs": 896.6568340000013,
+        "backupPeakRssBytes": 138985472,
+        "backupCpuMs": 2120,
+        "outputBytes": 33770870,
+        "restoreWallMs": 1028.8819999999978,
+        "restorePeakRssBytes": 309280768,
+        "restoreCpuMs": 540
+      }
+    }
+  ],
+  "skipped": []
+}

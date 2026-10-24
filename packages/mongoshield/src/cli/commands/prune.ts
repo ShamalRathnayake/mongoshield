@@ -18,8 +18,9 @@
  *            --uri to read it). Without a source it is inferred from the
  *            matching backups, and prune refuses when several deployments match.
  *   labels   the `mongoshield.shape` label of the include/exclude selection
- *            (config `backup` section or --include/--exclude), or the
- *            --scope-label pairs instead.
+ *            (config `backup` section or --include/--exclude), or the config's
+ *            `retention.scopeLabels` (the labels `mongoshield run` marks and prunes
+ *            its backups by), or the --scope-label pairs instead of either.
  *
  * Every other backup is left alone and counted in the output. `--all-sources`
  * applies the policy to the whole location (the old behaviour) and always asks
@@ -203,10 +204,15 @@ function pruneOverrides(context: CommandContext): MongoShieldConfigInput {
 
 /**
  * The default scope (see the file header): the source's cluster and the
- * selection's shape label, or the --scope-label pairs instead of the shape.
+ * selection's shape label, or the config's `retention.scopeLabels` (the same scope
+ * `mongoshield run` prunes), or the --scope-label pairs instead of the shape.
  */
 async function resolveScope(context: CommandContext, cli: CliShield): Promise<PruneScope> {
-  const custom = parseKeyValues(context, NAME, "scope-label");
+  const configured = cli.config.retention?.scopeLabels;
+  const custom =
+    parseKeyValues(context, NAME, "scope-label") ??
+    // Empty labels would widen the scope to the whole deployment: same as unset.
+    (configured !== undefined && Object.keys(configured).length > 0 ? configured : undefined);
   const labels = custom ?? {
     [GUARD_SHAPE_LABEL]: backupShapeLabel(cli.config.backup ?? {}),
   };

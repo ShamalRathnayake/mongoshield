@@ -62,6 +62,14 @@ export interface RunReport {
     readonly bytesStored: number;
     readonly durationMs: number;
     readonly attempts: number;
+    /** `incremental` for a backup holding only the changes since `parent` (absent: full). */
+    readonly kind?: "full" | "incremental";
+    /** Incremental backups: the backup they continue. */
+    readonly parent?: string;
+    /** Incremental backups: the change events recorded. */
+    readonly changes?: number;
+    /** Set when the job takes incrementals but this run took a full backup: why. */
+    readonly fullBackupReason?: string;
   };
   readonly guard?: {
     readonly ok: boolean;
@@ -129,6 +137,10 @@ export function summarizeReport(report: RunReport): string {
     report.prune && report.prune.deletedBackups > 0
       ? `, pruned ${report.prune.deletedBackups} old backup${report.prune.deletedBackups === 1 ? "" : "s"}`
       : "";
+  if (backup.kind === "incremental") {
+    const changes = (backup.changes ?? 0).toLocaleString("en-US");
+    return `Incremental backup ${backup.id} succeeded: ${changes} changes since ${backup.parent ?? "its parent"}${verified}${pruned}.`;
+  }
   return `Backup ${backup.id} succeeded: ${backup.namespaces} namespaces, ${backup.documents.toLocaleString("en-US")} documents${verified}${pruned}.`;
 }
 

@@ -5,10 +5,13 @@
  * streams, or none), and the manifest records it so a restore can tell where a backup
  * came from. Everything here comes from `hello` and `buildInfo`, which every user may
  * run (no privileges needed), so describing a deployment never fails for lack of roles.
+ * On Atlas, one more read-only command tells a shared tier (Free, Flex) from a dedicated
+ * cluster (see atlas.ts); its failure never fails the description either.
  */
 
 import { createHash } from "node:crypto";
 import { type Document, type MongoClient, MongoServerError } from "mongodb";
+import { type AtlasInfo, detectAtlas } from "./atlas.ts";
 
 /** The shape of the deployment, as seen from the connected server. */
 export type Topology = "standalone" | "replicaSet" | "sharded" | "unknown";
@@ -30,6 +33,11 @@ export interface DeploymentInfo {
   readonly supportsSnapshotReads: boolean;
   /** The largest document the server accepts, in bytes (16 MiB on every current version). */
   readonly maxBsonObjectSize: number;
+  /**
+   * Set when the deployment is on MongoDB Atlas: which tier kind, and why we think so.
+   * The engines adapt to shared tiers (Free, Flex) with it. Absent elsewhere.
+   */
+  readonly atlas?: AtlasInfo;
 }
 
 /** MongoDB's documented maximum BSON document size, used if `hello` omits it. */
@@ -54,6 +62,7 @@ export async function describeDeployment(client: MongoClient): Promise<Deploymen
   const topology = topologyFromHello(hello);
   const serverVersion = typeof buildInfo.version === "string" ? buildInfo.version : "0.0.0";
   const hasOplog = topology === "replicaSet" || topology === "sharded";
+  const atlas = await detectAtlas(client, hello);
 
   return {
     topology,
@@ -65,6 +74,7 @@ export async function describeDeployment(client: MongoClient): Promise<Deploymen
       typeof hello.maxBsonObjectSize === "number"
         ? hello.maxBsonObjectSize
         : DEFAULT_MAX_BSON_OBJECT_SIZE,
+    ...(atlas === undefined ? {} : { atlas }),
   };
 }
 

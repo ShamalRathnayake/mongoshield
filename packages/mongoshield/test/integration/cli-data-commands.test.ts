@@ -620,6 +620,20 @@ describe("mongoshield drill", () => {
     }
   });
 
+  it("takes the scratch deployment from MONGOSHIELD_DRILL_URI when --target-uri is absent", async () => {
+    const { url } = await backupSource();
+    const run = await cli(
+      ["drill", "--from", url, "--allow-same-deployment", "--include", `${source}.users`, "--json"],
+      { env: { MONGOSHIELD_DRILL_URI: mongoUri() } },
+    );
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.json<{ ok: boolean }>().ok).toBe(true);
+
+    const missing = await cli(["drill", "--from", url]);
+    expect(missing.code).toBe(2);
+    expect(missing.stderr).toContain("MONGOSHIELD_DRILL_URI");
+  });
+
   it("drills a passphrase-encrypted backup with --passphrase-env", async () => {
     const { url } = await backupSource(["--passphrase-env", "PASS"], { env: { PASS: PASSPHRASE } });
     const run = await cli(

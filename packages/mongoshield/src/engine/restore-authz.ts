@@ -52,7 +52,12 @@ import {
 } from "../format/field-order.ts";
 import { type AuthzEntry, isAuthzEntry, type Manifest } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
-import { type NamespaceFilter, splitNamespace } from "../mongo/index.ts";
+import {
+  ATLAS_USERS_HINT,
+  isAtlasRefusal,
+  type NamespaceFilter,
+  splitNamespace,
+} from "../mongo/index.ts";
 import type { UsersAndRolesMode, UsersAndRolesReport } from "../types.ts";
 import { openDocumentStream, type StoredBackupSource } from "./read-pipeline.ts";
 import { commandWriteConcern } from "./restore-collections.ts";
@@ -747,6 +752,18 @@ function isMergeRefused(error: unknown): boolean {
 function authzError(error: unknown, step: string): MongoShieldError {
   if (isMongoShieldError(error)) return error;
   const reason = error instanceof Error ? error.message : String(error);
+  // Atlas behind a host name MongoShield did not recognise (restore.ts refuses users and
+  // roles up front on recognised Atlas targets): its proxy refuses user management.
+  if (isAtlasRefusal(error)) {
+    return new MongoShieldError(
+      "MS_UNSUPPORTED_TOPOLOGY",
+      `${step} was refused by Atlas: ${reason}`,
+      {
+        cause: error,
+        hint: `The collections were restored. ${ATLAS_USERS_HINT}`,
+      },
+    );
+  }
   if (error instanceof MongoServerError && error.code === UNAUTHORIZED_CODE) {
     return new MongoShieldError("MS_PERMISSION_DENIED", `${step} was refused: ${reason}`, {
       cause: error,

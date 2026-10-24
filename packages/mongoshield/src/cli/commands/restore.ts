@@ -11,13 +11,20 @@
  *   4. --dry-run stops after the plan and writes nothing.
  *   5. When a target already holds documents, every backup file is checksummed before
  *      the first write (`verifyFirst`, see `shouldVerifyFirst`).
+ *
+ * An incremental backup is restored through its chain: the plan shows the base full
+ * backup's namespaces and names the incrementals replayed after it. `--at` with an
+ * incremental's id stops inside its chain; `--at` alone uses the change journal, or an
+ * incremental chain that reaches the time when the journal does not.
  */
 
+import { findChainCovering } from "../../catalog/chain.ts";
+import { selectBackup } from "../../catalog/select.ts";
 import type { MongoShieldConfigInput } from "../../config/schema.ts";
 import { assertNoConflicts } from "../../engine/restore-plan.ts";
-import { MongoShieldError } from "../../errors.ts";
-import type { ClusterTime } from "../../format/manifest.ts";
-import { planPointInTimeRestore } from "../../journal/index.ts";
+import { isMongoShieldError, MongoShieldError } from "../../errors.ts";
+import { type ClusterTime, isIncrementalManifest } from "../../format/manifest.ts";
+import { planPointInTimeRestore, toJournalTime } from "../../journal/index.ts";
 import type {
   RestoreMode,
   RestoreOptions,
@@ -96,7 +103,7 @@ export const restoreCommand: CommandSpec = {
       type: "string",
       valueName: "<time>",
       description:
-        "Point-in-time recovery: an ISO date (2026-11-14T03:17:42Z) or a cluster time (t:i). Needs the change journal",
+        "Point-in-time recovery: an ISO date (2026-11-14T03:17:42Z) or a cluster time (t:i). Needs the change journal, or an incremental chain reaching that time",
     },
     "dry-run": { type: "boolean", description: "Show the plan and stop; write nothing" },
     "identity-file": identityFileOption,
@@ -140,6 +147,11 @@ export const restoreCommand: CommandSpec = {
       description: "Replace existing collections in a script",
       command: "mongoshield restore latest --drop --yes --identity-file ~/keys/backup.key",
     },
+    {
+      description: "Restore an incremental's chain as it was at 03:17 (inside the chain)",
+      command:
+        "mongoshield restore 2026-10-20T04-00-02Z_1a2b3c --at 2026-10-20T03:17:00Z --rename 'app.*=app_restored.*'",
+    },
   ],
   run: runRestoreCommand,
 };
@@ -150,7 +162,9 @@ async function runRestoreCommand(context: CommandContext): Promise<number> {
     const targetUri = context.flags.string("to-uri") ?? cli.config.source?.uri;
     if (!targetUri) throw missingTargetError();
 
-    const options = await restoreOptions(context, cli, targetUri);
+    const requested = await restoreOptions(context, cli, targetUri);
+    // `--at` inside an incremental chain restores that chain (see the file header).
+    const options = await chainForPointInTime(context, cli, requested);
     // For a point-in-time restore, the plan shown is the base backup's plan; the
     // journal replay on top of it is announced separately.
     const plan = await cli.shield.planRestore(await baseRestoreOptions(context, cli, options));
@@ -328,6 +342,12 @@ function printPlan(out: Output, plan: RestorePlan, targetUri: string, storage: s
   out.info(indent(table));
   const documents = plan.entries.reduce((sum, entry) => sum + entry.documents, 0);
   out.info(`${plural(plan.entries.length, "namespace")}, ${plural(documents, "document")}.`);
+  if (plan.chain !== undefined) {
+    // The table shows the base backup's documents; the incrementals come on top.
+    out.info(
+      `Incremental chain: base ${plan.chain.baseBackupId}, then the changes of ${plural(plan.chain.incrementals.length, "incremental backup")} replayed in order${plan.chain.incrementals.length > 0 ? ` (${plan.chain.incrementals.join(", ")})` : ""}.`,
+    );
+  }
 }
 
 /** Destructive actions stand out in red/yellow. */
@@ -414,11 +434,17 @@ function printRestoreResult(context: CommandContext, result: RestoreResult): voi
     `${out.style("green", "✔")} Restored ${plural(result.documentsRestored, "document")} from ${result.plan.backupId} into ${plural(result.plan.entries.length, "namespace")} in ${formatDuration(result.durationMs)}.`,
   );
   const pointInTime = result.pointInTime;
+  const chain = result.plan.chain;
   if (pointInTime) {
+    const events = chain === undefined ? "journal event" : "change event of the chain";
     out.result(
-      `  Replayed ${plural(pointInTime.events, "journal event")}: the data now reflects ${formatClusterTime(pointInTime.restoredTo)}.`,
+      `  Replayed ${plural(pointInTime.events, events)}: the data now reflects ${formatClusterTime(pointInTime.restoredTo)}.`,
     );
     for (const warning of pointInTime.warnings) out.warn(warning);
+  } else if (chain !== undefined) {
+    out.result(
+      `  Replayed ${plural(result.eventsReplayed ?? 0, "change event")} of ${plural(chain.incrementals.length, "incremental backup")} on top of base ${chain.baseBackupId}.`,
+    );
   }
   printSearchIndexes(out, result);
   printUsersAndRoles(out, result);
@@ -466,13 +492,9 @@ async function baseRestoreOptions(
   options: RestoreOptions,
 ): Promise<RestoreOptions> {
   if (options.at === undefined) return options;
-  // The base backup is chosen by --at; a backup id next to it would be silently ignored.
-  if (options.backup !== "latest") {
-    throw usageError(
-      "--at picks its base backup itself; leave out the backup id (or pass `latest`).",
-      NAME,
-    );
-  }
+  // An incremental's chain is cut at `at` by the planner itself (chainForPointInTime
+  // only lets incremental ids through).
+  if (options.backup !== "latest") return options;
   const pointInTime = await planPointInTimeRestore(cli.shield.storage, options.at, {
     signal: context.signal,
   });
@@ -481,6 +503,48 @@ async function baseRestoreOptions(
   );
   const { at: _at, ...rest } = options;
   return { ...rest, backup: pointInTime.baseBackupId };
+}
+
+/**
+ * `--at` and incremental chains: with an incremental's id, its chain is restored up to
+ * `--at` (a full backup's id is refused: it can only be restored as it is). With
+ * `latest`, the change journal is used when it reaches `--at`; when it does not, an
+ * incremental chain that reaches it is used instead. Returns the options to plan and
+ * restore with.
+ */
+async function chainForPointInTime(
+  context: CommandContext,
+  cli: CliShield,
+  options: RestoreOptions,
+): Promise<RestoreOptions> {
+  const at = options.at;
+  if (at === undefined) return options;
+  const entries = await cli.shield.list({ signal: context.signal });
+  if (options.backup !== "latest") {
+    const selected = selectBackup(entries, options.backup).manifest;
+    if (selected === undefined || !isIncrementalManifest(selected)) {
+      throw usageError(
+        "--at with a backup id needs an incremental backup (its chain is restored up to --at); for full backups leave out the id: --at picks its base backup itself.",
+        NAME,
+      );
+    }
+    context.out.info(
+      `Point in time: the chain of ${selected.id} (base ${selected.chain.base}) up to ${formatClusterTime(toJournalTime(at))}.`,
+    );
+    return options;
+  }
+  try {
+    await planPointInTimeRestore(cli.shield.storage, at, { signal: context.signal });
+    return options;
+  } catch (error) {
+    if (!isMongoShieldError(error, "MS_CHANGE_HISTORY_LOST")) throw error;
+    const covering = findChainCovering(entries, toJournalTime(at));
+    if (covering === undefined) throw error;
+    context.out.info(
+      `Point in time: the journal does not reach it; using the chain of ${covering.id} (base ${covering.chain.base}).`,
+    );
+    return { ...options, backup: covering.id };
+  }
 }
 
 /** `{ t: 1794538804, i: 3 }` → `2026-11-14T03:00:04Z (1794538804:3)`. */

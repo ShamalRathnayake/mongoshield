@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { DrillRecord, VerificationRecord } from "../catalog/annotations.ts";
 import type { CatalogEntry } from "../catalog/catalog.ts";
 import { idAt } from "../catalog/test-fixtures.ts";
-import { formatRto, verificationSummary } from "./describe.ts";
+import { drillSummary, formatRto, verificationSummary } from "./describe.ts";
 import { Output } from "./io.ts";
 
 const out = new Output(
@@ -88,5 +88,32 @@ describe("formatRto", () => {
     expect(formatRto(42_400)).toBe("42s");
     expect(formatRto(350)).toBe("350ms");
     expect(formatRto(185_000)).toBe("3m 05s");
+  });
+});
+
+describe("drillSummary", () => {
+  const drill: DrillRecord = {
+    backupId: ID,
+    drilledAt: "2026-11-04T00:00:00Z",
+    ok: true,
+    restored: true,
+    restoreDurationMs: 42_000,
+    durationMs: 50_000,
+    namespaces: 1,
+    documentsRestored: 10,
+    problemCount: 0,
+    tool: "mongoshield@test",
+  };
+
+  it("summarises drills and upgrade rehearsals, passed or failed", () => {
+    expect(drillSummary(drill, out, NOW)).toBe("drill ✓ (RTO 42s) 1d ago");
+    expect(drillSummary({ ...drill, ok: false }, out, NOW)).toBe("drill ✗ failed 1d ago");
+    const rehearsal = { ...drill, targetVersion: "8.0.13" };
+    expect(drillSummary(rehearsal, out, NOW)).toBe(
+      "upgrade rehearsal on MongoDB 8.0.13 ✓ (RTO 42s) 1d ago",
+    );
+    expect(drillSummary({ ...rehearsal, ok: false }, out, NOW)).toBe(
+      "upgrade rehearsal on MongoDB 8.0.13 ✗ failed 1d ago",
+    );
   });
 });

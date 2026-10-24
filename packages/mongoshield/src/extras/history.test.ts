@@ -1,8 +1,11 @@
 import { Double, Int32 } from "mongodb";
 import { describe, expect, it } from "vitest";
 import { writeTestBackup } from "../../test/helpers/backup-fixtures.ts";
+import { toPartRange } from "../engine/backup-parts.ts";
 import { isMongoShieldError } from "../errors.ts";
-import type { DataFile } from "../format/manifest.ts";
+import type { DataFile, Manifest } from "../format/manifest.ts";
+import { parseManifest, serializeManifest } from "../format/manifest-io.ts";
+import { parseExtendedJson } from "../format/ordered-json.ts";
 import { silentLogger } from "../logger.ts";
 import { memoryStorage } from "../storage/memory.ts";
 import { diffDocuments, documentHistory, partsThatMayHold, sameBsonValue } from "./history.ts";
@@ -57,7 +60,55 @@ describe("partsThatMayHold", () => {
   it("keeps parts without a range", () => {
     expect(partsThatMayHold([file("only")], 1)).toHaveLength(1);
   });
+
+  it("compares embedded-document _ids in their stored field order, through the manifest", () => {
+    // The bound `{ b: 3, "2": 0 }` sorts by `b` first, as the server stores it. Written
+    // and read back with plain JSON it would become `{ "2": 0, b: 3 }`, and the id
+    // `{ b: 1, "2": 9 }` (seen as `{ "2": 9, b: 1 }`) would land in the second part.
+    const bound = parseExtendedJson('{"b":3,"2":0}', { relaxed: false });
+    const range = toPartRange({ lower: undefined, upper: { value: bound } });
+    const second = toPartRange({ lower: { value: bound }, upper: undefined });
+    const manifest = serializeManifest({
+      ...fixtureManifest(),
+      namespaces: [
+        {
+          ns: "app.users",
+          db: "app",
+          collection: "users",
+          type: "collection",
+          documents: 2,
+          bytesRaw: 2,
+          files: [file("app/users.000.bson", range), file("app/users.001.bson", second)],
+          metadata: file("app/users.metadata.json"),
+        },
+      ],
+    });
+    const files = parseManifest(manifest).namespaces[0]?.files ?? [];
+    const id = parseExtendedJson('{"b":1,"2":9}', { relaxed: false });
+    expect(partsThatMayHold(files, id).map((part) => part.key)).toEqual(["app/users.000.bson"]);
+    const later = parseExtendedJson('{"b":4,"2":0}', { relaxed: false });
+    expect(partsThatMayHold(files, later).map((part) => part.key)).toEqual(["app/users.001.bson"]);
+  });
 });
+
+/** The smallest valid manifest, for the serialization round trip above. */
+function fixtureManifest(): Manifest {
+  return {
+    formatVersion: 1,
+    id: "2026-11-14T03-00-04Z_7f3a9c",
+    tool: "test",
+    status: "complete",
+    startedAt: "2026-11-14T03:00:04.000Z",
+    completedAt: "2026-11-14T03:00:05.000Z",
+    source: { topology: "replicaSet", serverVersion: "7.0.0" },
+    consistency: { mode: "none" },
+    compression: "none",
+    encryption: null,
+    labels: {},
+    namespaces: [],
+    totals: { namespaces: 1, documents: 2, bytesRaw: 2, bytesStored: 3 },
+  };
+}
 
 describe("documentHistory options", () => {
   const context = { storage: memoryStorage(), logger: silentLogger };

@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import { Transform, type TransformCallback } from "node:stream";
 import { type CatalogEntry, listBackups } from "../catalog/catalog.ts";
+import { chainAncestorIds } from "../catalog/chain.ts";
 import { selectBackup } from "../catalog/select.ts";
 import { MongoShieldError } from "../errors.ts";
 import type { Manifest, StoredFile } from "../format/manifest.ts";
@@ -27,13 +28,21 @@ export interface SelectedBackup {
  * Resolves a selection against the catalog of `storage`, oldest first (so copies and
  * rewrites proceed in the order the backups were made).
  *
+ * With `withChainAncestors`, every backup a selected incremental depends on is added
+ * (its parent, the parent's parent, … its base): an incremental is useless without
+ * them. Oldest first then also means parents before their incrementals.
+ *
  * @throws MS_BACKUP_NOT_FOUND when a named backup does not exist or is incomplete,
  *   or when `"latest"` finds no complete backup.
  */
 export async function selectBackups(
   storage: StorageAdapter,
   selection: BackupSelection,
-  options: { readonly signal?: AbortSignal | undefined; readonly logger?: Logger | undefined },
+  options: {
+    readonly signal?: AbortSignal | undefined;
+    readonly logger?: Logger | undefined;
+    readonly withChainAncestors?: boolean | undefined;
+  },
 ): Promise<SelectedBackup[]> {
   const entries = await listBackups(storage, {
     ...(options.signal ? { signal: options.signal } : {}),
@@ -48,10 +57,23 @@ export async function selectBackups(
 
   const selected: SelectedBackup[] = [];
   const seen = new Set<string>();
-  for (const entry of chosen) {
-    if (entry.manifest === undefined || seen.has(entry.id)) continue;
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const add = (entry: CatalogEntry | undefined): void => {
+    if (entry?.manifest === undefined || seen.has(entry.id)) return;
     seen.add(entry.id);
     selected.push({ id: entry.id, manifest: entry.manifest });
+  };
+  for (const entry of chosen) {
+    add(entry);
+    if (options.withChainAncestors !== true) continue;
+    const ancestors = chainAncestorIds(entries, entry.id).filter((id) => !seen.has(id));
+    if (ancestors.length > 0) {
+      options.logger?.info("Adding the backups an incremental backup depends on", {
+        id: entry.id,
+        ancestors,
+      });
+    }
+    for (const id of ancestors) add(byId.get(id));
   }
   return selected.sort(
     (a, b) => Date.parse(a.manifest.startedAt) - Date.parse(b.manifest.startedAt),

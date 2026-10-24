@@ -36,6 +36,7 @@ import {
   needsSecret,
   type ParsedRule,
   parseMaskRules,
+  selectRulesForNamespace,
   type UnsupportedValuePolicy,
 } from "./config.ts";
 import { type FakeKind, type FakeOptions, fakeValue } from "./fake.ts";
@@ -154,20 +155,9 @@ function requireKeys(secret: string | undefined): MaskKeys {
   return deriveMaskKeys(secret);
 }
 
-/** The rules for one namespace: most specific first, one per path. */
+/** The rules for one namespace (see `selectRulesForNamespace`), with their running counts. */
 function rulesFor(states: readonly RuleState[], ns: string): RuleState[] {
-  const matching = states.filter((state) => state.rule.matchesNamespace(ns));
-  matching.sort((left, right) => {
-    if (left.rule.exact !== right.rule.exact) return left.rule.exact ? -1 : 1;
-    return left.rule.order - right.rule.order;
-  });
-  const byPath = new Map<string, RuleState>();
-  for (const state of matching) {
-    if (!byPath.has(state.rule.path)) byPath.set(state.rule.path, state);
-  }
-  // Applied in declaration order, so a rule on `profile` and one on `profile.email`
-  // run in the order the user wrote them.
-  const chosen = [...byPath.values()].sort((left, right) => left.rule.order - right.rule.order);
+  const chosen = selectRulesForNamespace(states, ns, (state) => state.rule);
   for (const state of chosen) state.namespaces.add(ns);
   return chosen;
 }

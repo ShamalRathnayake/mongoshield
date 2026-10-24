@@ -18,21 +18,23 @@
  * query language; see filter.ts for the list. Converge backups are read as they were
  * at the end of their window: the changes recorded while the backup ran are overlaid
  * on the dumped documents (find-window.ts) before the filter sees them, as a full
- * restore would replay them.
+ * restore would replay them. Incremental backups are read the same way, as their
+ * chain's base backup with every incremental's changes overlaid (restore-chain.ts).
  */
 
 import type { Document } from "mongodb";
 import { listBackups, selectBackup } from "../catalog/index.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import type { Manifest, NamespaceEntry } from "../format/manifest.ts";
+import { isCollectionEntry, type Manifest, type NamespaceEntry } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
 import type { BackupSelector, DecryptionOptions } from "../types.ts";
 import type { EngineContext } from "./context.ts";
 import { compileFilter, type DocumentMatcher } from "./filter.ts";
 import { parseBackedUpDocument } from "./find-parse.ts";
 import { compileProjection } from "./find-projection.ts";
-import { documentsAtWindowEnd, hasChangeWindow } from "./find-window.ts";
-import { openBackupSource, openDocumentStream, type StoredBackupSource } from "./read-pipeline.ts";
+import { documentsAtWindowEnd, needsOverlay } from "./find-window.ts";
+import { openDocumentStream, type StoredBackupSource } from "./read-pipeline.ts";
+import { namespaceReading, type OpenedChain, openReadableBackup } from "./restore-chain.ts";
 
 /** Options for `findInBackup`. */
 export interface FindInBackupOptions {
@@ -68,9 +70,17 @@ export interface MatchedDocument {
 
 /** A namespace of a selected backup, opened for reading. */
 export interface OpenedNamespace {
+  /** The backup holding the documents (for an incremental: its chain's base). */
   readonly manifest: Manifest;
   readonly entry: NamespaceEntry;
   readonly source: StoredBackupSource;
+  /** Set when an incremental backup was selected: its chain's windows to overlay. */
+  readonly chain?: OpenedChain | undefined;
+}
+
+/** The id of the backup the caller selected (an incremental's own id, not its base's). */
+export function selectedBackupId(opened: Pick<OpenedNamespace, "manifest" | "chain">): string {
+  return opened.chain?.backupId ?? opened.manifest.id;
 }
 
 /**
@@ -133,17 +143,19 @@ export async function openNamespace(
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const selected = selectBackup(entries, options.backup);
-  const manifest = selected.manifest;
-  if (manifest === undefined) {
+  if (selected.manifest === undefined) {
     // selectBackup only returns complete entries, which always carry a manifest.
     throw new MongoShieldError("MS_INTERNAL", `Backup ${selected.id} has no manifest.`);
   }
 
-  const entry = namespaceEntry(manifest, options.namespace);
-  const source = await openBackupSource(context.storage, manifest, options.decryption, {
+  // An incremental is read as its chain's base plus the chain's changes.
+  const readable = await openReadableBackup(context.storage, entries, selected.manifest, {
+    decryption: options.decryption,
     signal: options.signal,
   });
-  return { manifest, entry, source };
+  const entry = namespaceEntry(readable.manifest, options.namespace, readable.chain);
+  // A chain's time series are read from the incremental's own copy (restore-chain.ts).
+  return isCollectionEntry(entry) ? namespaceReading(readable, entry) : { ...readable, entry };
 }
 
 /** Options of `matchingDocuments` besides what to match. */
@@ -165,7 +177,7 @@ export async function* matchingDocuments(
   signal: AbortSignal | undefined,
   options: MatchOptions = {},
 ): AsyncGenerator<MatchedDocument> {
-  if (hasChangeWindow(opened.manifest)) {
+  if (needsOverlay(opened)) {
     const documents = documentsAtWindowEnd(opened, {
       signal,
       logger: options.logger,
@@ -187,8 +199,23 @@ export async function* matchingDocuments(
 }
 
 /** The manifest entry of `namespace`, or an error saying what the backup holds instead. */
-function namespaceEntry(manifest: Manifest, namespace: string): NamespaceEntry {
+function namespaceEntry(
+  manifest: Manifest,
+  namespace: string,
+  chain?: OpenedChain,
+): NamespaceEntry {
   const entry = manifest.namespaces.find((candidate) => candidate.ns === namespace);
+  if (entry === undefined && chain !== undefined) {
+    // Collections created after the base exist only as events: searching them would
+    // mean reading every window without a starting point, which find does not do.
+    throw new MongoShieldError(
+      "MS_CONFIG_INVALID",
+      `The base backup ${manifest.id} of incremental ${chain.backupId} does not contain the namespace ${namespace}.`,
+      {
+        hint: "A collection created after the chain's base backup can only be read by restoring the incremental (e.g. into a scratch database with --rename).",
+      },
+    );
+  }
   if (entry === undefined) {
     const available = manifest.namespaces
       .filter((candidate) => candidate.type !== "view")

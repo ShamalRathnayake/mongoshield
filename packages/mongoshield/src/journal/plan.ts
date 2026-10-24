@@ -11,13 +11,15 @@
  *
  * A base backup is any complete backup with a cluster time: `consistency.to` for
  * `converge` (the state at the end of its window), `consistency.from` for `snapshot`.
- * Backups made with consistency `none` mix moments and cannot be a base.
+ * Backups made with consistency `none` mix moments and cannot be a base. Incremental
+ * backups are not bases either: the journal is replayed onto full backups, and a time
+ * an incremental chain covers is restored through the chain (src/shield.ts).
  */
 
 import { listBackups } from "../catalog/catalog.ts";
 import { compareClusterTimes, formatClusterTime } from "../engine/converge-time.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import type { ClusterTime, Manifest } from "../format/manifest.ts";
+import { type ClusterTime, isIncrementalManifest, type Manifest } from "../format/manifest.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import {
   type CoveredRange,
@@ -80,6 +82,8 @@ export async function listBaseBackups(
   for (const entry of entries) {
     const manifest = entry.manifest;
     if (entry.status !== "complete" || manifest === undefined) continue;
+    // Incrementals hold changes, not data (see the file header).
+    if (isIncrementalManifest(manifest)) continue;
     const clusterTime = baseTimeOf(manifest);
     if (clusterTime === undefined) continue;
     bases.push({

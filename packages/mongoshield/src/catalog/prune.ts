@@ -10,6 +10,12 @@
  * are planned over; every other backup in the location is left untouched and
  * reported in `outOfScope`. Without a scope the policy covers the whole location.
  *
+ * Incremental chains: the planner never removes a backup a kept incremental depends on
+ * (retention.ts, rule 8). With a scope, backups outside it are always kept, so whatever
+ * they depend on is kept too, even when it is in the scope (`neededBy`). Backups are
+ * deleted newest first, so a prune stopped halfway leaves a chain shortened at its
+ * newest end, never one with a hole in the middle.
+ *
  * Immutable backups: the planner keeps a backup until its manifest's
  * `immutableUntil`, so prune never asks the storage to delete a locked backup.
  * The storage can still refuse (a clock that runs ahead of the provider's, or an
@@ -32,6 +38,7 @@ import {
   immutableUntilOf,
   listBackups,
 } from "./catalog.ts";
+import { chainAncestorIds } from "./chain.ts";
 import {
   planRetention,
   type RetentionBackup,
@@ -126,9 +133,16 @@ export async function pruneBackups(
     ...(signal ? { signal } : {}),
   });
   const { inScope, outOfScope } = await splitByScope(storage, entries, scope, signal);
+  // What the backups this prune never touches depend on (rule 8 across scopes).
+  const neededOutside = dependenciesOf(
+    entries,
+    outOfScope.map((backup) => backup.id),
+  );
   const backups: RetentionBackup[] = [];
   for (const entry of inScope) {
-    backups.push(await toRetentionBackup(storage, entry, signal));
+    const backup = await toRetentionBackup(storage, entry, signal);
+    const neededBy = neededOutside.get(entry.id);
+    backups.push(neededBy === undefined ? backup : { ...backup, neededBy });
   }
 
   const planned = planRetention({ backups, policy, now: options.now ?? new Date() });
@@ -279,7 +293,7 @@ function outOfScopeWarnings(outOfScope: readonly OutOfScopeBackup[]): string[] {
 }
 
 /** Objects and bytes removed for one backup. */
-interface DeletedCounts {
+export interface DeletedCounts {
   objects: number;
   bytes: number;
 }
@@ -297,7 +311,7 @@ interface DeletedCounts {
  * Counts are added to `totals` as each batch succeeds, so objects removed before
  * a refusal are still reported.
  */
-async function deleteBackup(
+export async function deleteBackup(
   storage: StorageAdapter,
   id: string,
   signal: AbortSignal | undefined,
@@ -340,6 +354,23 @@ async function deleteBackup(
   return counts;
 }
 
+/**
+ * For every backup that one of `ids` depends on (its chain ancestors), the id of the
+ * nearest dependent: backup id → dependent id.
+ */
+function dependenciesOf(
+  entries: readonly CatalogEntry[],
+  ids: readonly string[],
+): Map<string, string> {
+  const needed = new Map<string, string>();
+  for (const id of ids) {
+    for (const ancestor of chainAncestorIds(entries, id)) {
+      if (!needed.has(ancestor)) needed.set(ancestor, id);
+    }
+  }
+  return needed;
+}
+
 /** Converts a catalog entry into the planner's input. */
 async function toRetentionBackup(
   storage: StorageAdapter,
@@ -355,12 +386,15 @@ async function toRetentionBackup(
   const completedAt = completedAtOf(entry);
   if (entry.status === "complete" && completedAt !== undefined) {
     const immutableUntil = immutableUntilOf(entry);
+    const parent = entry.manifest?.chain?.parent;
     return {
       id: entry.id,
       status: entry.status,
       completedAt,
       ...flags,
       ...(immutableUntil === undefined ? {} : { immutableUntil }),
+      // Rule 8 of retention.ts: keeping this backup keeps the one it continues.
+      ...(parent === undefined ? {} : { parent }),
     };
   }
 
@@ -393,7 +427,7 @@ async function lastActivity(
 }
 
 /** Deletes the checkpoint of a resumable run, if it has one. */
-async function deleteCheckpointOf(
+export async function deleteCheckpointOf(
   storage: StorageAdapter,
   id: string,
   signal: AbortSignal | undefined,

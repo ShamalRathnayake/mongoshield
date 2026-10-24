@@ -1,6 +1,14 @@
 /**
  * Reading and writing manifests, with clear errors when a manifest is
  * malformed or was written by a newer, incompatible version of MongoShield.
+ *
+ * Field order: the manifest holds a few BSON values as canonical Extended JSON, the
+ * `_id` bounds of split collections' parts (`files[].range`). An `_id` that is an
+ * embedded document with integer-like keys (`{ "b": 1, "2": 1 }`) would be reordered
+ * by plain `JSON.stringify` / `JSON.parse` (JavaScript lists integer-like keys first),
+ * which is a different `_id` and a different place in the `_id` order. Manifests are
+ * therefore written and read with the order-keeping JSON of src/format/ordered-json.ts;
+ * for everything else the output is byte-identical to `JSON.stringify`.
  */
 
 import { z } from "zod";
@@ -9,6 +17,7 @@ import type { StorageAdapter } from "../storage/types.ts";
 import { readStreamToBuffer } from "../util/streams.ts";
 import { manifestKey } from "./layout.ts";
 import { MANIFEST_FORMAT_VERSION, type Manifest, ManifestSchema } from "./manifest.ts";
+import { parseJsonInStoredOrder, stringifyJsonInStoredOrder } from "./ordered-json.ts";
 
 /** Manifests are small; anything bigger than this is certainly not a manifest. */
 const MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
@@ -25,7 +34,9 @@ export function serializeManifest(manifest: Manifest): string {
       { hint: "This is a bug in MongoShield; please report it." },
     );
   }
-  return `${JSON.stringify(result.data, null, 2)}\n`;
+  // zod passes the `range` values through as they are (z.custom), so the field order
+  // recorded on them (backup-parts.ts `toPartRange`) reaches the writer.
+  return `${stringifyJsonInStoredOrder(result.data, 2)}\n`;
 }
 
 /**
@@ -37,7 +48,8 @@ export function serializeManifest(manifest: Manifest): string {
 export function parseManifest(text: string, where = "manifest.json"): Manifest {
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    // Keeps the stored order of `range` bounds (see the file header).
+    raw = parseJsonInStoredOrder(text);
   } catch (error) {
     throw new MongoShieldError("MS_MANIFEST_INVALID", `${where} is not valid JSON.`, {
       cause: error,

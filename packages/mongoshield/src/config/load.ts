@@ -2,6 +2,7 @@
  * Loading the effective configuration for the CLI.
  *
  * Sources, from lowest to highest priority:
+ *   0. the `preset` named by any of the layers below (presets.ts)
  *   1. the config file (`mongoshield.config.ts` and friends, or `--config <path>`)
  *   2. environment variables (`MONGOSHIELD_*`, plus `MONGODB_URI`)
  *   3. command-line flags (passed in as `overrides`)
@@ -16,6 +17,7 @@ import { createJiti } from "jiti";
 import { z } from "zod";
 import { MongoShieldError } from "../errors.ts";
 import { readEnvironmentConfig } from "./env.ts";
+import { CONFIG_PRESETS, isConfigPresetName } from "./presets.ts";
 import { ConfigSchema, type MongoShieldConfig, type MongoShieldConfigInput } from "./schema.ts";
 
 /** File names searched, in order, when no `--config` path is given. */
@@ -57,7 +59,9 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
 
 /** Validates a config object, turning schema problems into one readable error. */
 export function validateConfig(input: unknown, configFile?: string): MongoShieldConfig {
-  const result = ConfigSchema.safeParse(removeUndefined(input));
+  // The preset is the lowest layer, so it is applied to the merged result: a preset
+  // named by any layer (file, environment, flag) fills in what none of them set.
+  const result = ConfigSchema.safeParse(applyConfigPreset(removeUndefined(input)));
   if (result.success) return result.data;
 
   const where = configFile ? ` (from ${configFile})` : "";
@@ -68,6 +72,15 @@ export function validateConfig(input: unknown, configFile?: string): MongoShield
       hint: "Fix the values above in your config file, environment variables or flags.",
     },
   );
+}
+
+/**
+ * Fills in the defaults of the named `preset` under the given (merged) config.
+ * An unknown preset name is left alone, so the schema reports it with the valid names.
+ */
+function applyConfigPreset(input: unknown): unknown {
+  if (!isPlainObject(input) || !isConfigPresetName(input.preset)) return input;
+  return mergeValues(CONFIG_PRESETS[input.preset], input);
 }
 
 /** Returns the config file to load, or `undefined` if there is none. */

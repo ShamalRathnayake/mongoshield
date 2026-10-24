@@ -6,6 +6,10 @@
  * non-zero (MS_INTEGRITY_FAILED, 33) when problems are found, so a scheduled
  * `mongoshield verify --deep` can alert on failure. The result is recorded
  * next to the backup and shown by `list` and `inspect`.
+ *
+ * An incremental backup is verified with its whole chain (every earlier backup back
+ * to the full one, in the same mode); `--chain links` only checks that the chain is
+ * complete and lines up, plus the incremental's own files.
  */
 
 import type { MongoShieldConfigInput } from "../../config/schema.ts";
@@ -45,6 +49,13 @@ export const verifyCommand: CommandSpec = {
     from: storageFromOption,
     "identity-file": identityFileOption,
     "passphrase-env": passphraseEnvOption,
+    chain: {
+      type: "string",
+      choices: ["full", "links"],
+      defaultText: "full",
+      description:
+        "Incremental backups: also check every earlier backup's files (full), or only that the chain is intact (links)",
+    },
   },
   examples: [
     { description: "Quick check of the latest backup", command: "mongoshield verify" },
@@ -66,6 +77,7 @@ async function runVerifyCommand(context: CommandContext): Promise<number> {
     const options: VerifyOptions = {
       backup: backupSelectorArgument(context),
       mode: context.flags.boolean("deep") ? "deep" : "fast",
+      ...(context.flags.string("chain") === "links" ? { chain: "links" as const } : {}),
       signal: context.signal,
       onProgress: progress.onProgress,
       ...(decryption ? { decryption } : {}),
@@ -106,6 +118,13 @@ function printReport(context: CommandContext, report: VerifyReport): void {
   const checked = [plural(report.filesChecked, "file"), formatBytes(report.bytesChecked)];
   if (report.mode === "deep") checked.push(plural(report.documentsChecked, "document"));
   const scope = `${checked.join(", ")} checked (${report.mode}) in ${formatDuration(report.durationMs)}`;
+  if (report.chain !== undefined) {
+    // Which backups the verdict covers: the whole chain, or its links only.
+    const what = report.chain.scope === "full" ? "files and links" : "links";
+    out.info(
+      `Chain: incremental #${report.chain.length} after base ${report.chain.baseBackupId}; ${what} of ${plural(report.chain.members.length, "backup")} checked.`,
+    );
+  }
 
   if (report.ok) {
     out.result(`${out.style("green", "✔")} Backup ${report.backupId} is intact: ${scope}.`);

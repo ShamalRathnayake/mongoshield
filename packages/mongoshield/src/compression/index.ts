@@ -18,6 +18,10 @@
  * Note: Node's zstd compressor may end a stream with a small extra, empty frame.
  * That is valid zstd (a file may hold any number of concatenated frames) and every
  * zstd reader, including the `zstd` command line tool, handles it.
+ *
+ * Bun and Deno implement the same `node:zlib` API, zstd included. Deno's version
+ * can throw a zstd error outside the stream instead of failing it, which
+ * `routeThrownCodecErrors` turns back into a normal stream error (see there).
  */
 
 import { PassThrough, type Transform, type TransformCallback } from "node:stream";
@@ -135,6 +139,7 @@ export function createCompressor(
           [zlib.constants.ZSTD_c_checksumFlag]: 1,
         },
       });
+      routeThrownCodecErrors(stream);
       return mapZlibErrors(stream, "MS_INTERNAL", "zstd compression failed");
     }
     case "gzip": {
@@ -180,6 +185,7 @@ export function createDecompressor(compression: Compression): Transform {
       assertZstdAvailable("MS_FORMAT_UNSUPPORTED");
       const stream = zlib.createZstdDecompress();
       guardZstdFrames(stream);
+      routeThrownCodecErrors(stream);
       return mapZlibErrors(stream, "MS_INTEGRITY_FAILED", "The zstd data is corrupt");
     }
     case "gzip":
@@ -278,12 +284,63 @@ function asError(error: unknown): Error {
 }
 
 /**
+ * Errors caught by `routeThrownCodecErrors`: they come from the zstd codec, but
+ * carry no zlib-style `errno`/`code`, so `isZlibError` recognises them by this set.
+ */
+const thrownCodecErrors = new WeakSet<Error>();
+
+/**
+ * The name of the per-stream method through which Deno's `node:zlib` (checked
+ * with 2.5 to 2.9) calls its native zstd codec. It is stored on the stream's
+ * `_handle` under a private symbol with this description.
+ */
+const NATIVE_WRITE_SYMBOL_DESCRIPTION = "kNativeWrite";
+
+/**
+ * Makes a zstd codec error that is THROWN by the native write call fail the
+ * stream, instead of escaping as an uncaught exception.
+ *
+ * Why: Node.js and Bun report codec errors through the stream. Deno's polyfill
+ * calls its codec through `_handle[kNativeWrite]`, which throws on bad input.
+ * The first call for a chunk is inside a try/catch that destroys the stream, but
+ * once the output exceeds zlib's 16 KiB buffer the remaining calls run from
+ * `process.nextTick` without one. A corrupt zstd file then crashed the process
+ * (or, with an `uncaughtException` handler, left the pipeline hanging forever).
+ *
+ * What: if the stream's handle has such a method (feature detection: Node.js and
+ * Bun have none, so this does nothing there), it is wrapped on this one instance.
+ * A throw destroys the stream with the error and returns normally; Deno's own
+ * code then sees the destroyed stream and completes the pending write callback,
+ * so nothing is left waiting.
+ */
+function routeThrownCodecErrors(stream: Transform): void {
+  const handle: unknown = Reflect.get(stream, "_handle");
+  if (typeof handle !== "object" || handle === null) return;
+  for (const key of Object.getOwnPropertySymbols(handle)) {
+    if (key.description !== NATIVE_WRITE_SYMBOL_DESCRIPTION) continue;
+    const nativeWrite: unknown = Reflect.get(handle, key);
+    if (typeof nativeWrite !== "function") continue;
+    Reflect.set(handle, key, function guardedNativeWrite(this: unknown, ...args: unknown[]) {
+      try {
+        return Reflect.apply(nativeWrite, this, args);
+      } catch (thrown) {
+        const error = asError(thrown);
+        thrownCodecErrors.add(error);
+        stream.destroy(error);
+        return undefined;
+      }
+    });
+  }
+}
+
+/**
  * Makes errors raised by zlib itself surface as `MongoShieldError`s.
  *
  * zlib reports bad input by destroying the stream with a plain Error, and every
  * destroy goes through `_destroy`, whose callback decides which error is emitted.
  * We wrap `_destroy` on this instance and translate only errors that came from
- * zlib (they carry a numeric `errno` and a `Z_…` or `ZSTD_…` code). Anything else,
+ * zlib (they carry a numeric `errno` and a `Z_…` or `ZSTD_…` code, or were caught
+ * by `routeThrownCodecErrors`). Anything else,
  * such as an abort or an error from another stream in the same pipeline, passes
  * through untouched so the real cause is not hidden.
  */
@@ -301,6 +358,7 @@ function mapZlibErrors(stream: Transform, code: ErrorCode, message: string): Tra
 
 function isZlibError(error: unknown): error is Error {
   if (!(error instanceof Error) || error instanceof MongoShieldError) return false;
+  if (thrownCodecErrors.has(error)) return true;
   const errno: unknown = Reflect.get(error, "errno");
   const errorCode: unknown = Reflect.get(error, "code");
   return (

@@ -21,6 +21,13 @@
  * - `schedule.verify: "drill"` verifies by restoring the new backup into the
  *   scratch deployment of the `drill` section (a restore drill), which also
  *   measures the recovery time (`verify.rtoMs` in the report).
+ * - `backup.incremental` makes each run an incremental backup of the changes since
+ *   the previous one, and a full backup whenever a new chain is due (none to
+ *   continue, the chain's full backup older than `fullEveryDays`, the chain at
+ *   `maxChainLength`, or lost oplog history): "full weekly, incremental hourly" is
+ *   an hourly cron with `fullEveryDays: 7`. The report says which kind was taken
+ *   (`backup.kind`, `backup.fullBackupReason`). An incremental is verified with its
+ *   chain's links only (its parents were verified when they were taken).
  */
 
 import { randomBytes } from "node:crypto";
@@ -313,7 +320,10 @@ async function runBackupStep(context: RunContext, signal: AbortSignal): Promise<
         // The shape label lets the guard find comparable backups later, even if
         // the guard is only switched on after a while, and scopes retention to this
         // selection. The scope labels mark the backup as this job's.
-        labels: withShapeLabel({ ...section?.labels, ...options.scopeLabels }, section ?? {}),
+        labels: withShapeLabel(
+          { ...section?.labels, ...scopeLabelsOf(config, options) },
+          section ?? {},
+        ),
         ...(section?.include ? { include: section.include } : {}),
         ...(section?.exclude ? { exclude: section.exclude } : {}),
         ...(section?.consistency ? { consistency: section.consistency } : {}),
@@ -324,6 +334,7 @@ async function runBackupStep(context: RunContext, signal: AbortSignal): Promise<
         // With a time budget, every run first continues the newest checkpoint made
         // with the same options (if any), so a big backup completes over several runs.
         ...(section?.maxDurationMs === undefined ? {} : { resume: "auto" }),
+        ...incrementalPolicyOf(section),
       };
       return shield.backup(backupOptions);
     },
@@ -346,6 +357,7 @@ async function runBackupStep(context: RunContext, signal: AbortSignal): Promise<
     return result;
   }
   const totals = result.manifest.totals;
+  const chain = result.manifest.chain;
   draft.backup = {
     status: "complete",
     id: result.id,
@@ -355,8 +367,48 @@ async function runBackupStep(context: RunContext, signal: AbortSignal): Promise<
     bytesStored: totals.bytesStored,
     durationMs: result.durationMs,
     attempts: attempted.attempts,
+    // Only jobs that take incrementals report the kind (old reports stay as they were).
+    ...(section?.incremental === undefined
+      ? {}
+      : chain === undefined
+        ? {
+            kind: "full" as const,
+            ...(result.fullBackupReason === undefined
+              ? {}
+              : { fullBackupReason: result.fullBackupReason }),
+          }
+        : {
+            kind: "incremental" as const,
+            parent: chain.parent,
+            changes: result.manifest.changes?.events ?? 0,
+          }),
   };
   return result;
+}
+
+/** A new chain is due once its full backup is this many days old (`backup.incremental`). */
+export const DEFAULT_FULL_EVERY_DAYS = 7;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * `backup.incremental` as backup options: an incremental of the newest backup, with a
+ * full backup whenever a new chain is due or no incremental is possible (see the file
+ * header).
+ */
+export function incrementalPolicyOf(
+  section: MongoShieldConfig["backup"],
+): Pick<BackupOptions, "incremental"> {
+  const policy = section?.incremental;
+  if (policy === undefined) return {};
+  return {
+    incremental: {
+      from: "latest",
+      fallbackToFull: true,
+      fullAfterMs: (policy.fullEveryDays ?? DEFAULT_FULL_EVERY_DAYS) * MS_PER_DAY,
+      ...(policy.maxChainLength === undefined ? {} : { maxChainLength: policy.maxChainLength }),
+    },
+  };
 }
 
 /** True when the guard result means "do not commit". */
@@ -445,6 +497,9 @@ async function runVerifyStep(
       shield.verify({
         backup: backupId,
         mode,
+        // An incremental's parents were verified by the runs that took them: checking
+        // their files again every hour would re-read the whole full backup each time.
+        ...(draft.backup?.kind === "incremental" ? { chain: "links" as const } : {}),
         signal,
         ...(options.decryption ? { decryption: options.decryption } : {}),
       }),
@@ -593,12 +648,24 @@ async function pruneScopeOf(
   if (clusterId === undefined) return undefined;
   // Empty scope labels would widen the scope to every backup of the deployment,
   // so they fall back to the shape label like absent ones.
-  const custom = options.scopeLabels;
+  const custom = scopeLabelsOf(config, options);
   const labels =
     custom !== undefined && Object.keys(custom).length > 0
       ? custom
       : { [GUARD_SHAPE_LABEL]: backupShapeLabel(config.backup ?? {}) };
   return { clusterId, labels };
+}
+
+/**
+ * The job's scope labels: the `scopeLabels` option (the console passes its plan id),
+ * else the config's `retention.scopeLabels` (how `mongoshield run` and the
+ * Kubernetes operator set them), else none.
+ */
+function scopeLabelsOf(
+  config: MongoShieldConfig,
+  options: ScheduledJobOptions,
+): Readonly<Record<string, string>> | undefined {
+  return options.scopeLabels ?? config.retention?.scopeLabels;
 }
 
 // ---------------------------------------------------------------------------

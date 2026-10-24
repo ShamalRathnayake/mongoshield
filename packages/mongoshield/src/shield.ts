@@ -21,9 +21,16 @@
 import type { Document, MongoClient } from "mongodb";
 import { placeHold, recordVerification, releaseHold } from "./catalog/annotations.ts";
 import { type CatalogEntry, listBackups } from "./catalog/catalog.ts";
+import { chainRanges, findChainCovering } from "./catalog/chain.ts";
+import {
+  type DeleteBackupOptions,
+  type DeleteBackupResult,
+  deleteBackupById,
+} from "./catalog/delete.ts";
 import { type PruneResult, pruneBackups } from "./catalog/prune.ts";
 import type { RetentionPolicy } from "./catalog/retention.ts";
 import type { PruneScope } from "./catalog/scope.ts";
+import { selectBackup } from "./catalog/select.ts";
 import { defaultCompression } from "./compression/index.ts";
 import { runCopy } from "./copy/copy.ts";
 import { runBackup } from "./engine/backup.ts";
@@ -37,8 +44,19 @@ import {
   type ShieldRestoreDocumentsOptions,
 } from "./engine/find-restore.ts";
 import { planRestore, runRestore } from "./engine/restore.ts";
+import {
+  checkUpgradeCompatibility,
+  recordUpgradeRehearsal,
+  rehearseUpgrade,
+  type ShieldUpgradeRehearsalOptions,
+  type UpgradeCompatibilityOptions,
+  type UpgradeCompatibilityResult,
+  type UpgradeRehearsalReport,
+} from "./engine/upgrade-rehearsal.ts";
+import { type EphemeralServer, startEphemeralServer } from "./engine/upgrade-target.ts";
+import { parseTargetVersion } from "./engine/upgrade-versions.ts";
 import { verifyBackup } from "./engine/verify.ts";
-import { MongoShieldError } from "./errors.ts";
+import { isMongoShieldError, MongoShieldError } from "./errors.ts";
 import { type DiffOptions, type DiffResult, diffBackups } from "./extras/diff.ts";
 import { type ErasableResult, withErasures } from "./extras/erasure.ts";
 import {
@@ -57,7 +75,7 @@ import {
   type ShieldRestoreTenantOptions,
 } from "./extras/tenant-restore.ts";
 import { isBackupId } from "./format/layout.ts";
-import type { ClusterTime, Compression } from "./format/manifest.ts";
+import { type ClusterTime, type Compression, isIncrementalManifest } from "./format/manifest.ts";
 import { readManifest } from "./format/manifest-io.ts";
 import {
   listBaseBackups,
@@ -65,6 +83,8 @@ import {
   pruneJournal,
   replayJournal,
 } from "./journal/index.ts";
+import { describeTime } from "./journal/plan.ts";
+import { toJournalTime } from "./journal/time.ts";
 import { type Logger, silentLogger } from "./logger.ts";
 import { type MongoConnection, openConnection } from "./mongo/connection.ts";
 import { describeDeployment } from "./mongo/deployment.ts";
@@ -96,6 +116,35 @@ import type {
   VerifyOptions,
   VerifyReport,
 } from "./types.ts";
+
+/**
+ * The journal's "cannot restore to …" error, with the ranges incremental chains can
+ * restore to added (to its message and `details.recoverableRanges`).
+ */
+function withChainRanges(
+  error: MongoShieldError,
+  ranges: ReturnType<typeof chainRanges>,
+): MongoShieldError {
+  if (ranges.length === 0) return error;
+  const listed = ranges
+    .map(
+      (range) =>
+        `\n  ${describeTime(range.from)} → ${describeTime(range.to)} (chain of ${range.backupId})`,
+    )
+    .join("");
+  const previous: unknown = error.details?.recoverableRanges;
+  return new MongoShieldError(error.code, `${error.message}\nIncremental chains: ${listed}`, {
+    cause: error,
+    ...(error.hint === undefined ? {} : { hint: error.hint }),
+    details: {
+      ...error.details,
+      recoverableRanges: [
+        ...(Array.isArray(previous) ? previous : []),
+        ...ranges.map((range) => ({ from: range.from, to: range.to })),
+      ],
+    },
+  });
+}
 
 /** Options for `shield.prune()`. */
 export interface ShieldPruneOptions {
@@ -202,6 +251,10 @@ export class MongoShield {
    * Point-in-time recovery: restore the newest base backup taken before `at`, then
    * replay the change journal from that backup's cluster time up to `at`.
    * Planning comes first, so a gap in the journal fails before anything is written.
+   *
+   * Incremental chains reach points in time too: with an incremental backup's id, its
+   * chain is restored up to `at`; with `"latest"`, a chain that covers `at` is used when
+   * the journal does not.
    */
   async #restoreToPointInTime(
     connection: MongoConnection,
@@ -209,16 +262,20 @@ export class MongoShield {
     at: Date | ClusterTime,
   ): Promise<RestoreResult> {
     if (options.backup !== "latest") {
-      throw new MongoShieldError(
-        "MS_CONFIG_INVALID",
-        "A point-in-time restore picks its base backup itself.",
-        {
-          hint: 'Pass `backup: "latest"` together with `at`, or restore a backup id without `at`.',
-        },
-      );
+      return this.#restoreChainToPointInTime(connection, options, at);
     }
 
-    const plan = await planPointInTimeRestore(this.storage, at, { signal: options.signal });
+    let plan: Awaited<ReturnType<typeof planPointInTimeRestore>>;
+    try {
+      plan = await planPointInTimeRestore(this.storage, at, { signal: options.signal });
+    } catch (error) {
+      // No journal reaches `at`: an incremental chain may.
+      if (!isMongoShieldError(error, "MS_CHANGE_HISTORY_LOST")) throw error;
+      const entries = await listBackups(this.storage, { logger: this.#logger });
+      const covering = findChainCovering(entries, toJournalTime(at));
+      if (covering === undefined) throw withChainRanges(error, chainRanges(entries));
+      return this.#restoreChainToPointInTime(connection, { ...options, backup: covering.id }, at);
+    }
     const base = await runRestore(this.#restoreContext(connection), {
       ...options,
       backup: plan.baseBackupId,
@@ -273,6 +330,41 @@ export class MongoShield {
     };
   }
 
+  /**
+   * Restores an incremental backup's chain up to `at` (restore.ts cuts the chain and
+   * stops the last window there). The selected backup must be an incremental.
+   */
+  async #restoreChainToPointInTime(
+    connection: MongoConnection,
+    options: RestoreOptions,
+    at: Date | ClusterTime,
+  ): Promise<RestoreResult> {
+    const entries = await listBackups(this.storage, { logger: this.#logger });
+    const selected = selectBackup(entries, options.backup).manifest;
+    if (selected === undefined || !isIncrementalManifest(selected)) {
+      throw new MongoShieldError(
+        "MS_CONFIG_INVALID",
+        `Backup ${selected?.id ?? String(options.backup)} is a full backup: it can only be restored as it is.`,
+        {
+          hint: 'Pass `backup: "latest"` together with `at` (the base backup is picked for you), the id of an incremental backup whose chain reaches `at`, or a backup id without `at`.',
+        },
+      );
+    }
+    const result = await runRestore(this.#restoreContext(connection), {
+      ...options,
+      backup: selected.id,
+    });
+    return {
+      ...result,
+      pointInTime: {
+        baseBackupId: result.plan.chain?.baseBackupId ?? selected.chain.base,
+        restoredTo: toJournalTime(at),
+        events: result.eventsReplayed ?? 0,
+        warnings: [],
+      },
+    };
+  }
+
   /** Works out what `restore()` would do, without writing anything. */
   async planRestore(options: RestoreOptions): Promise<RestorePlan> {
     const target = options.target ?? this.#requireSource("plan a restore");
@@ -319,6 +411,57 @@ export class MongoShield {
         options.signal,
       ),
     );
+  }
+
+  /**
+   * Upgrade compatibility analysis: what in a backup breaks or behaves differently
+   * on `options.targetVersion`, from MongoDB's release notes (geoHaystack indexes,
+   * removed JavaScript functions, the 8.0 null/undefined change, …). Needs no
+   * database connection: only the backup's metadata is read.
+   */
+  async checkUpgradeCompatibility(
+    options: UpgradeCompatibilityOptions,
+  ): Promise<UpgradeCompatibilityResult> {
+    return checkUpgradeCompatibility({ storage: this.storage, logger: this.#logger }, options);
+  }
+
+  /**
+   * Upgrade rehearsal: analyses the backup for `options.targetVersion`, restores it
+   * into a server of that version and runs the drill checks plus version-specific
+   * ones (`validate`, every view, every validator). The server is `options.target`
+   * (a scratch deployment, checked to run the target version and not to be the
+   * backup's source) or, when it is left out, an ephemeral mongod started with the
+   * optional `mongodb-memory-server` package and stopped afterwards. Recorded next
+   * to the backup as a drill with the version it proved.
+   *
+   *   await shield.rehearseUpgrade({ backup: "latest", targetVersion: "8.0.13" });
+   */
+  async rehearseUpgrade(options: ShieldUpgradeRehearsalOptions): Promise<UpgradeRehearsalReport> {
+    const version = parseTargetVersion(options.targetVersion);
+    let ephemeral: EphemeralServer | undefined;
+    if (options.target === undefined) {
+      ephemeral = await startEphemeralServer({
+        version,
+        binary: options.mongodBinary,
+        logger: this.#logger,
+      });
+    }
+    try {
+      return await this.#withConnection(
+        options.target ?? { uri: (ephemeral as EphemeralServer).uri },
+        async (connection) => {
+          const report = await rehearseUpgrade(
+            { ...this.#restoreContext(connection), ephemeral: ephemeral !== undefined },
+            options,
+          );
+          await recordUpgradeRehearsal(this.storage, report);
+          return report;
+        },
+        options.signal,
+      );
+    } finally {
+      await ephemeral?.stop();
+    }
   }
 
   /**
@@ -372,6 +515,18 @@ export class MongoShield {
   /** Lists the backups in storage, newest first, including incomplete runs. */
   async list(options: { readonly signal?: AbortSignal } = {}): Promise<CatalogEntry[]> {
     return listBackups(this.storage, { logger: this.#logger, ...options });
+  }
+
+  /**
+   * Deletes one backup by id: manifest first, then its files. Refuses (with
+   * `MS_BACKUP_PROTECTED`) a backup that is on hold, write-once (object lock), or
+   * needed by an incremental backup. See catalog/delete.ts.
+   */
+  async deleteBackup(
+    backupId: string,
+    options: Omit<DeleteBackupOptions, "logger"> = {},
+  ): Promise<DeleteBackupResult> {
+    return deleteBackupById(this.storage, backupId, { logger: this.#logger, ...options });
   }
 
   /** Deletes backups that the retention policy no longer needs. */
