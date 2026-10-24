@@ -1,0 +1,23 @@
+---
+/**
+ * Starlight's default footer (edit link, previous/next) plus a short legal line,
+ * shown on every documentation page.
+ */
+// biome-ignore lint/correctness/noUnusedImports: used in the template below; Biome does not read Astro templates.
+import Default from "@astrojs/starlight/components/Footer.astro";
+---
+
+<Default />
+<p class="legal">
+  MongoShield is MIT licensed and is not affiliated with, endorsed by or sponsored by
+  MongoDB, Inc. MongoDB is a trademark of MongoDB, Inc.
+</p>
+
+<style>
+  .legal {
+    margin-top: 2rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    text-align: center;
+  }
+</style>

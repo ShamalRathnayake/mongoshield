@@ -1,0 +1,94 @@
+---
+title: MongoShield
+description: Back up, restore and copy MongoDB from Node.js, without mongodump. Backups stay readable with standard tools.
+template: splash
+editUrl: false
+hero:
+  tagline: Back up, restore and copy MongoDB from Node.js. No mongodump required. Backups stay readable with standard tools.
+  actions:
+    - text: Get started
+      link: getting-started/introduction/
+      icon: right-arrow
+    - text: CLI in 5 minutes
+      link: getting-started/quickstart-cli/
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from "@astrojs/starlight/components";
+// Markdown links are root-relative (the remark plugin adds the base path). Component
+// links are built from BASE_URL, because the plugin does not see them.
+export const link = (path) => `${import.meta.env.BASE_URL.replace(/\/$/, "")}/${path}`;
+
+## Three commands
+
+```sh
+npx mongoshield@next init      # writes mongoshield.config.ts and generates an encryption key
+npx mongoshield@next backup
+npx mongoshield@next restore latest --rename 'app.*=app_restored.*'
+```
+
+MongoShield is a TypeScript library and CLI that uses only the official MongoDB driver.
+It runs wherever Node.js runs: a laptop, a container, a Kubernetes CronJob, GitHub
+Actions, AWS Lambda or Vercel.
+
+## Restore with standard tools
+
+A backup is a directory of ordinary files: mongodump's layout and BSON, zstd or gzip
+compression, and [age](https://age-encryption.org) encryption. If MongoShield disappeared
+tomorrow, you could still restore with off-the-shelf tools:
+
+```sh
+age -d -i recovery.key users.bson.zst.age | zstd -d > users.bson && mongorestore …
+```
+
+The [backup format](/specs/format/) is a public, versioned specification.
+
+## What it does
+
+<CardGrid>
+  <Card title="Safe restores">
+    Nothing is overwritten unless you ask. Rename on restore, dry runs, and every
+    collection type: capped, clustered, time series, views, validators, collations and
+    every index type.
+  </Card>
+  <Card title="Encrypted with keys you hold">
+    Per-file age encryption to public keys, cloud KMS keys or a passphrase. The machine
+    taking backups does not need the secret key.
+  </Card>
+  <Card title="Verifiable">
+    Every file's SHA-256 is in the manifest. Verify without a key, decrypt and parse
+    everything with `--deep`, or run a restore drill that measures your RTO.
+  </Card>
+  <Card title="Consistent">
+    On replica sets and sharded clusters, backups converge to a single moment using
+    change streams, the equivalent of `mongodump --oplog`.
+  </Card>
+  <Card title="Point-in-time recovery">
+    A change journal records every change between backups, so a restore can stop at any
+    second.
+  </Card>
+  <Card title="Retention with safety floors">
+    Keep the last N plus hourly, daily, weekly, monthly and yearly backups. The newest and
+    held backups are never deleted.
+  </Card>
+  <Card title="Runs unattended">
+    Cron scheduling, locks, retries, a guard against suspicious backups, notifications and
+    heartbeats.
+  </Card>
+  <Card title="Your storage">
+    Local disk, S3 and compatible services, Google Cloud Storage, Azure Blob Storage or
+    SFTP, with optional write-once retention.
+  </Card>
+  <Card title="Flat memory">
+    Everything streams. Memory use does not grow with the size of the database.
+  </Card>
+</CardGrid>
+
+## Start here
+
+<CardGrid>
+  <LinkCard title="Introduction" href={link("getting-started/introduction/")} description="What MongoShield is, and when to use something else." />
+  <LinkCard title="Library quickstart" href={link("getting-started/quickstart-library/")} description="Back up and restore from TypeScript." />
+  <LinkCard title="Guides" href={link("guides/scheduling/")} description="Docker, Kubernetes, GitHub Actions, Lambda, Vercel, Atlas and more." />
+  <LinkCard title="Limitations" href={link("limitations/")} description="What it does not do, in plain words." />
+</CardGrid>

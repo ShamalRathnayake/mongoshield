@@ -1,0 +1,23 @@
+/*
+ * Site colours: a calm teal accent instead of Starlight's default purple.
+ * Starlight derives every other shade from these variables, in both themes.
+ */
+
+/* Dark theme (Starlight's default). */
+:root {
+  --sl-color-accent-low: #0f2f2c;
+  --sl-color-accent: #14857a;
+  --sl-color-accent-high: #a6e3da;
+}
+
+/* Light theme. */
+:root[data-theme="light"] {
+  --sl-color-accent-low: #cdeee9;
+  --sl-color-accent: #0f766e;
+  --sl-color-accent-high: #0b3d38;
+}
+
+/* Feature cards on the landing page: no oversized icons, text first. */
+.sl-markdown-content .card .title {
+  font-size: var(--sl-text-lg);
+}
