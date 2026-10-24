@@ -9,13 +9,13 @@
   "scripts": {
     "build": "pnpm --filter \"./packages/*\" build",
     "dev": "pnpm --filter mongoshield dev",
-    "test": "pnpm --filter \"./packages/*\" test",
+    "test": "pnpm build:lib && pnpm --filter \"./packages/*\" test",
     "test:unit": "pnpm --filter \"./packages/*\" test:unit",
     "test:integration": "pnpm --filter \"./packages/*\" test:integration",
-    "coverage": "pnpm --filter \"./packages/*\" coverage",
+    "coverage": "pnpm build:lib && pnpm --filter \"./packages/*\" coverage",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "typecheck": "pnpm --filter \"./packages/*\" typecheck",
+    "typecheck": "pnpm build:lib && pnpm --filter \"./packages/*\" typecheck",
     "check:package": "pnpm --filter \"./packages/*\" check:package",
     "check": "pnpm lint && pnpm typecheck && pnpm --filter mongoshield docs:errors:check && pnpm test && pnpm build && pnpm check:package",
     "changeset": "changeset",
@@ -23,7 +23,8 @@
     "prepare": "lefthook install",
     "docs:errors": "pnpm --filter mongoshield docs:errors",
     "docs:dev": "pnpm --filter website dev",
-    "docs:build": "pnpm --filter website build"
+    "docs:build": "pnpm --filter website build",
+    "build:lib": "pnpm --filter mongoshield build"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
