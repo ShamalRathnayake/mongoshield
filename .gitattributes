@@ -3,3 +3,7 @@
 *.age binary
 *.zst binary
 *.gz binary
+
+# Test fixtures are byte-exact inputs (the age test vectors include CRLF cases on
+# purpose), so git must never convert their line endings.
+packages/mongoshield/test/fixtures/** -text
