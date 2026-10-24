@@ -22,6 +22,9 @@ export default defineConfig({
           name: "ui",
           include: ["src/ui/**/*.test.tsx", "src/ui/**/*.test.ts"],
           environment: "jsdom",
+          // The page tests type whole forms with simulated keystrokes in jsdom, which
+          // takes longer than Vitest's default 5 s on CI runners with coverage on.
+          testTimeout: 20_000,
         },
       },
       {
