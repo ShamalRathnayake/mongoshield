@@ -180,6 +180,55 @@ describe("exportDocuments as CSV", () => {
   });
 });
 
+describe("exportDocuments options", () => {
+  it.each([
+    ["an empty output path", { format: "jsonl", output: "" }, /output path is empty/],
+    ["an unknown format", { format: "xml", output: "x.xml" }, /Unknown text export format "xml"/],
+    ["an unknown Extended JSON mode", { format: "jsonl", ejson: "loose" }, /Extended JSON mode/],
+    ["an empty field list", { format: "csv", fields: [] }, /list of fields is empty/],
+    ["a field with an empty segment", { format: "csv", fields: ["a..b"] }, /is not a field path/],
+    ["a field starting with $", { format: "csv", fields: ["$where"] }, /is not a field path/],
+    ["a field listed twice", { format: "csv", fields: ["name", "name"] }, /listed twice/],
+    ["a malformed namespace", { format: "jsonl", namespace: "users" }, /not a valid namespace/],
+  ])("refuses %s", async (_name, overrides, message) => {
+    const options = {
+      backup: "latest",
+      namespace: "app.users",
+      output: join(workDir, `refused-${Math.random()}.txt`),
+      ...overrides,
+    } as Parameters<typeof exportDocuments>[1];
+    await expect(exportDocuments(context(), options)).rejects.toThrow(message);
+  });
+
+  it("writes CSV to a stream in canonical mode and stops at a missing namespace", async () => {
+    const chunks: string[] = [];
+    const output = new Writable({
+      write(chunk: Buffer, _encoding, done) {
+        chunks.push(chunk.toString());
+        done();
+      },
+    });
+    await exportDocuments(context(), {
+      backup: "latest",
+      namespace: "app.users",
+      format: "csv",
+      ejson: "canonical",
+      fields: ["_id", "count"],
+      output,
+    });
+    expect(chunks.join("").split("\n")[0]).toBe("_id,count");
+    expect(chunks.join("")).toContain("6523f1c2a1b2c3d4e5f60718,7");
+    await expect(
+      exportDocuments(context(), {
+        backup: "latest",
+        namespace: "app.missing",
+        format: "jsonl",
+        output: join(workDir, "missing.jsonl"),
+      }),
+    ).rejects.toThrow(/app\.missing/);
+  });
+});
+
 describe("mongoshield export --format jsonl|csv", () => {
   it("writes CSV to stdout", async () => {
     const run = await runTestCli(

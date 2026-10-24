@@ -11,6 +11,7 @@
 
 import { Binary, type Db, type Document, type MongoClient, MongoServerError } from "mongodb";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
+import { deserializeInStoredOrder } from "../format/field-order.ts";
 import type { SearchIndexDefinition } from "../format/metadata.ts";
 import { type Logger, silentLogger } from "../logger.ts";
 import {
@@ -152,10 +153,11 @@ interface DatabaseScan {
 async function describeDatabase(db: Db, scan: DatabaseScan): Promise<CollectionSpec[]> {
   const { rules, logger, signal } = scan;
   // `authorizedCollections` lets users with collection-level privileges list just what
-  // they may read. These are small catalog entries, so collecting them is fine.
-  const infos = await db
-    .listCollections({}, { nameOnly: false, authorizedCollections: true })
-    .toArray();
+  // they may read. These are small catalog entries, so collecting them is fine. Read
+  // raw so validators and view pipelines keep their stored field order.
+  const infos = await catalogDocuments(
+    db.listCollections({}, { nameOnly: false, authorizedCollections: true, raw: true }),
+  );
   const bucketUuids = timeSeriesBucketUuids(infos);
 
   const specs: CollectionSpec[] = [];
@@ -214,7 +216,8 @@ async function describeCollection(
   try {
     // For time series, listIndexes on the user-facing namespace returns indexes in
     // measurement terms (e.g. `{ meta: 1, time: 1 }`), which is what createIndex accepts.
-    const indexes = await collection.listIndexes().toArray();
+    // Read raw: the order of a compound key's fields IS the index (see catalogDocuments).
+    const indexes = await catalogDocuments(collection.listIndexes({ raw: true }));
     // `count` reads collection metadata, so this is O(1) for collections. On a time
     // series it counts measurements by unpacking buckets, which is slower but accurate.
     const estimatedDocuments = await collection.estimatedDocumentCount();
@@ -237,6 +240,28 @@ async function describeCollection(
     }
     throw error;
   }
+}
+
+/**
+ * The documents of a catalog cursor opened with `raw: true` (`listCollections`,
+ * `listIndexes`), parsed with their stored field order recorded (see
+ * src/format/field-order.ts).
+ *
+ * Why: the driver's own parse gives JavaScript objects, which list integer-like field
+ * names first. An index on `{ b: 1, "1": 1 }` would be backed up, and recreated, as
+ * `{ "1": 1, b: 1 }`: another index. Validators, partial filters and view pipelines
+ * would change the same way. The values are parsed with the driver's default options
+ * (plain numbers, as before); only the order is new.
+ */
+async function catalogDocuments(cursor: AsyncIterable<unknown>): Promise<Document[]> {
+  const documents: Document[] = [];
+  for await (const raw of cursor) {
+    if (!(raw instanceof Uint8Array)) {
+      throw new MongoShieldError("MS_INTERNAL", "The driver returned a parsed catalog entry.");
+    }
+    documents.push(deserializeInStoredOrder(raw, {}));
+  }
+  return documents;
 }
 
 /** `system.js` is user data; every other `system.*` collection is server-managed. */

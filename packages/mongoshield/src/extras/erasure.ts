@@ -47,6 +47,7 @@ import {
   deriveErasureKey,
   type ErasureKey,
   type HashedField,
+  MATCH_VERSION,
   matchesHashed,
   storeFilter,
 } from "./erasure-match.ts";
@@ -69,6 +70,9 @@ const StoredMatchSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("filter"), filter: z.record(z.string(), z.unknown()) }),
   z.object({
     kind: z.literal("hashed"),
+    // Records without it were written with version 1 (see erasure-match.ts). A version
+    // this reader does not know fails the record rather than being applied wrongly.
+    matchVersion: z.literal(MATCH_VERSION).default(MATCH_VERSION),
     keyed: z.boolean(),
     keyId: z.string().optional(),
     fields: z.array(z.object({ path: z.string().min(1), digest: sha256Hex })).min(1),
@@ -280,10 +284,11 @@ export async function applyErasures(
       ...(options.since ? { since: options.since } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     }));
+  const since = options.since;
   const records =
-    options.since === undefined
+    since === undefined
       ? all
-      : all.filter((record) => Date.parse(record.recordedAt) >= (options.since?.getTime() ?? 0));
+      : all.filter((record) => Date.parse(record.recordedAt) >= since.getTime());
   const key = keyForRecords(records, options.secret);
   const targets = resolveTargets(options.namespaces, options.rename);
   const matchers = records.map((record) => ({

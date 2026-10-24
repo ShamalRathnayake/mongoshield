@@ -307,7 +307,11 @@ describe("backup → list → inspect → verify → restore", () => {
     }[];
     expect(entries.map((entry) => entry.id)).toEqual([backupId]);
     expect(entries[0]?.status).toBe("complete");
-    expect(entries[0]?.manifest.labels).toEqual({ env: "test" });
+    // Plus the selection's shape label, which scopes `mongoshield prune`.
+    expect(entries[0]?.manifest.labels).toEqual({
+      env: "test",
+      "mongoshield.shape": expect.stringMatching(/^[0-9a-f]{12}$/),
+    });
   });
 
   it("lists it as a table", async () => {
@@ -507,13 +511,18 @@ describe("mongoshield prune, hold and release", () => {
     newer = await backup(dbName, storage);
   });
 
+  /** Prunes the selection the backups were taken with (prune's default scope). */
+  function prune(...flags: string[]) {
+    return cli(["prune", "--from", storage, "--include", `${dbName}.*`, ...flags]);
+  }
+
   async function ids(): Promise<string[]> {
     const run = await cli(["list", "--from", storage, "--json"]);
     return (JSON.parse(run.stdout) as { id: string }[]).map((entry) => entry.id);
   }
 
   it("shows the plan and deletes nothing with --dry-run", async () => {
-    const run = await cli(["prune", "--from", storage, "--last", "1", "--dry-run"]);
+    const run = await prune("--last", "1", "--dry-run");
     expect(run.code, run.stderr).toBe(0);
     expect(run.stderr).toContain("remove");
     expect(run.stdout).toContain("would delete 1 backup");
@@ -521,13 +530,13 @@ describe("mongoshield prune, hold and release", () => {
   });
 
   it("needs a policy", async () => {
-    const run = await cli(["prune", "--from", storage]);
+    const run = await prune();
     expect(run.code).toBe(2);
     expect(run.stderr).toContain("retention");
   });
 
   it("refuses to delete without --yes when nobody can confirm", async () => {
-    const run = await cli(["prune", "--from", storage, "--last", "1"]);
+    const run = await prune("--last", "1");
     expect(run.code).toBe(3);
     expect(run.stderr).toContain("MS_CONFIRMATION_REQUIRED");
     expect(await ids()).toEqual([newer, older]);
@@ -538,16 +547,51 @@ describe("mongoshield prune, hold and release", () => {
     expect(hold.code, hold.stderr).toBe(0);
     expect((await cli(["list", "--from", storage])).stdout).toContain("held");
 
-    const keep = await cli(["prune", "--from", storage, "--last", "1", "--yes"]);
+    const keep = await prune("--last", "1", "--yes");
     expect(keep.code, keep.stderr).toBe(0);
     expect(await ids()).toEqual([newer, older]);
 
     const release = await cli(["release", older, "--from", storage]);
     expect(release.code, release.stderr).toBe(0);
-    const prune = await cli(["prune", "--from", storage, "--last", "1", "--yes", "--json"]);
-    expect(prune.code, prune.stderr).toBe(0);
-    expect((JSON.parse(prune.stdout) as { deletedBackups: number }).deletedBackups).toBe(1);
+    const pruned = await prune("--last", "1", "--yes", "--json");
+    expect(pruned.code, pruned.stderr).toBe(0);
+    expect((JSON.parse(pruned.stdout) as { deletedBackups: number }).deletedBackups).toBe(1);
     expect(await ids()).toEqual([newer]);
+  });
+
+  it("labels backups with their selection and prunes one selection without touching another", async () => {
+    const otherDb = uniqueDb("cliprune_other");
+    await seed(otherDb);
+    const shared = await newStorage();
+    const ours = [await backup(dbName, shared), await backup(dbName, shared)];
+    const theirs = [await backup(otherDb, shared), await backup(otherDb, shared)];
+
+    const listed = await cli(["list", "--from", shared, "--json"]);
+    const labels = (
+      JSON.parse(listed.stdout) as { manifest?: { labels: Record<string, string> } }[]
+    ).map((entry) => entry.manifest?.labels["mongoshield.shape"]);
+    expect(new Set(labels).size).toBe(2);
+
+    // With --uri, prune reads the deployment's cluster id from the source itself.
+    const run = await cli([
+      "prune",
+      "--from",
+      shared,
+      "--uri",
+      mongoUri(),
+      "--include",
+      `${dbName}.*`,
+      "--last",
+      "1",
+      "--yes",
+    ]);
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.stdout).toContain("2 backups of other sources/selections were left alone.");
+    const remaining = await cli(["list", "--from", shared, "--json"]);
+    expect(
+      (JSON.parse(remaining.stdout) as { id: string }[]).map((entry) => entry.id).sort(),
+    ).toEqual([ours[1], ...theirs].sort());
+    await client().db(otherDb).dropDatabase();
   });
 });
 

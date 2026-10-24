@@ -20,10 +20,16 @@
  *
  * Everything else (unique, sparse, partialFilterExpression, expireAfterSeconds,
  * weights, wildcardProjection, hidden, 2dsphereIndexVersion, …) is kept unchanged.
+ *
+ * Field order: index definitions are sent, and compared, in their stored field order
+ * (src/format/field-order.ts). For a compound key `{ b: 1, "1": 1 }` the order IS the
+ * index, and JavaScript objects would list the integer-like "1" first.
  */
 
-import { BSON, type Db, type Document, MongoServerError, type WriteConcernSettings } from "mongodb";
+import { type Db, type Document, MongoServerError, type WriteConcernSettings } from "mongodb";
 import { MongoShieldError } from "../errors.ts";
+import { deserializeInStoredOrder, valueInStoredOrder } from "../format/field-order.ts";
+import { stringifyExtendedJson } from "../format/ordered-json.ts";
 import type { Logger } from "../logger.ts";
 import { commandWriteConcern } from "./restore-collections.ts";
 
@@ -103,7 +109,7 @@ export async function restoreIndexes(
   specs: readonly Document[],
   options: CreateIndexesOptions,
 ): Promise<number> {
-  const existing = await db.collection(collection).listIndexes().toArray();
+  const existing = await existingIndexes(db, collection);
   const missing = withoutExistingIndexes(specs, existing);
   if (missing.length === 0) return 0;
 
@@ -134,6 +140,32 @@ export async function restoreIndexes(
   return created;
 }
 
+/** Server error code for "not authorized". */
+const UNAUTHORIZED_CODE = 13;
+
+/**
+ * The target collection's indexes, or none when the user may not list them.
+ *
+ * The built-in `restore` role grants `createIndex` but not `listIndexes` (mongorestore
+ * never lists the target's indexes). Listing is only an optimisation here: sending an
+ * index that already exists with the same definition is a no-op on the server, and one
+ * that conflicts is handled below exactly as when it is listed.
+ *
+ * Read raw and parsed in stored order, so `sameKey` compares the real key order.
+ */
+async function existingIndexes(db: Db, collection: string): Promise<Document[]> {
+  try {
+    const indexes: Document[] = [];
+    for await (const raw of db.collection(collection).listIndexes({ raw: true })) {
+      if (raw instanceof Uint8Array) indexes.push(deserializeInStoredOrder(raw, {}));
+    }
+    return indexes;
+  } catch (error) {
+    if (error instanceof MongoServerError && error.code === UNAUTHORIZED_CODE) return [];
+    throw error;
+  }
+}
+
 async function runCreateIndexes(
   db: Db,
   collection: string,
@@ -142,7 +174,8 @@ async function runCreateIndexes(
 ): Promise<void> {
   await db.command({
     createIndexes: collection,
-    indexes: specs,
+    // Each definition in stored order (a Map where needed, see the file header).
+    indexes: specs.map((spec) => valueInStoredOrder(spec)),
     ...commandWriteConcern(writeConcern),
   });
 }
@@ -169,13 +202,15 @@ function indexError(database: string, collection: string, cause: unknown): Mongo
 }
 
 /**
- * Compares two index keys, field order included (it matters for compound indexes).
- * Relaxed Extended JSON makes `1`, `Int32(1)` and `Double(1)` compare equal, since the
- * server treats them the same in a key pattern.
+ * Compares two index keys, field order included (it matters for compound indexes;
+ * written in stored order, see the file header). Relaxed Extended JSON makes `1`,
+ * `Int32(1)` and `Double(1)` compare equal, since the server treats them the same in
+ * a key pattern.
  */
 function sameKey(left: unknown, right: unknown): boolean {
   return (
-    BSON.EJSON.stringify(left, { relaxed: true }) === BSON.EJSON.stringify(right, { relaxed: true })
+    stringifyExtendedJson(left, { relaxed: true }) ===
+    stringifyExtendedJson(right, { relaxed: true })
   );
 }
 

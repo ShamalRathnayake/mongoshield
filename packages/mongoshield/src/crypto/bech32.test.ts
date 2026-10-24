@@ -48,6 +48,12 @@ describe("decodeBech32", () => {
     expect(decodeBech32("a12uel5l")).toBeDefined();
   });
 
+  it("rejects a valid checksum over data whose padding bits are not zero", () => {
+    // One byte is two 5-bit words with 2 padding bits; the word 1 sets one of them.
+    expect(decodeBech32(withChecksum("a", [0, 1]))).toBeUndefined();
+    expect(decodeBech32(withChecksum("a", [0, 0]))?.data).toEqual(Buffer.from([0]));
+  });
+
   it("decodes the spec's example identity to 32 bytes of 0x42", () => {
     const decoded = decodeBech32(
       "AGE-SECRET-KEY-1GFPYYSJZGFPYYSJZGFPYYSJZGFPYYSJZGFPYYSJZGFPYYSJZGFPQ4EGAEX",
@@ -89,3 +95,31 @@ describe("encodeBech32", () => {
     );
   });
 });
+
+/** The Bech32 charset, in word order (BIP 173). */
+const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/**
+ * A Bech32 string for arbitrary 5-bit words, with a correct checksum. Written out
+ * here (BIP 173 reference algorithm) because `encodeBech32` only produces
+ * well-padded data, and the decoder's padding check needs badly padded input.
+ */
+function withChecksum(hrp: string, words: readonly number[]): string {
+  const generator = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  const polymod = (values: readonly number[]) => {
+    let checksum = 1;
+    for (const value of values) {
+      const top = checksum >>> 25;
+      checksum = ((checksum & 0x1ffffff) << 5) ^ value;
+      generator.forEach((term, bit) => {
+        if ((top >>> bit) & 1) checksum ^= term;
+      });
+    }
+    return checksum;
+  };
+  const codes = [...hrp].map((character) => character.charCodeAt(0));
+  const expanded = [...codes.map((code) => code >>> 5), 0, ...codes.map((code) => code & 31)];
+  const mod = polymod([...expanded, ...words, 0, 0, 0, 0, 0, 0]) ^ 1;
+  const checksum = Array.from({ length: 6 }, (_, index) => (mod >>> (5 * (5 - index))) & 31);
+  return `${hrp}1${[...words, ...checksum].map((word) => CHARSET[word]).join("")}`;
+}

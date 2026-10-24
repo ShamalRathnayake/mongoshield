@@ -272,6 +272,10 @@ function copyFirstBytes(pieces: readonly Buffer[], count: number): Buffer {
  * (the last one wins), DBRef-shaped sub-documents whose fields are not in
  * `$ref, $id, $db` order, and strings with invalid UTF-8 (rejected). Dumping with
  * `{ raw: true }` avoids all of them.
+ *
+ * Field ORDER is not kept by these options alone: JavaScript objects list integer-like
+ * names ("0", "7") first. Code that writes parsed documents back parses them with
+ * `deserializeInStoredOrder` and writes `inStoredOrder(document)` (field-order.ts).
  */
 export const LOSSLESS_DESERIALIZE_OPTIONS = {
   promoteValues: false,

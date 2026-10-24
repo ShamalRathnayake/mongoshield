@@ -19,16 +19,18 @@
  * error for each event it could not record exactly.
  */
 
-import { BSON, type Document, Long, type MongoClient } from "mongodb";
+import { type Document, Long, type MongoClient } from "mongodb";
 import {
   type ChangeEvent,
   collectionNamespaceOf,
   needsFullDocument,
+  serializeChangeEvent,
 } from "../engine/converge-events.ts";
 import { BINARY_COLLATION } from "../engine/converge-operations.ts";
+import { serverDatabaseFilter } from "../engine/converge-stream.ts";
 import { formatClusterTime, toTimestamp } from "../engine/converge-time.ts";
 import { throwIfAborted } from "../errors.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
+import { deserializeInStoredOrder, valueInStoredOrder } from "../format/field-order.ts";
 import type { Logger } from "../logger.ts";
 import {
   compileNamespaceRules,
@@ -45,9 +47,6 @@ import { INTERNAL_DATABASES } from "./change-stream.ts";
  */
 const SCRATCH_COLLECTION_PREFIX = "tmp.";
 
-/** Re-encoding an enriched event exactly as it was parsed (see `LOSSLESS_DESERIALIZE_OPTIONS`). */
-const SERIALIZE_OPTIONS = { checkKeys: false, ignoreUndefined: false } as const;
-
 /** Raw batches for the snapshot reads; int64 cursor ids stay Longs. */
 const RAW_BATCH_OPTIONS = {
   fieldsAsRaw: { firstBatch: true, nextBatch: true },
@@ -56,6 +55,8 @@ const RAW_BATCH_OPTIONS = {
 
 /** Decides which events the journal keeps. */
 export interface JournalScope {
+  /** `$match` run by the server, to skip whole databases cheaply (`serverDatabaseFilter`). */
+  readonly serverFilter: Document;
   /** True for collection namespaces whose changes are journaled. */
   keepsNamespace(ns: string): boolean;
   /** True for events that belong in the journal. */
@@ -110,7 +111,8 @@ export function createJournalScope(patterns: {
     return from !== undefined && to !== undefined && keepsNamespace(to) && !keepsNamespace(from);
   };
 
-  return { keepsNamespace, keeps, needsDestinationSnapshot };
+  const serverFilter = serverDatabaseFilter(rules, [], INTERNAL_DATABASES);
+  return { serverFilter, keepsNamespace, keeps, needsDestinationSnapshot };
 }
 
 /**
@@ -134,8 +136,7 @@ export async function storedEventBytes(
     );
     return raw;
   }
-  const enriched = { ...event.document, fullDocument: document };
-  return Buffer.from(BSON.serialize(enriched, SERIALIZE_OPTIONS));
+  return serializeChangeEvent({ ...event.document, fullDocument: document });
 }
 
 /** The changed document as of the event's cluster time, or undefined if it cannot be read. */
@@ -151,7 +152,8 @@ async function documentAt(
     const reply = await client.db(db).command(
       {
         find: collection,
-        filter: { _id: event.documentKey?._id },
+        // In stored field order: an embedded `_id` must match field by field.
+        filter: { _id: valueInStoredOrder(event.documentKey?._id) },
         limit: 1,
         singleBatch: true,
         collation: BINARY_COLLATION,
@@ -160,7 +162,8 @@ async function documentAt(
       { fieldsAsRaw: { firstBatch: true } },
     );
     const [found] = batchOf(reply, "firstBatch");
-    return found === undefined ? undefined : BSON.deserialize(found, LOSSLESS_DESERIALIZE_OPTIONS);
+    // Parsed with its stored field order, which `serializeChangeEvent` writes back.
+    return found === undefined ? undefined : deserializeInStoredOrder(found);
   } catch (error) {
     logger.debug("Reading a document at an update's cluster time failed", {
       ns: `${db}.${collection}`,
@@ -214,11 +217,9 @@ export async function openDestinationSnapshot(
   }
 
   const synthesized = (fields: Document): Buffer =>
-    Buffer.from(
-      BSON.serialize({ ...fields, clusterTime, ns, synthesized: true }, SERIALIZE_OPTIONS),
-    );
+    serializeChangeEvent({ ...fields, clusterTime, ns, synthesized: true });
   const insertOf = (raw: Uint8Array): Buffer => {
-    const fullDocument = BSON.deserialize(raw, LOSSLESS_DESERIALIZE_OPTIONS);
+    const fullDocument = deserializeInStoredOrder(raw);
     return synthesized({
       operationType: "insert",
       documentKey: { _id: fullDocument._id },

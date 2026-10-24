@@ -146,6 +146,40 @@ describe("replicateBackups", () => {
     expect(until?.getTime()).toBe(now.getTime() + 7 * 24 * 60 * 60 * 1000);
   });
 
+  it("validates concurrency and retainDays", async () => {
+    const primary = memoryStorage({ name: "primary" });
+    const offsite = memoryStorage({ name: "offsite", objectLock: true });
+    await expect(replicateBackups(primary, offsite, { concurrency: 0 })).rejects.toThrow(
+      /concurrency must be a whole number/,
+    );
+    await expect(replicateBackups(primary, offsite, { retainDays: 0.5 })).rejects.toThrow(
+      /retainDays must be a whole number/,
+    );
+  });
+
+  it("plans without writing in a dry run, and copies without verifying when asked", async () => {
+    const primary = memoryStorage({ name: "primary" });
+    const offsite = memoryStorage({ name: "offsite" });
+    await backupInto(primary);
+    await recordErasure(primary, {
+      namespace: `${sourceDb}.items`,
+      filter: { _id: 9 },
+      reason: "dry run erasure",
+    });
+    const dry = await replicateBackups(primary, offsite, { dryRun: true });
+    expect(dry.dryRun).toBe(true);
+    expect(dry.backups.map((backup) => backup.action)).toEqual(["would-copy"]);
+    let written = 0;
+    for await (const _object of offsite.list("")) written += 1;
+    expect(written).toBe(0);
+
+    const copied = await replicateBackups(primary, offsite, { verify: false });
+    expect(copied.backups.map((backup) => backup.action)).toEqual(["copied"]);
+    // Copied once: a second run finds everything in place.
+    const again = await replicateBackups(primary, offsite, { verify: false });
+    expect(again.backups.map((backup) => backup.action)).not.toContain("copied");
+  });
+
   it("refuses to replicate a location onto itself", async () => {
     const storage = memoryStorage({ name: "same" });
     await expect(replicateBackups(storage, storage)).rejects.toThrow(/onto itself/);

@@ -11,7 +11,10 @@
  * - Workers pull batches from one shared iterator. The data files are only read as
  *   fast as workers take batches, so backpressure reaches all the way to storage.
  * - Documents are parsed with `LOSSLESS_DESERIALIZE_OPTIONS`, so every BSON type is
- *   written back exactly as it was backed up (Int32 stays Int32, -0.0 stays -0.0, …).
+ *   written back exactly as it was backed up (Int32 stays Int32, -0.0 stays -0.0, …),
+ *   and in stored field order: a document with integer-like field names ("0", "1"),
+ *   which JavaScript objects would list first, is written as Maps in the order it was
+ *   stored (src/format/field-order.ts). Other documents are written as parsed.
  * - Inserts are unordered (the server keeps going after a failed document, and can
  *   apply the batch in parallel) and bypass document validation when allowed: the
  *   documents were valid when they were written, even if the validator changed since.
@@ -19,7 +22,6 @@
 
 import {
   type AnyBulkWriteOperation,
-  BSON,
   type Collection,
   type Document,
   MongoBulkWriteError,
@@ -28,8 +30,9 @@ import {
   type WriteError,
 } from "mongodb";
 import { abortError, isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
+import { documentId, inStoredOrder } from "../format/field-order.ts";
 import type { StoredFile } from "../format/manifest.ts";
+import { parseBackedUpDocument } from "./find-parse.ts";
 import { mapWithConcurrency } from "./pool.ts";
 import { openDocumentStream, type StoredBackupSource } from "./read-pipeline.ts";
 
@@ -223,20 +226,14 @@ export async function* batchDocuments(
   if (batch.length > 0) yield { documents: batch, bytes };
 }
 
-/** Parses raw documents losslessly. A document that does not parse means a damaged file. */
+/**
+ * Parses raw documents losslessly, recording the stored field order of the rare
+ * documents JavaScript would reorder. A document that does not parse means a
+ * damaged file (`MS_INTEGRITY_FAILED`).
+ */
 function parseBatch(raw: readonly Buffer[]): Document[] {
   const parsed: Document[] = [];
-  for (const bytes of raw) {
-    try {
-      parsed.push(BSON.deserialize(bytes, LOSSLESS_DESERIALIZE_OPTIONS));
-    } catch (error) {
-      throw new MongoShieldError(
-        "MS_INTEGRITY_FAILED",
-        `A backed-up document is not valid BSON: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error, hint: "The backup is damaged. Run `mongoshield verify` on it." },
-      );
-    }
-  }
+  for (const bytes of raw) parsed.push(parseBackedUpDocument(bytes));
   return parsed;
 }
 
@@ -249,9 +246,12 @@ async function writeBatch(options: WriteDocumentsOptions, documents: Document[])
   throwIfAborted(options.signal);
   // A transform may leave nothing to write; the driver rejects empty batches.
   if (documents.length === 0) return 0;
+  // After the transform (which reads and masks plain objects), so masked values are
+  // written in stored order too.
+  const ordered = documents.map((document) => inStoredOrder(document));
   try {
-    if (options.mode === "upsert") return await upsertBatch(options, documents);
-    return await insertBatch(options, documents);
+    if (options.mode === "upsert") return await upsertBatch(options, ordered);
+    return await insertBatch(options, ordered);
   } catch (error) {
     throw toWriteError(options.collection, error);
   }
@@ -288,20 +288,26 @@ async function insertBatch(options: WriteDocumentsOptions, documents: Document[]
   }
 }
 
-/** Replaces each document by `_id`, inserting it when missing. */
+/**
+ * Replaces each document by `_id`, inserting it when missing. Documents may be Maps
+ * (see `inStoredOrder`), so the `_id` is read with `documentId`; it is then in stored
+ * order itself, which the filter needs to match an embedded-document `_id`.
+ */
 async function upsertBatch(options: WriteDocumentsOptions, documents: Document[]): Promise<number> {
-  const operations: AnyBulkWriteOperation[] = documents.map((document) =>
-    document._id === undefined
+  const operations: AnyBulkWriteOperation[] = documents.map((document) => {
+    const id = documentId(document);
+    const filter: Document = { _id: id };
+    return id === undefined
       ? { insertOne: { document } }
       : {
           replaceOne: {
-            filter: { _id: document._id },
+            filter,
             replacement: document,
             upsert: true,
             collation: BINARY_COLLATION,
           },
-        },
-  );
+        };
+  });
   const result = await options.collection.bulkWrite(operations, writeOptions(options));
   // matched = replaced (even when identical), upserted = newly inserted.
   return result.matchedCount + result.upsertedCount + result.insertedCount;

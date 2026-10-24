@@ -55,6 +55,7 @@ import {
   describeDeployment,
   discoverNamespaces,
 } from "../mongo/index.ts";
+import { compileNamespaceRules, explicitlyNamedDatabases } from "../mongo/namespace-filter.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import type {
   BackupOptions,
@@ -84,6 +85,7 @@ import {
   planFromCheckpoint,
   planNamespace,
   runPendingParts,
+  vanishedNamespaces,
 } from "./backup-dump.ts";
 import { toBackupError } from "./backup-errors.ts";
 import { type FileEncryption, prepareFileEncryption } from "./backup-key.ts";
@@ -97,6 +99,7 @@ import {
   validateBackupOptions,
   validateRunSettings,
 } from "./backup-options.ts";
+import { deleteOrphans } from "./backup-orphans.ts";
 import { resolveReadPreference } from "./backup-reads.ts";
 import { CheckpointSaver, findCheckpointToResume, resumeFileEncryption } from "./backup-resume.ts";
 import type { BackupContext } from "./context.ts";
@@ -178,6 +181,7 @@ export async function runBackup(
           logger,
           resume: options.resume,
           fingerprint,
+          labels: options.labels ?? {},
           deployment,
           signal,
         });
@@ -287,6 +291,8 @@ export async function runBackup(
       rateLimiter: createRateLimiter(options),
       retainUntil,
       writtenKeys,
+      // A collection dropped or replaced mid-dump (see ReplacedCollectionPolicy).
+      whenReplaced: mode === "converge" ? "keep-partial" : mode === "none" ? "retry" : "fail",
     };
 
     // 6. Plan: metadata files and part boundaries (or the plan of the checkpoint).
@@ -354,14 +360,20 @@ export async function runBackup(
         mode,
         clusterTime: consistency.clusterTime,
         window,
-        warning: settings.resumable
-          ? resumableWarning(options, origin.startedAt, completedAt, checkpoint)
-          : choice.warning,
+        warning: withVanishedWarning(
+          settings.resumable
+            ? resumableWarning(options, origin.startedAt, completedAt, checkpoint)
+            : choice.warning,
+          vanishedNamespaces(plans),
+        ),
       },
       compression: context.compression,
       encryption,
       labels,
-      namespaces: [...plans.map((plan) => namespaceEntry(plan)), ...authzEntries],
+      namespaces: [
+        ...plans.filter((plan) => plan.vanished !== true).map((plan) => namespaceEntry(plan)),
+        ...authzEntries,
+      ],
       immutableUntil: retainUntil,
     });
     // The caller's last word (e.g. the backup guard). A throw takes the failure path
@@ -369,6 +381,9 @@ export async function runBackup(
     refusedBeforeCommit = true;
     await options.beforeCommit?.(manifest, signal === undefined ? {} : { signal });
     refusedBeforeCommit = false;
+    // Every part and file has settled: drop what the manifest does not reference
+    // (e.g. a part of a dropped collection that finished uploading late).
+    await deleteOrphans(storage, manifest, logger, signal);
     manifestAttempted = true;
     await writeManifest(storage, manifest, {
       ...(signal === undefined ? {} : { signal }),
@@ -428,6 +443,16 @@ function resumableConsistency(options: BackupOptions): ConsistencyChoice {
       ? 'Consistency "auto" used "none": a resumable backup (maxDurationMs/resume) reads its collections over several invocations.'
       : undefined,
   };
+}
+
+/** Adds the namespaces dropped while they were backed up (mode `none`) to the warning. */
+function withVanishedWarning(
+  warning: string | undefined,
+  vanished: readonly string[],
+): string | undefined {
+  if (vanished.length === 0) return warning;
+  const note = `Left out because they were dropped while the backup ran: ${vanished.join(", ")}.`;
+  return warning === undefined ? note : `${warning} ${note}`;
 }
 
 /** The manifest warning of a resumable run, naming the time span its reads covered. */
@@ -592,7 +617,10 @@ async function selectNamespaces(
     logger,
   }).catch(rethrowTyped);
 
-  if (specs.length === 0) throw await nothingMatchedError(context, options);
+  if (specs.length === 0) {
+    await assertNamedDatabasesReadable(context, options);
+    throw await nothingMatchedError(context, options);
+  }
   assertQueriesMatchNamespaces(
     options.query,
     specs.map((spec) => spec.ns),
@@ -609,6 +637,24 @@ async function selectNamespaces(
 
   logger.debug("Selected namespaces", { namespaces: specs.map((spec) => spec.ns) });
   return specs;
+}
+
+/**
+ * When nothing matched, the user may simply not be allowed to see the databases the
+ * include patterns name: `listCollections` only returns what a user may read, so a
+ * database it may not read looks empty rather than refused. Says so instead of
+ * blaming the patterns.
+ *
+ * @throws MS_PERMISSION_DENIED when a literally named database is not readable.
+ */
+async function assertNamedDatabasesReadable(
+  context: BackupContext,
+  options: BackupOptions,
+): Promise<void> {
+  const rules = compileNamespaceRules({ include: options.include, exclude: options.exclude });
+  const databases = [...explicitlyNamedDatabases(rules)];
+  if (databases.length === 0) return;
+  await assertPrivileges(context.client, { operation: "backup", databases }).catch(rethrowTyped);
 }
 
 /** Builds the "nothing matched" error, listing what does exist to help fix the patterns. */

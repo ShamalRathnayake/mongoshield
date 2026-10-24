@@ -1,0 +1,1 @@
+{"timeseries":{"timeField":"t","metaField":"m","granularity":"hours","bucketMaxSpanSeconds":{"$numberInt":"2592000"}}}

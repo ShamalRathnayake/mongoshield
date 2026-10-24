@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readAnnotations } from "../../../src/catalog/annotations.ts";
+import { setKmsClientFactory } from "../../../src/crypto/kms/registry.ts";
+import { MongoShieldError } from "../../../src/errors.ts";
 import { rekeyBackups } from "../../../src/extras/rekey.ts";
 import { resolveBackupKey } from "../../../src/format/layout.ts";
 import { generateIdentity, isMongoShieldError, MongoShield } from "../../../src/index.ts";
@@ -200,6 +202,155 @@ describe("rekeyBackups", () => {
       kms.denied.add(newKmsKey);
       kms.denied.delete(AWS_KEY);
       await expect(shield.verify({ backup: backup.id, mode: "deep" })).rejects.toThrow();
+    } finally {
+      uninstall();
+    }
+  });
+
+  it("stops waiting on a slow KMS when the rekey is aborted", async () => {
+    const kms = new FakeKms();
+    const uninstall = installFakeKms(kms);
+    const storage = memoryStorage();
+    let backupId: string;
+    try {
+      const shield = shieldFor(storage, { kms: [{ provider: "aws", key: AWS_KEY }] });
+      backupId = (await shield.backup({ include: [`${sourceDb}.orders`], consistency: "none" })).id;
+    } finally {
+      uninstall();
+    }
+    // A KMS that answers after a minute, unless the call's signal fires first.
+    const signals: (AbortSignal | undefined)[] = [];
+    const slow = (options: { readonly signal?: AbortSignal | undefined } | undefined) =>
+      new Promise<never>((_resolve, reject) => {
+        signals.push(options?.signal);
+        const timer = setTimeout(() => reject(new Error("the KMS answered late")), 60_000);
+        timer.unref();
+        options?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new MongoShieldError("MS_ABORTED", "aborted"));
+        });
+      });
+    const restore = setKmsClientFactory("aws", (ref) => ({
+      provider: "aws",
+      key: ref.key,
+      encryptDataKey: (_key, options) => slow(options),
+      decryptDataKey: (_wrapped, options) => slow(options),
+    }));
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 200).unref();
+      const started = Date.now();
+      const error = await rekeyBackups(storage, {
+        backups: [backupId],
+        addKms: [{ provider: "aws", key: otherAwsKey() }],
+        signal: controller.signal,
+      }).catch((caught: unknown) => caught);
+      expect(isMongoShieldError(error, "MS_ABORTED")).toBe(true);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(signals.length).toBeGreaterThan(0);
+      expect(signals.every((signal) => signal?.aborted === true)).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects an empty new passphrase and refuses to rekey an unencrypted backup", async () => {
+    const storage = memoryStorage();
+    const shield = shieldFor(storage, undefined);
+    const backup = await shield.backup({ include: [`${sourceDb}.orders`], consistency: "none" });
+    await expect(rekeyBackups(storage, { backups: "all", newPassphrase: "" })).rejects.toThrow(
+      /new passphrase is empty/,
+    );
+    const named = await rekeyBackups(storage, {
+      backups: [backup.id],
+      addRecipients: [generateIdentity().recipient],
+    }).catch((error: unknown) => error);
+    expect(isMongoShieldError(named, "MS_CONFIG_INVALID")).toBe(true);
+    expect(String(named)).toContain("it is not encrypted");
+    expect(isMongoShieldError(named) && named.hint).toContain("restore it into a scratch database");
+    const all = await rekeyBackups(storage, {
+      backups: "all",
+      addRecipients: [generateIdentity().recipient],
+    });
+    expect(all.backups[0]).toMatchObject({ action: "skipped", recipients: [] });
+  });
+
+  it("skips recipient backups for passphrase and KMS changes, and keeps one recipient", async () => {
+    const storage = memoryStorage();
+    const key = generateIdentity();
+    const shield = shieldFor(storage, { recipients: [key.recipient] });
+    await shield.backup({ include: [`${sourceDb}.orders`], consistency: "none" });
+
+    const passphrase = await rekeyBackups(storage, { backups: "all", newPassphrase: "new one" });
+    expect(passphrase.backups[0]?.reason).toMatch(/only recipients can be added or removed/);
+    const kms = await rekeyBackups(storage, {
+      backups: "all",
+      addKms: [{ provider: "aws", key: AWS_KEY }],
+    });
+    expect(kms.backups[0]?.reason).toMatch(/only recipients/);
+    const none = await rekeyBackups(storage, {
+      backups: "all",
+      removeRecipients: [key.recipient],
+    });
+    expect(none.backups[0]?.reason).toMatch(/no recipient that can open it/);
+    const unchanged = await rekeyBackups(storage, {
+      backups: "all",
+      addRecipients: [key.recipient],
+    });
+    expect(unchanged.backups[0]?.action).toBe("unchanged");
+    await expect(
+      rekeyBackups(storage, { backups: "all", addRecipients: [generateIdentity().recipient] }),
+    ).rejects.toSatisfy((error) => isMongoShieldError(error, "MS_NO_IDENTITY"));
+  });
+
+  it("needs the current passphrase to change it", async () => {
+    const storage = memoryStorage();
+    const shield = shieldFor(storage, { passphrase: "the current passphrase" });
+    await shield.backup({ include: [`${sourceDb}.orders`], consistency: "none" });
+    await expect(
+      rekeyBackups(storage, { backups: "all", newPassphrase: "the next passphrase" }),
+    ).rejects.toSatisfy(
+      (error) =>
+        isMongoShieldError(error, "MS_NO_IDENTITY") && /current passphrase/.test(String(error)),
+    );
+  });
+
+  it("keeps KMS backups protected by at least one KMS key and opens them with a recovery identity", async () => {
+    const kms = new FakeKms();
+    const uninstall = installFakeKms(kms);
+    try {
+      const storage = memoryStorage();
+      const recovery = generateIdentity();
+      const shield = shieldFor(storage, {
+        kms: [{ provider: "aws", key: AWS_KEY }],
+        recipients: [recovery.recipient],
+      });
+      const backup = await shield.backup({ include: [`${sourceDb}.orders`], consistency: "none" });
+
+      const passphrase = await rekeyBackups(storage, { backups: "all", newPassphrase: "x" });
+      expect(passphrase.backups[0]?.reason).toMatch(/protected with KMS keys/);
+      const noKey = await rekeyBackups(storage, {
+        backups: "all",
+        removeKms: [{ provider: "aws", key: AWS_KEY }],
+      });
+      expect(noKey.backups[0]?.reason).toMatch(/no KMS key on its key file/);
+      const same = await rekeyBackups(storage, {
+        backups: "all",
+        addKms: [{ provider: "aws", key: AWS_KEY }],
+      });
+      expect(same.backups[0]?.action).toBe("unchanged");
+
+      // A recovery identity opens the content files without asking the KMS.
+      kms.denied.add(AWS_KEY);
+      const other = generateIdentity();
+      const result = await rekeyBackups(storage, {
+        backups: [backup.id],
+        addRecipients: [other.recipient],
+        removeRecipients: [recovery.recipient],
+        decryption: { identities: [recovery.identity] },
+      });
+      expect(result.backups[0]?.recipients).toEqual([`kms:aws:${AWS_KEY}`, other.recipient]);
+      expect(await restoreCount(shield, backup.id, { identities: [other.identity] })).toBe(2);
     } finally {
       uninstall();
     }

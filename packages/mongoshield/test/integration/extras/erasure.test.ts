@@ -4,7 +4,7 @@
  * through `withErasures` exactly as `shield.restore` will use it.
  */
 
-import { ObjectId } from "mongodb";
+import { Decimal128, Double, Int32, Long, ObjectId } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   applyErasures,
@@ -191,9 +191,75 @@ describe("the erasure ledger", () => {
     ).toEqual(["new"]);
   });
 
+  it("needs a reason for every erasure", async () => {
+    await expect(
+      recordErasure(memoryStorage(), {
+        namespace: "app.users",
+        filter: { email: "ada@example.com" },
+        reason: "   ",
+      }),
+    ).rejects.toThrow(/needs a reason/);
+  });
+
   it("treats an unreadable ledger record as an error", async () => {
     const storage = memoryStorage();
     await storage.put("erasures/broken.json", Buffer.from("{ not json"));
     await expect(listErasures(storage)).rejects.toThrow(/cannot be read/);
+  });
+});
+
+describe("hashed erasures on numeric ids", () => {
+  it("delete exactly the documents whose numbers equal the recorded ones, whatever their type", async () => {
+    const database = uniqueDb("erase_numbers");
+    const accounts = client()
+      .db(database)
+      .collection<{ _id: number; [field: string]: unknown }>("accounts");
+    // 2^62 is held exactly by a double; 2^53 + 1 by no double.
+    const twoTo62 = Long.fromString("4611686018427387904");
+    const twoTo53Plus1 = Long.fromString("9007199254740993");
+    await accounts.insertMany([
+      { _id: 1, email: "ada@example.com", account: new Double(2 ** 62) },
+      { _id: 2, email: "ada@example.com", account: twoTo62.add(1) },
+      { _id: 3, email: "bob@example.com", account: twoTo53Plus1 },
+      { _id: 4, email: "bob@example.com", account: Long.fromString("9007199254740992") },
+      { _id: 5, email: "carol@example.com", tenant: Decimal128.fromString("7.00") },
+      { _id: 6, email: "carol@example.com", tenant: new Int32(7) },
+      { _id: 7, email: "carol@example.com", tenant: Decimal128.fromString("7.01") },
+      { _id: 8, email: "dan@example.com", share: Decimal128.fromString("0.1") },
+      { _id: 9, email: "dan@example.com", share: new Double(0.1) },
+    ]);
+    const storage = memoryStorage();
+    const erasures = [
+      { email: "ada@example.com", account: twoTo62 },
+      { email: "bob@example.com", account: twoTo53Plus1 },
+      { email: "carol@example.com", tenant: Decimal128.fromString("7") },
+      { email: "dan@example.com", share: Decimal128.fromString("0.10") },
+    ];
+    for (const filter of erasures) {
+      await recordErasure(storage, {
+        namespace: `${database}.accounts`,
+        filter,
+        reason: "numbers",
+        secret: SECRET,
+      });
+    }
+    try {
+      // The server is the reference: what each filter matches there must be deleted.
+      const expected = new Set<unknown>();
+      for (const filter of erasures) {
+        for (const document of await accounts.find(filter).toArray()) expected.add(document._id);
+      }
+      expect([...expected].sort()).toEqual([1, 3, 5, 6, 8]);
+
+      const result = await applyErasures(client(), storage, {
+        namespaces: [`${database}.accounts`],
+        secret: SECRET,
+      });
+      expect(result.documentsDeleted).toBe(expected.size);
+      const left = await accounts.find().sort({ _id: 1 }).toArray();
+      expect(left.map((document) => document._id)).toEqual([2, 4, 7, 9]);
+    } finally {
+      await client().db(database).dropDatabase();
+    }
   });
 });

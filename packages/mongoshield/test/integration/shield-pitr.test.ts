@@ -19,7 +19,7 @@ import type { CliIo } from "../../src/cli/io.ts";
 import { runCli } from "../../src/cli/run.ts";
 import { readClusterTime } from "../../src/engine/converge-time.ts";
 import type { ClusterTime } from "../../src/format/manifest.ts";
-import { loadJournalCoverage } from "../../src/journal/index.ts";
+import { loadJournalCoverage, planPointInTimeRestore } from "../../src/journal/index.ts";
 import { MongoShield } from "../../src/shield.ts";
 import { fileStorage } from "../../src/storage/file.ts";
 import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
@@ -238,6 +238,36 @@ describe("mongoshield restore --at", () => {
 });
 
 describe("shield.prune with a journal", () => {
+  it("keeps the journal segments another scope's base backup still needs", async () => {
+    const before = await loadJournalCoverage(shield.storage);
+    expect(before.segments.length).toBeGreaterThan(1);
+
+    // Two newer base backups of another selection (scope "team=other"). Pruning that
+    // scope to one backup must not touch `baseId` (outside the scope), so the journal
+    // segments from `baseId` onwards are still needed and must stay: a restore to
+    // `beforeDisaster` still starts from `baseId` and replays them.
+    const other = { team: "other" };
+    await shield.backup({ include: [`${source}.users`], consistency: "converge", labels: other });
+    const newer = await shield.backup({
+      include: [`${source}.users`],
+      consistency: "converge",
+      labels: other,
+    });
+    const result = await shield.prune({ last: 1 }, { scope: { labels: other } });
+    expect(result.deletedBackups).toBe(1);
+    expect(result.outOfScope.map((backup) => backup.id)).toEqual([baseId]);
+    expect((await shield.list()).map((entry) => entry.id).sort()).toEqual(
+      [baseId, newer.id].sort(),
+    );
+
+    const plan = await planPointInTimeRestore(shield.storage, beforeDisaster);
+    expect(plan.baseBackupId).toBe(baseId);
+    // Only segments that end before `baseId` may have gone; the newest always stays.
+    const after = await loadJournalCoverage(shield.storage);
+    expect(after.segments.at(-1)?.key).toBe(before.segments.at(-1)?.key);
+    expect(after.segments.length).toBeGreaterThan(1);
+  });
+
   it("removes journal segments older than the oldest kept base backup, but never the newest", async () => {
     const before = await loadJournalCoverage(shield.storage);
     expect(before.segments.length).toBeGreaterThan(1);
@@ -247,7 +277,8 @@ describe("shield.prune with a journal", () => {
     // every journaled segment ends before the oldest base and could be removed.
     await shield.backup({ include: [`${source}.*`], consistency: "converge" });
     const result = await shield.prune({ last: 1 });
-    expect(result.deletedBackups).toBe(1);
+    // `baseId` and the other scope's remaining backup (from the test above).
+    expect(result.deletedBackups).toBe(2);
 
     const after = await loadJournalCoverage(shield.storage);
     expect(after.segments.map((segment) => segment.key)).toEqual([newest?.key]);

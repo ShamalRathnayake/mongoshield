@@ -321,7 +321,7 @@ class SegmentReader {
   async #open(): Promise<Readable> {
     const { key, encrypted, compression } = this.#segment;
     const stages: Transform[] = [this.#hasher()];
-    if (encrypted) stages.push(createSegmentDecryptor(this.#decryption));
+    if (encrypted) stages.push(createSegmentDecryptor(this.#decryption, this.#signal));
     stages.push(createDecompressor(compression));
     const splitter = createBsonSplitter();
     const stored = await this.#storage.get(

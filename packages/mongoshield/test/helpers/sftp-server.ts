@@ -116,8 +116,8 @@ interface Ssh2ForTests {
   ) => SshServer;
   utils: {
     generateKeyPairSync(
-      type: "ed25519",
-      options?: { passphrase: string; cipher: string; rounds: number },
+      type: HostKeyType,
+      options?: { passphrase?: string; cipher?: string; rounds?: number; bits?: number },
     ): { private: string; public: string };
     parseKey(key: string | Buffer, passphrase?: string): ParsedKey | Error;
     sftp: { flagsToString(flags: number): string | null };
@@ -127,6 +127,18 @@ interface Ssh2ForTests {
 // ssh2 is CommonJS and ships no type declarations; describe what we use above.
 const ssh2: Ssh2ForTests = createRequire(import.meta.url)("ssh2");
 
+/** Key types the test server can use as host keys. */
+export type HostKeyType = "ed25519" | "ecdsa" | "rsa";
+
+/** Options for {@link startSftpServer}. */
+export interface TestSftpServerOptions {
+  /**
+   * The server's host key types, in order (default: one ed25519 key). With
+   * several, the client's preference decides which one the server presents.
+   */
+  readonly hostKeyTypes?: readonly HostKeyType[];
+}
+
 /** A running test server and everything a client needs to connect to it. */
 export interface TestSftpServer {
   readonly host: string;
@@ -134,8 +146,13 @@ export interface TestSftpServer {
   readonly username: string;
   /** The client's private key (OpenSSH format, unencrypted). */
   readonly privateKey: string;
-  /** The server's host key fingerprint, `SHA256:…`. */
+  /** The server's (first) host key fingerprint, `SHA256:…`. */
   readonly hostFingerprint: string;
+  /**
+   * Every host key as a known_hosts key field pair, `<type> <base64 blob>`, in the
+   * order of `hostKeyTypes`. Prefix a host pattern to get a known_hosts line.
+   */
+  readonly hostPublicKeys: readonly string[];
   /** Ready-made `sftpStorage` options (all but `path`). */
   readonly clientOptions: {
     host: string;
@@ -156,16 +173,22 @@ export interface TestSftpServer {
 }
 
 /** Starts the server on a random port on 127.0.0.1. */
-export async function startSftpServer(): Promise<TestSftpServer> {
+export async function startSftpServer(
+  options: TestSftpServerOptions = {},
+): Promise<TestSftpServer> {
   const username = "tester";
-  const hostKey = generateUsableKeyPair();
+  const hostKeys = (options.hostKeyTypes ?? ["ed25519"]).map((type) =>
+    generateUsableKeyPair(undefined, type),
+  );
+  const hostKey = hostKeys[0];
+  if (hostKey === undefined) throw new Error("startSftpServer needs at least one host key type");
   const clientKey = generateUsableKeyPair();
   const authorizedKeys: ParsedKey[] = [parsedKey(clientKey.public)];
   const connections = new Set<ServerConnection>();
   let accepted = 0;
   const counters = { posixRenames: 0 };
 
-  const server = new ssh2.Server({ hostKeys: [hostKey.private] }, (connection) => {
+  const server = new ssh2.Server({ hostKeys: hostKeys.map((key) => key.private) }, (connection) => {
     accepted++;
     connections.add(connection);
     connection
@@ -184,6 +207,10 @@ export async function startSftpServer(): Promise<TestSftpServer> {
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const port = server.address().port;
   const hostFingerprint = fingerprintOf(parsedKey(hostKey.public).getPublicSSH());
+  const hostPublicKeys = hostKeys.map((key) => {
+    const parsed = parsedKey(key.public);
+    return `${parsed.type} ${parsed.getPublicSSH().toString("base64")}`;
+  });
   const clientOptions = {
     host: "127.0.0.1",
     port,
@@ -195,6 +222,7 @@ export async function startSftpServer(): Promise<TestSftpServer> {
   return {
     ...clientOptions,
     clientOptions,
+    hostPublicKeys,
     authorizeNewKey(passphrase) {
       const pair = generateUsableKeyPair(
         passphrase === undefined ? undefined : { passphrase, cipher: "aes256-ctr", rounds: 4 },
@@ -218,17 +246,22 @@ export async function startSftpServer(): Promise<TestSftpServer> {
 const KEY_GENERATION_ATTEMPTS = 20;
 
 /**
- * An ed25519 key pair that ssh2 can read back. ssh2's own `generateKeyPairSync`
+ * A key pair (ed25519 unless asked otherwise) that ssh2 can read back. ssh2's own `generateKeyPairSync`
  * occasionally produces a public key its parser rejects as "Malformed OpenSSH public
  * key" (seen on CI, roughly one run in several hundred). The test server only needs
  * some valid key, so it generates again until both halves parse.
  */
-function generateUsableKeyPair(options?: { passphrase: string; cipher: string; rounds: number }): {
+function generateUsableKeyPair(
+  options?: { passphrase: string; cipher: string; rounds: number },
+  type: HostKeyType = "ed25519",
+): {
   private: string;
   public: string;
 } {
+  // ECDSA and RSA need a size; P-256 and 2048 bits are the common server defaults.
+  const sized = type === "ecdsa" ? { bits: 256 } : type === "rsa" ? { bits: 2048 } : {};
   for (let attempt = 1; attempt <= KEY_GENERATION_ATTEMPTS; attempt++) {
-    const pair = ssh2.utils.generateKeyPairSync("ed25519", options);
+    const pair = ssh2.utils.generateKeyPairSync(type, { ...sized, ...options });
     const publicKey = ssh2.utils.parseKey(pair.public);
     const privateKey = ssh2.utils.parseKey(pair.private, options?.passphrase);
     if (!(publicKey instanceof Error) && !(privateKey instanceof Error)) return pair;

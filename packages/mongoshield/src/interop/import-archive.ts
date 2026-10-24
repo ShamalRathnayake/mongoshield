@@ -5,6 +5,9 @@
  *   bytes → (gunzip) → createArchiveReader → events
  *     prelude         → decide what to import, write every metadata file
  *     document        → the namespace's writer: count → coalesce → compress → (encrypt) → storage
+ *                       (time-series buckets are unpacked first; users and roles are
+ *                       collected for their entries; oplog entries are converted to
+ *                       change events, see import-oplog.ts)
  *     namespaceEnd    → end that writer
  *
  * mongodump interleaves the blocks of several collections, so several namespace
@@ -19,6 +22,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { PassThrough, pipeline, Readable, type Transform } from "node:stream";
 import { createDecompressor } from "../compression/index.ts";
+import type { CapturedWindow } from "../engine/converge-capture.ts";
 import { mapWithConcurrency } from "../engine/pool.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
 import type { NamespaceEntry, StoredFile } from "../format/manifest.ts";
@@ -26,7 +30,9 @@ import type { NamespaceFilter } from "../mongo/index.ts";
 import { type ArchiveEvent, type ArchivePreludeEvent, dataCollectionOf } from "./archive-format.ts";
 import { createArchiveReader } from "./archive-reader.ts";
 import { parseDumpMetadata } from "./dump-metadata.ts";
-import { skipReason } from "./import-rules.ts";
+import { AuthzCollector } from "./import-authz.ts";
+import { IGNORED_OPLOG_REASON, importOplog } from "./import-oplog.ts";
+import { importRole, ORPHAN_BUCKETS_REASON } from "./import-rules.ts";
 import {
   caseSuffixesByNamespace,
   type ImportedData,
@@ -38,6 +44,7 @@ import {
   writeImportedData,
   writeImportedMetadata,
 } from "./import-target.ts";
+import { createBucketUnpacker, timeSeriesSettings } from "./timeseries-buckets.ts";
 
 /** Metadata files written at the same time (they are tiny; this hides storage latency). */
 const METADATA_WRITE_CONCURRENCY = 8;
@@ -69,6 +76,9 @@ export interface OpenedArchive {
 /** What importing an archive produced. */
 export interface ArchiveImportOutcome {
   readonly entries: NamespaceEntry[];
+  readonly authzEntries: NamespaceEntry[];
+  /** The converted oplog of `mongodump --oplog --archive`, when there was one. */
+  readonly window: CapturedWindow | undefined;
   readonly skipped: SkippedNamespace[];
   readonly serverVersion: string | undefined;
   readonly toolVersion: string | undefined;
@@ -118,9 +128,9 @@ export async function importArchive(
   archive: OpenedArchive,
   target: ImportTarget,
   filter: NamespaceFilter,
-  signal: AbortSignal,
+  options: { readonly ignoreOplog: boolean; readonly signal: AbortSignal },
 ): Promise<ArchiveImportOutcome> {
-  const run = new ArchiveImportRun(target, filter, signal);
+  const run = new ArchiveImportRun(target, filter, options);
   return run.execute(archive);
 }
 
@@ -138,6 +148,12 @@ interface NamespaceWriter {
   readonly done: Promise<ImportedData>;
 }
 
+/** The writer of the converted oplog (`mongodump --oplog`): documents are oplog entries. */
+interface OplogWriter {
+  readonly input: PassThrough;
+  readonly done: Promise<CapturedWindow | undefined>;
+}
+
 /** State of one archive import; `execute` runs it from start to end. */
 class ArchiveImportRun {
   readonly #target: ImportTarget;
@@ -148,15 +164,28 @@ class ArchiveImportRun {
   /** Planned namespaces by data namespace (`db.collection` of their documents). */
   readonly #planned = new Map<string, PlannedNamespace>();
   readonly #writers = new Map<string, NamespaceWriter>();
+  /** Data namespaces holding users or roles (`admin.system.users`, `app.$admin.system.roles`, …). */
+  readonly #authzNamespaces = new Map<string, "users" | "roles">();
+  readonly #authz: AuthzCollector;
+  /** The data namespace of the oplog (db "", see archive-format.ts), when it is imported. */
+  #oplogKey: string | undefined;
+  #oplog: OplogWriter | undefined;
   #prelude: ArchivePreludeEvent | undefined;
   #failure: { readonly error: unknown } | undefined;
 
   readonly #signal: AbortSignal;
+  readonly #ignoreOplog: boolean;
 
-  constructor(target: ImportTarget, filter: NamespaceFilter, signal: AbortSignal) {
+  constructor(
+    target: ImportTarget,
+    filter: NamespaceFilter,
+    options: { readonly ignoreOplog: boolean; readonly signal: AbortSignal },
+  ) {
     this.#target = target;
     this.#filter = filter;
-    this.#signal = signal;
+    this.#signal = options.signal;
+    this.#ignoreOplog = options.ignoreOplog;
+    this.#authz = new AuthzCollector(filter);
   }
 
   async execute(archive: OpenedArchive): Promise<ArchiveImportOutcome> {
@@ -175,8 +204,12 @@ class ArchiveImportRun {
       }
       this.#throwIfFailed();
       const entries = await this.#finishWriters();
+      const authzEntries = await this.#authz.write(this.#target, this.#controller.signal);
+      const window = await this.#oplog?.done;
       return {
         entries,
+        authzEntries,
+        window,
         skipped: this.#skipped,
         serverVersion: this.#prelude?.header.serverVersion || undefined,
         toolVersion: this.#prelude?.header.toolVersion || undefined,
@@ -187,7 +220,10 @@ class ArchiveImportRun {
       this.#fail(cause);
       reader.destroy();
       // Wait until every writer has stopped, so nothing runs on after we return.
-      await Promise.allSettled([...this.#writers.values()].map((writer) => writer.done));
+      await Promise.allSettled([
+        ...[...this.#writers.values()].map((writer) => writer.done),
+        ...(this.#oplog === undefined ? [] : [this.#oplog.done]),
+      ]);
       throw cause;
     } finally {
       this.#signal.removeEventListener("abort", forwardAbort);
@@ -204,13 +240,26 @@ class ArchiveImportRun {
         this.#writerFor(`${event.db}.${event.collection}`);
         return;
       case "document": {
-        const writer = this.#writerFor(`${event.db}.${event.collection}`);
+        const key = `${event.db}.${event.collection}`;
+        if (key === this.#oplogKey) {
+          await this.#write(this.#oplogWriter(), event.document);
+          return;
+        }
+        const authzKind = this.#authzNamespaces.get(key);
+        if (authzKind !== undefined) {
+          this.#authz.add(authzKind, event.document, `the archive namespace ${key}`);
+          return;
+        }
+        const writer = this.#writerFor(key);
         if (writer !== undefined) await this.#write(writer, event.document);
         return;
       }
-      case "namespaceEnd":
-        this.#writers.get(`${event.db}.${event.collection}`)?.input.end();
+      case "namespaceEnd": {
+        const key = `${event.db}.${event.collection}`;
+        if (key === this.#oplogKey) this.#oplogWriter().input.end();
+        else this.#writers.get(key)?.input.end();
         return;
+      }
     }
   }
 
@@ -219,25 +268,34 @@ class ArchiveImportRun {
     const selected: Omit<ImportNamespace, "uniqueSuffix">[] = [];
     for (const entry of prelude.collections) {
       if (entry.db === "") {
-        this.#skipped.push({
-          ns: entry.collection,
-          reason: "oplog from `mongodump --oplog`; replaying it is not supported",
-        });
+        // The oplog of `mongodump --oplog` (db "", collection "oplog").
+        if (this.#ignoreOplog)
+          this.#skipped.push({ ns: entry.collection, reason: IGNORED_OPLOG_REASON });
+        else this.#oplogKey = `.${entry.collection}`;
         continue;
       }
       const ns = `${entry.db}.${entry.collection}`;
-      if (!this.#filter(ns)) continue;
+      const role = importRole(entry.db, entry.collection);
+      if (role.kind === "users" || role.kind === "roles") {
+        // Filtered per user and role, by their database (import-authz.ts).
+        this.#authzNamespaces.set(ns, role.kind);
+        continue;
+      }
+      if (!this.#filter(role.kind === "buckets" ? `${entry.db}.${role.collection}` : ns)) continue;
+      if (role.kind !== "namespace") {
+        // mongodump never announces bucket data on its own: its collection is missing.
+        this.#skipped.push({
+          ns,
+          reason: role.kind === "skip" ? role.reason : ORPHAN_BUCKETS_REASON,
+        });
+        continue;
+      }
       // An entry without metadata (rare) takes its type from the prelude entry.
       const text =
         entry.metadata === "" && entry.type !== ""
           ? JSON.stringify({ type: entry.type })
           : entry.metadata;
       const metadata = parseDumpMetadata(text, entry.collection, `the archive metadata of ${ns}`);
-      const reason = skipReason(entry.collection, metadata.type);
-      if (reason !== undefined) {
-        this.#skipped.push({ ns, reason });
-        continue;
-      }
       selected.push({ db: entry.db, collection: entry.collection, metadata });
     }
 
@@ -281,15 +339,35 @@ class ArchiveImportRun {
   }
 
   #openWriter(namespace: ImportNamespace, input: PassThrough): NamespaceWriter {
-    this.#target.progress.startNamespace(namespaceOf(namespace), 0);
-    const done = writeImportedData(this.#target, namespace, input, [], this.#controller.signal);
+    const ns = namespaceOf(namespace);
+    this.#target.progress.startNamespace(ns, 0);
+    // Time-series data arrives as bucket documents; the backup stores measurements.
+    const unpack =
+      namespace.metadata.type === "timeseries"
+        ? [createBucketUnpacker(timeSeriesSettings(namespace.metadata, ns), ns)]
+        : [];
+    const done = writeImportedData(this.#target, namespace, input, unpack, this.#controller.signal);
     // Record the first failure and stop everything else; the loop rethrows it.
     done.catch((error: unknown) => this.#fail(error));
     return { input, done };
   }
 
+  /** The oplog's writer, opened on first use. */
+  #oplogWriter(): OplogWriter {
+    if (this.#oplog !== undefined) return this.#oplog;
+    const input = new PassThrough({ objectMode: true, highWaterMark: WRITER_BUFFER_DOCUMENTS });
+    const done = importOplog(this.#target, input, [], {
+      filter: this.#filter,
+      where: "the oplog of the archive",
+      signal: this.#controller.signal,
+    });
+    done.catch((error: unknown) => this.#fail(error));
+    this.#oplog = { input, done };
+    return this.#oplog;
+  }
+
   /** Hands one document to a writer, waiting while its buffer is full. */
-  async #write(writer: NamespaceWriter, document: Buffer): Promise<void> {
+  async #write(writer: { readonly input: PassThrough }, document: Buffer): Promise<void> {
     this.#throwIfFailed();
     if (writer.input.write(document)) return;
     try {

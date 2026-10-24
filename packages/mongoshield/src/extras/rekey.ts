@@ -65,6 +65,7 @@ import {
   createKmsKeyWrapper,
   isKmsRecipientLabel,
   kmsRecipientLabel,
+  resolveKmsClient,
 } from "../crypto/kms/index.ts";
 import { writeStoredFile } from "../engine/backup-write.ts";
 import { mapWithConcurrency } from "../engine/pool.ts";
@@ -473,10 +474,16 @@ function planKmsBackup(manifest: Manifest, keyFile: StoredFile, options: RekeyOp
       const ref = parseKmsLabel(label);
       return ref === undefined ? [] : [ref];
     });
+    // KMS calls are network round trips: an aborted rekey stops waiting for them.
+    const calls = { signal: options.signal };
     groups.push({
       files: [keyFile],
-      unwrap: async () => ({ keyUnwrappers: [createKmsKeyUnwrapper()] }),
-      wrap: { keyWrappers: targetKms.map((ref) => createKmsKeyWrapper(ref)) },
+      unwrap: async (_storage, signal) => ({
+        keyUnwrappers: [createKmsKeyUnwrapper(resolveKmsClient, { signal })],
+      }),
+      wrap: {
+        keyWrappers: targetKms.map((ref) => createKmsKeyWrapper(ref, resolveKmsClient, calls)),
+      },
       keepStanzas: [],
     });
   }
@@ -502,7 +509,7 @@ async function kmsContentUnwrap(
     storage,
     manifest.id,
     keyFile,
-    { keyUnwrappers: [createKmsKeyUnwrapper()] },
+    { keyUnwrappers: [createKmsKeyUnwrapper(resolveKmsClient, { signal })] },
     { signal },
   );
   return { identities: [identity] };

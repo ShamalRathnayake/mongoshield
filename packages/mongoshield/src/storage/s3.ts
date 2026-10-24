@@ -17,8 +17,19 @@
  *   // Backblaze B2
  *   s3Storage({ bucket: "b", endpoint: "https://s3.us-west-004.backblazeb2.com", region: "us-west-004" });
  *
- * If a provider rejects the newer default checksum headers, pass your own `client`
- * built with `requestChecksumCalculation: "WHEN_REQUIRED"`.
+ * Checksums and S3-compatible services: since early 2025 the AWS SDK sends a
+ * CRC32 checksum with every upload by default (`requestChecksumCalculation:
+ * "WHEN_SUPPORTED"`). For multipart uploads this means CreateMultipartUpload
+ * declares CRC32, and CompleteMultipartUpload must list the checksum of every
+ * part, which lib-storage takes from the UploadPart responses. Real S3 returns
+ * them. Services that do not (Adobe S3Mock 5.x, and some versions of other
+ * S3-compatible stores) reject the completion, so every object larger than one
+ * part fails with "The complete request must include the checksum for each
+ * part", while small objects work. Others reject the checksum headers outright.
+ * For those services set `requestChecksumCalculation: "WHEN_REQUIRED"` (or
+ * `?requestChecksumCalculation=WHEN_REQUIRED` on an `s3://` URL, or configure
+ * your own `client` that way). Backups stay verified end to end either way:
+ * every file's SHA-256 is in the manifest and checked on restore and verify.
  *
  * How the contract is met:
  * - Atomic writes: S3 objects only become visible when a PutObject or
@@ -29,6 +40,11 @@
  * - Conditional writes use `If-None-Match: *` (supported by S3 since 2024, and
  *   by MinIO and R2). A 412 response becomes MS_STORAGE_PRECONDITION_FAILED.
  * - Keys are stored under `prefix`, which is added on write and stripped on read.
+ * - `lastModified` from `head()` and `list()` is always the server's value (S3
+ *   keeps whole seconds; for multipart objects it is when the upload started).
+ *   Upload responses carry no Last-Modified, so `put()` reports the local
+ *   clock, unless `exactLastModified` asks for one HEAD request per put to read
+ *   the server's value.
  * - Immutable backups use S3 Object Lock: a put with `retainUntil` sends
  *   `ObjectLockMode` (COMPLIANCE or GOVERNANCE, from the `retention` option) and
  *   `ObjectLockRetainUntilDate`. Quirks handled here:
@@ -55,6 +71,18 @@ import type {
 } from "@aws-sdk/client-s3";
 import type * as LibStorage from "@aws-sdk/lib-storage";
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
+import {
+  chunk,
+  countBytes,
+  destroyOnAbort,
+  messageOf,
+  missingPackageError,
+  normalizePrefix,
+  propertyOf,
+  storageKeyOf,
+  storagePrefixOf,
+  unquote,
+} from "./adapter-utils.ts";
 import { assertValidKey, assertValidPrefix } from "./keys.ts";
 import {
   assertValidRetainUntil,
@@ -116,6 +144,21 @@ export interface S3StorageOptions {
   /** KMS key id or ARN, used with `serverSideEncryption: "aws:kms"`. */
   readonly sseKmsKeyId?: string;
   /**
+   * When the SDK computes request checksums, for a client created by the adapter:
+   * the SDK default `"WHEN_SUPPORTED"` (every upload carries a CRC32), or
+   * `"WHEN_REQUIRED"` for S3-compatible services that reject those checksums or
+   * fail multipart uploads with them (see the header comment). Ignored with `client`.
+   */
+  readonly requestChecksumCalculation?: "WHEN_SUPPORTED" | "WHEN_REQUIRED";
+  /**
+   * Make `put()` report the server's Last-Modified time instead of the local
+   * clock, at the cost of one HEAD request per put (for the exact version just
+   * written). Useful when callers compare put results with `list()`/`head()`
+   * output or when the local clock is not trusted. If that HEAD fails, the put
+   * still succeeds and reports the local clock. Default `false`.
+   */
+  readonly exactLastModified?: boolean;
+  /**
    * Object Lock mode for puts with `retainUntil` (immutable backups). Defaults to
    * `{ mode: "compliance" }`: not even the root account can delete the objects
    * early. `"governance"` lets principals with `s3:BypassGovernanceRetention`
@@ -167,7 +210,7 @@ type Operation = "read" | "write" | "stat" | "list" | "delete";
 /** Creates a storage adapter backed by an S3 (or S3-compatible) bucket. */
 export function s3Storage(options: S3StorageOptions): StorageAdapter {
   const bucket = validBucket(options.bucket);
-  const basePrefix = normalizePrefix(options.prefix);
+  const basePrefix = normalizePrefix(options.prefix, "S3");
   const partSize = validPartSize(options.partSize);
   const queueSize = validQueueSize(options.queueSize);
   const location = `s3://${bucket}/${basePrefix}`;
@@ -192,23 +235,6 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
   /** The full object key in the bucket for a storage key. */
   function objectKey(key: string): string {
     return basePrefix + key;
-  }
-
-  /**
-   * Converts an object key from a listing back into a storage key, or returns
-   * `undefined` for keys we must not expose: those outside our prefix and those
-   * that are not valid storage keys, such as the zero-byte `folder/` markers
-   * created by the S3 console.
-   */
-  function storageKeyOf(fullKey: string | undefined): string | undefined {
-    if (fullKey === undefined || !fullKey.startsWith(basePrefix)) return undefined;
-    const key = fullKey.slice(basePrefix.length);
-    try {
-      assertValidKey(key);
-      return key;
-    } catch {
-      return undefined;
-    }
   }
 
   function fail(
@@ -299,16 +325,50 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
       });
       const result = await upload.done();
       const size = body instanceof Readable ? counter.bytes : body.byteLength;
-      // The upload response carries no Last-Modified; the local clock is close
-      // enough and saves a HEAD request per object.
       const etag = unquote(result.ETag);
-      return { key, size, lastModified: new Date(), ...(etag ? { etag } : {}) };
+      // Neither PutObject nor CompleteMultipartUpload responses carry a
+      // Last-Modified, so the local clock is used unless the caller asked for
+      // the server's value (one HEAD request).
+      const lastModified = options.exactLastModified
+        ? await serverLastModified(key, result, signal)
+        : new Date();
+      return { key, size, lastModified, ...(etag ? { etag } : {}) };
     } catch (error) {
       if (body instanceof Readable) body.destroy();
       await abortDanglingUpload(upload, key);
       throw fail(error, "write", key, signal);
     } finally {
       signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
+   * Reads the Last-Modified time of the object a put just wrote. The HEAD names
+   * that exact object, by version id in versioned buckets and otherwise with
+   * If-Match on its ETag, so a concurrent overwrite is never mistaken for ours.
+   * Falls back to the local clock if the HEAD fails: the object is written, and
+   * failing the put now would invite a retry that rewrites it.
+   */
+  async function serverLastModified(
+    key: string,
+    result: { readonly ETag?: string | undefined; readonly VersionId?: string | undefined },
+    signal: AbortSignal | undefined,
+  ): Promise<Date> {
+    try {
+      const { sdk, client } = await context();
+      const response = await client.send(
+        new sdk.s3.HeadObjectCommand({
+          Bucket: bucket,
+          Key: objectKey(key),
+          ...(result.VersionId ? { VersionId: result.VersionId } : {}),
+          ...(!result.VersionId && result.ETag ? { IfMatch: result.ETag } : {}),
+        }),
+        sendOptions(signal),
+      );
+      return response.LastModified ?? new Date();
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return new Date();
     }
   }
 
@@ -410,7 +470,7 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
         throw fail(error, "list", prefix, signal);
       }
       for (const item of page.Contents ?? []) {
-        const key = storageKeyOf(item.Key);
+        const key = storageKeyOf(basePrefix, item.Key);
         if (key !== undefined) yield objectInfo(key, item.Size, item.LastModified, item.ETag);
       }
       continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
@@ -446,9 +506,9 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
         throw fail(error, "list", prefix, signal);
       }
       for (const common of page.CommonPrefixes ?? []) {
-        // A common prefix ends in "/", which is not a valid key; validate without it.
-        const withoutSlash = storageKeyOf(common.Prefix?.slice(0, -1));
-        if (withoutSlash !== undefined) yield `${withoutSlash}/`;
+        // Console folder markers and names outside our prefix are skipped.
+        const prefixKey = storagePrefixOf(basePrefix, common.Prefix);
+        if (prefixKey !== undefined) yield prefixKey;
       }
       continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
     } while (continuationToken);
@@ -492,7 +552,7 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
     const failures = errors.filter((entry) => entry.Code !== "NoSuchKey");
     const first = failures[0];
     if (!first) return;
-    const key = storageKeyOf(first.Key) ?? first.Key ?? "";
+    const key = storageKeyOf(basePrefix, first.Key) ?? first.Key ?? "";
     const others = failures.length > 1 ? ` (and ${failures.length - 1} more)` : "";
     const cause = Object.assign(new Error(first.Message ?? "delete failed"), {
       name: first.Code ?? "DeleteFailed",
@@ -571,6 +631,9 @@ async function createContext(options: S3StorageOptions): Promise<S3Context> {
     ...(options.endpoint === undefined ? {} : { endpoint: options.endpoint }),
     ...(options.forcePathStyle === undefined ? {} : { forcePathStyle: options.forcePathStyle }),
     ...(options.credentials === undefined ? {} : { credentials: options.credentials }),
+    ...(options.requestChecksumCalculation === undefined
+      ? {}
+      : { requestChecksumCalculation: options.requestChecksumCalculation }),
   });
   return { sdk, client };
 }
@@ -588,29 +651,8 @@ async function loadAwsSdk(): Promise<AwsSdk> {
     ]);
     return { s3, storage };
   } catch (error) {
-    if (!isModuleNotFound(error)) throw error;
-    throw new MongoShieldError(
-      "MS_CONFIG_INVALID",
-      "S3 storage needs the optional packages @aws-sdk/client-s3 and @aws-sdk/lib-storage.",
-      { hint: INSTALL_HINT, cause: error },
-    );
+    throw missingPackageError(error, "S3 storage", INSTALL_HINT);
   }
-}
-
-/**
- * True if the import failed because a package is not installed. Loaders and
- * bundlers sometimes wrap the original error, so the `cause` chain is checked too.
- */
-function isModuleNotFound(error: unknown): boolean {
-  let current = error;
-  for (let depth = 0; depth < 5 && current !== undefined; depth++) {
-    const code = propertyOf(current, "code");
-    if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") return true;
-    const message = current instanceof Error ? current.message : "";
-    if (/Cannot find (module|package)/.test(message)) return true;
-    current = propertyOf(current, "cause");
-  }
-  return false;
 }
 
 function validBucket(bucket: string): string {
@@ -620,21 +662,6 @@ function validBucket(bucket: string): string {
     });
   }
   return bucket;
-}
-
-/** `"/a/b"`, `"a/b"` and `"a/b/"` all become `"a/b/"`; empty stays empty. */
-function normalizePrefix(prefix: string | undefined): string {
-  const trimmed = (prefix ?? "").replace(/^\/+/, "").replace(/\/+$/, "");
-  if (trimmed === "") return "";
-  try {
-    assertValidKey(trimmed);
-  } catch (error) {
-    throw new MongoShieldError("MS_CONFIG_INVALID", `Invalid S3 prefix "${prefix}".`, {
-      cause: error,
-      hint: 'Use a relative path such as "prod/mongo", without ".." or empty segments.',
-    });
-  }
-  return `${trimmed}/`;
 }
 
 function validPartSize(partSize: number | undefined): number {
@@ -684,45 +711,6 @@ function objectInfo(
   };
 }
 
-/** S3 returns ETags wrapped in double quotes; the other adapters return bare values. */
-function unquote(etag: string | undefined): string | undefined {
-  return etag?.replace(/^"(.*)"$/, "$1");
-}
-
-/** Passes stream chunks through unchanged while counting bytes, for the returned `size`. */
-function countBytes(source: Readable, counter: { bytes: number }): Readable {
-  async function* counted() {
-    for await (const piece of source) {
-      const buffer = Buffer.isBuffer(piece) ? piece : Buffer.from(piece as Uint8Array);
-      counter.bytes += buffer.length;
-      yield buffer;
-    }
-  }
-  return Readable.from(counted());
-}
-
-/** Destroys `stream` with a typed MS_ABORTED error when the signal fires. */
-function destroyOnAbort(stream: Readable, signal: AbortSignal | undefined): void {
-  if (!signal) return;
-  const onAbort = () => stream.destroy(abortError(signal));
-  signal.addEventListener("abort", onAbort, { once: true });
-  stream.once("close", () => signal.removeEventListener("abort", onAbort));
-}
-
-function chunk<T>(items: readonly T[], size: number): T[][] {
-  const batches: T[][] = [];
-  for (let start = 0; start < items.length; start += size) {
-    batches.push(items.slice(start, start + size));
-  }
-  return batches;
-}
-
-/** Reads a property of an unknown error without trusting its shape. */
-function propertyOf(error: unknown, property: string): unknown {
-  if (typeof error !== "object" || error === null) return undefined;
-  return (error as Record<string, unknown>)[property];
-}
-
 /** The SDK's error name (`NoSuchKey`, `AccessDenied`, …). */
 function errorName(error: unknown): string | undefined {
   const name = propertyOf(error, "name");
@@ -747,11 +735,21 @@ function isNotImplemented(error: unknown): boolean {
  */
 function isObjectLockNotConfigured(error: unknown): boolean {
   const name = errorName(error);
-  const reason = error instanceof Error ? error.message : "";
+  const reason = messageOf(error);
   return (
     (name === "InvalidRequest" || name === "InvalidArgument" || httpStatus(error) === 400) &&
     /missing object lock configuration/i.test(reason)
   );
+}
+
+/**
+ * True for a CompleteMultipartUpload refused because the per-part checksums are
+ * missing: the service declared CRC32 at CreateMultipartUpload but did not
+ * return the parts' checksums for lib-storage to send back (see the header).
+ */
+function isMissingPartChecksums(error: unknown): boolean {
+  const reason = messageOf(error);
+  return /checksum for each part|checksum.*missing for part/i.test(reason);
 }
 
 function isNotFound(error: unknown): boolean {
@@ -794,7 +792,7 @@ function s3Error(error: unknown, context: S3ErrorContext): MongoShieldError {
 
   const name = errorName(error) ?? "Error";
   const status = httpStatus(error);
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = messageOf(error);
   const message = `Could not ${operation} ${target}: ${name}${reason ? `: ${reason}` : ""}`;
   const requestId = propertyOf(propertyOf(error, "$metadata"), "requestId");
   const details = {
@@ -828,6 +826,14 @@ function s3Error(error: unknown, context: S3ErrorContext): MongoShieldError {
   // a concurrent conditional write to the same key won the race.
   if (name === "PreconditionFailed" || name === "ConditionalRequestConflict" || status === 412) {
     return new MongoShieldError("MS_STORAGE_PRECONDITION_FAILED", message, base);
+  }
+  if (operation === "write" && isMissingPartChecksums(error)) {
+    return new MongoShieldError("MS_STORAGE_IO", message, {
+      ...base,
+      hint:
+        'This S3-compatible service does not support the SDK\'s default upload checksums for multipart uploads. Set requestChecksumCalculation: "WHEN_REQUIRED" ' +
+        "(s3:// URLs: ?requestChecksumCalculation=WHEN_REQUIRED), or pass a client configured that way.",
+    });
   }
   return new MongoShieldError("MS_STORAGE_IO", message, base);
 }

@@ -18,6 +18,8 @@
  *                               with unbiased integers and list picks on top
  *   permuteInteger(value, keys) a keyed bijection on 64-bit integers (Feistel network),
  *                               so hashed integer ids never collide
+ *   permuteLargeDouble, permuteBelow   the same for doubles above 2^53 and for domains
+ *                               of any size (decimal digit counts)
  */
 
 import { createHmac } from "node:crypto";
@@ -163,8 +165,19 @@ const TWO_63 = 2n ** 63n;
  * Tiers 54 and 64 use "cycle walking": apply the wider permutation again until the
  * result leaves the inner tiers. That is a permutation of the tier, and needs a
  * second step only for a tiny fraction of values (2^-22 and 2^-10 of them).
+ *
+ * Tier 64 is split once more, because doubles are sparse there (only every 2nd…1024th
+ * integer is one): the integers a double holds exactly map among themselves
+ * (`permuteLargeDouble`), the others among themselves. So `Double(2^60)` and
+ * `Long(2^60)` still hash to the same number, and a hashed Double is always a double
+ * again, never rounded onto another input's output.
+ *
+ * @throws MongoShieldError `MS_INTERNAL` for a value outside the int64 range.
  */
 export function permuteInteger(value: bigint, keys: MaskKeys): bigint {
+  if (value < -TWO_63 || value >= TWO_63) {
+    throw new MongoShieldError("MS_INTERNAL", `${value} is outside the 64-bit integer range.`);
+  }
   if (value >= -TWO_31 && value < TWO_31) {
     return feistel(value + TWO_31, 32, keys.feistel32) - TWO_31;
   }
@@ -175,11 +188,101 @@ export function permuteInteger(value: bigint, keys: MaskKeys): bigint {
     } while (walked - TWO_53 >= -TWO_31 && walked - TWO_53 < TWO_31);
     return walked - TWO_53;
   }
-  let walked = BigInt.asUintN(64, value + TWO_63);
+  if (isExactDouble(value)) return BigInt(permuteLargeDouble(Number(value), keys));
+  let walked = value + TWO_63;
   do {
     walked = feistel(walked, 64, keys.feistel64);
-  } while (walked - TWO_63 >= -TWO_53 && walked - TWO_63 < TWO_53);
+  } while (inInnerTiers(walked - TWO_63) || isExactDouble(walked - TWO_63));
   return walked - TWO_63;
+}
+
+/** True for tiers 32 and 54: [-2^53, 2^53). */
+function inInnerTiers(value: bigint): boolean {
+  return value >= -TWO_53 && value < TWO_53;
+}
+
+/** True when a double holds exactly this integer. */
+function isExactDouble(value: bigint): boolean {
+  return BigInt(Number(value)) === value;
+}
+
+/**
+ * A keyed bijection on [0, `count`): a Feistel network on the smallest even bit width
+ * that holds every value, cycle-walking until the result is below `count`. The width
+ * is at most 2 bits more than needed, so fewer than 4 steps are needed on average.
+ * Used for domains whose size is not a power of two (digit counts of decimals, the
+ * doubles of a range). `count` may be up to 2^128 (the round function takes 64 bits).
+ */
+export function permuteBelow(value: bigint, count: bigint, key: Buffer): bigint {
+  if (count <= 1n) return value;
+  const needed = (count - 1n).toString(2).length;
+  // A balanced Feistel network splits the value into two equal halves of at least 1 bit.
+  const width = Math.max(2, needed % 2 === 0 ? needed : needed + 1);
+  let walked = value;
+  do {
+    walked = feistel(walked, width, key);
+  } while (walked >= count);
+  return walked;
+}
+
+/** A sub-key for one permutation domain, independent of every other one. */
+export function domainKey(keys: MaskKeys, domain: string): Buffer {
+  return hmac(keys.feistel64, `mongoshield/mask/v1/domain/${domain}`);
+}
+
+// ---------------------------------------------------------------------------
+// Large doubles
+// ---------------------------------------------------------------------------
+
+/** Bit patterns of 2^53, 2^63 and the largest finite double (positive, so ordered like the values). */
+const BITS_2_53 = doubleBits(2 ** 53);
+const BITS_2_63 = doubleBits(2 ** 63);
+const BITS_MAX = doubleBits(Number.MAX_VALUE);
+
+/**
+ * A keyed bijection on the doubles of magnitude 2^53 and above (all of them whole
+ * numbers), keeping the sign and keeping each value on its side of the int64 limit:
+ *
+ *   domain                        why it is separate
+ *   [2^53, 2^63) and (-2^63, -2^53]   int64 values a double holds exactly: shared with
+ *     plus -2^63                  `permuteInteger`, so `Long(x)` and `Double(x)` agree
+ *   beyond the int64 range        no integer type can hold them
+ *
+ * Positive doubles are ordered like their IEEE 754 bit patterns, so each domain is a
+ * contiguous range of patterns and permuting the pattern's offset in it permutes the
+ * values. Distinct inputs therefore never share an output, which a hash truncated
+ * to a double (or an integer permutation rounded to one) cannot promise.
+ *
+ * @param value a double with |value| >= 2^53, finite.
+ */
+export function permuteLargeDouble(value: number, keys: MaskKeys): number {
+  const negative = value < 0;
+  const magnitude = doubleBits(Math.abs(value));
+  // In int64 terms the negative side reaches one further (-2^63 is an int64, 2^63 is not),
+  // so its ranges start one pattern later: (2^53, 2^63] instead of [2^53, 2^63).
+  const offset = negative ? 1n : 0n;
+  const int64Low = BITS_2_53 + offset;
+  const int64High = BITS_2_63 + offset;
+  const [low, high, domain] =
+    magnitude < int64High
+      ? [int64Low, int64High, "double-int64"]
+      : [int64High, BITS_MAX + 1n, "double-huge"];
+  const key = domainKey(keys, `${domain}-${negative ? "negative" : "positive"}`);
+  const permuted = fromDoubleBits(low + permuteBelow(magnitude - low, high - low, key));
+  return negative ? -permuted : permuted;
+}
+
+/** The IEEE 754 bit pattern of a double. */
+function doubleBits(value: number): bigint {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value);
+  return view.getBigUint64(0);
+}
+
+function fromDoubleBits(bits: bigint): number {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setBigUint64(0, bits);
+  return view.getFloat64(0);
 }
 
 /** A balanced Feistel network over unsigned `bits`-bit integers (`bits` even). */

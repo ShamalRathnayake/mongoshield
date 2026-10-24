@@ -82,6 +82,9 @@ beforeAll(async () => {
     await users.insertOne({ _id: 7, name: "v4" });
     await backup();
     await users.updateOne({ _id: 7 }, { $set: { name: "v5" } });
+    // A collection no backup holds, only the journal: inserted into, then renamed away.
+    await client().db(database).collection<User>("other").insertOne({ _id: 1, name: "o1" });
+    await client().db(database).collection("other").rename("other_renamed");
     await waitForJournalToCatchUp(client(), storage);
   } finally {
     await journal.stop();
@@ -111,6 +114,16 @@ describe("documentHistory", () => {
       "update:v2",
       "backup:present:v1",
     ]);
+  });
+
+  it("reads the whole journal for a collection no backup holds, with its renames", async () => {
+    const history = await documentHistory(
+      { storage, logger: silentLogger },
+      { namespace: `${database}.other`, id: 1 },
+    );
+    expect(history.backupsSearched).toBe(0);
+    expect(history.journal.status).toBe("read");
+    expect(summary(history.versions)).toEqual(["rename:-", "insert:o1"]);
   });
 
   it("limits the backups searched and can leave the journal out", async () => {

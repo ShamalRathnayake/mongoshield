@@ -158,6 +158,51 @@ describe("createAwsKmsClient", () => {
     expect(destroyed).toBe(false);
   });
 
+  it("passes the call's signal to the SDK as abortSignal", async () => {
+    const client = rawClient();
+    const mock = mockClient(client);
+    mock.on(EncryptCommand).resolves({ CiphertextBlob: new Uint8Array([1]), KeyId: AWS_KEY });
+    mock.on(DecryptCommand).resolves({ Plaintext: DATA_KEY });
+    const kms = createAwsKmsClient(AWS_KEY, { client });
+    const { signal } = new AbortController();
+    const wrapped = await kms.encryptDataKey(DATA_KEY, { signal });
+    await kms.decryptDataKey(wrapped, { signal });
+    // aws-sdk-client-mock types `args` as just the command; the send options come second.
+    expect(mock.commandCalls(EncryptCommand)[0]?.args).toEqual([
+      expect.anything(),
+      { abortSignal: signal },
+    ]);
+    expect(mock.commandCalls(DecryptCommand)[0]?.args).toEqual([
+      expect.anything(),
+      { abortSignal: signal },
+    ]);
+  });
+
+  it("reports a cancelled call as MS_ABORTED, not as a KMS failure", async () => {
+    const client = rawClient();
+    const controller = new AbortController();
+    mockClient(client)
+      .on(EncryptCommand)
+      .callsFake(() => {
+        controller.abort();
+        throw Object.assign(new Error("Request aborted"), { name: "AbortError" });
+      });
+    const kms = createAwsKmsClient(AWS_KEY, { client });
+    const error = await failure(kms.encryptDataKey(DATA_KEY, { signal: controller.signal }));
+    expect(error.code).toBe("MS_ABORTED");
+  });
+
+  it("sends nothing when the signal has already fired", async () => {
+    const client = rawClient();
+    const mock = mockClient(client);
+    const kms = createAwsKmsClient(AWS_KEY, { client });
+    const signal = AbortSignal.abort();
+    expect((await failure(kms.encryptDataKey(DATA_KEY, { signal }))).code).toBe("MS_ABORTED");
+    const wrapped = { key: AWS_KEY, algorithm: "SYMMETRIC_DEFAULT", ciphertext: DATA_KEY };
+    expect((await failure(kms.decryptDataKey(wrapped, { signal }))).code).toBe("MS_ABORTED");
+    expect(mock.calls()).toHaveLength(0);
+  });
+
   it("creates nothing until the first call, so close() before use is a no-op", async () => {
     await expect(createAwsKmsClient(AWS_KEY).close?.()).resolves.toBeUndefined();
   });

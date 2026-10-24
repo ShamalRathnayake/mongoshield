@@ -134,6 +134,12 @@ describe("diffBackups between two backups", () => {
     }
   });
 
+  it("validates its limits", async () => {
+    await expect(
+      diffBackups({ storage, logger: silentLogger }, { from: fromId, to: toId, examples: -1 }),
+    ).rejects.toThrow(/examples must be a whole number/);
+  });
+
   it("honours include and exclude", async () => {
     const result = await diffBackups(
       { storage, logger: silentLogger },

@@ -1,12 +1,27 @@
 import fc from "fast-check";
-import { Int32, Long, MaxKey, MinKey, ObjectId } from "mongodb";
+import {
+  BSON,
+  type Document,
+  Int32,
+  Long,
+  MaxKey,
+  MinKey,
+  type MongoClient,
+  ObjectId,
+  ReadPreference,
+} from "mongodb";
 import { describe, expect, it } from "vitest";
+import { valueInStoredOrder } from "../format/field-order.ts";
+import { parseJsonInStoredOrder, stringifyJsonInStoredOrder } from "../format/ordered-json.ts";
+import { silentLogger } from "../logger.ts";
 import type { CollectionSpec } from "../mongo/index.ts";
 import {
   boundsFromBoundaries,
   canSplit,
   chooseBoundaries,
   fromCanonical,
+  planCollectionParts,
+  readCollectionStats,
   toCanonical,
   toPartRange,
   wantedPartCount,
@@ -129,5 +144,111 @@ describe("canSplit", () => {
       false,
     );
     expect(canSplit(spec({ options: { capped: true, size: 4096 }, indexes: [] }))).toBe(false);
+  });
+});
+
+describe("canSplit with unusual _id indexes", () => {
+  it("only accepts an ascending single-field _id key", () => {
+    const withKey = (key: unknown) => spec({ indexes: [{ v: 2, key, name: "k" }] });
+    expect(canSplit(withKey({ _id: -1 }))).toBe(false);
+    expect(canSplit(withKey({ _id: "hashed" }))).toBe(false);
+    expect(canSplit(withKey({ _id: 1, other: 1 }))).toBe(false);
+    expect(canSplit(withKey(null))).toBe(false);
+    expect(canSplit(withKey("_id"))).toBe(false);
+    expect(canSplit(withKey({ _id: new Int32(1) }))).toBe(true);
+  });
+});
+
+describe("planning parts from collection statistics", () => {
+  /** A fake client: `$collStats` yields `stats` (or throws), `$sample` yields `ids`. */
+  function fakeClient(stats: readonly Document[] | Error, ids: readonly unknown[] = []) {
+    const fake = {
+      db: () => ({
+        collection: () => ({
+          aggregate: (pipeline: Document[]) => {
+            const isStats = pipeline[0] !== undefined && "$collStats" in pipeline[0];
+            return (async function* () {
+              if (isStats) {
+                if (stats instanceof Error) throw stats;
+                yield* stats;
+              } else {
+                // Asked for raw documents, as the driver returns them with `raw: true`.
+                for (const id of ids) yield BSON.serialize({ _id: id });
+              }
+            })();
+          },
+        }),
+      }),
+    };
+    return fake as unknown as MongoClient;
+  }
+
+  const options = (client: MongoClient) => ({
+    client,
+    readPreference: ReadPreference.primary,
+    logger: silentLogger,
+    signal: undefined,
+  });
+
+  it("sums the shards and tolerates missing or odd numbers", async () => {
+    const client = fakeClient([
+      { storageStats: { size: 1000, count: 10 } },
+      { storageStats: { size: "500", count: Long.fromNumber(5) } },
+      { storageStats: { size: "not a number" } },
+      { storageStats: null },
+    ]);
+    expect(await readCollectionStats(spec({}), options(client))).toEqual({
+      sizeBytes: 1500,
+      averageDocumentBytes: 100,
+    });
+    const empty = await readCollectionStats(spec({}), options(fakeClient([])));
+    expect(empty).toEqual({ sizeBytes: 0, averageDocumentBytes: undefined });
+  });
+
+  it("does not split a collection whose statistics cannot be read", async () => {
+    const client = fakeClient(new Error("not authorized"));
+    expect(await readCollectionStats(spec({}), options(client))).toBeUndefined();
+    expect(await planCollectionParts(spec({}), MIB, options(client))).toEqual({
+      boundaries: [],
+      averageDocumentBytes: undefined,
+    });
+  });
+
+  it("samples embedded-document _ids in their stored field order", async () => {
+    // `{ b, "1" }`: JavaScript would list "1" first, which is another `_id` value.
+    const ids = Array.from(
+      { length: 40 },
+      (_, index) =>
+        new Map<string, unknown>([
+          ["b", new Int32(index)],
+          ["1", new Int32(0)],
+        ]),
+    );
+    const large = fakeClient([{ storageStats: { size: 4 * MIB, count: 40 } }], ids);
+    const { boundaries } = await planCollectionParts(spec({}), MIB, options(large));
+    expect(boundaries).toHaveLength(3);
+    for (const boundary of boundaries) {
+      const ordered = valueInStoredOrder(boundary);
+      expect(ordered instanceof Map ? [...ordered.keys()] : undefined).toEqual(["b", "1"]);
+    }
+    // And they keep it through the canonical Extended JSON of checkpoints.
+    const text = stringifyJsonInStoredOrder(toCanonical(boundaries[0]));
+    expect(text).toBe('{"b":{"$numberInt":"10"},"1":{"$numberInt":"0"}}');
+    const back = fromCanonical(parseJsonInStoredOrder(text));
+    expect(BSON.serialize({ value: valueInStoredOrder(back) })).toEqual(
+      BSON.serialize({ value: ids[10] }),
+    );
+  });
+
+  it("splits a large collection at sampled _ids, and leaves small ones whole", async () => {
+    const ids = Array.from({ length: 40 }, (_, index) => new Int32(index));
+    const large = fakeClient([{ storageStats: { size: 4 * MIB, count: 40 } }], ids);
+    const planned = await planCollectionParts(spec({}), MIB, options(large));
+    // In their exact BSON types.
+    expect(planned.boundaries).toEqual([new Int32(10), new Int32(20), new Int32(30)]);
+    const small = fakeClient([{ storageStats: { size: 100, count: 1 } }], ids);
+    expect((await planCollectionParts(spec({}), MIB, options(small))).boundaries).toEqual([]);
+    const views = await planCollectionParts(spec({ type: "view" }), MIB, options(large));
+    expect(views).toEqual({ boundaries: [], averageDocumentBytes: undefined });
   });
 });

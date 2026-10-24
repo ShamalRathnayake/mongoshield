@@ -1,6 +1,13 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { deriveMaskKeys, KeyedStream, MIN_SECRET_LENGTH, permuteInteger } from "./keyed.ts";
+import {
+  deriveMaskKeys,
+  KeyedStream,
+  MIN_SECRET_LENGTH,
+  permuteBelow,
+  permuteInteger,
+  permuteLargeDouble,
+} from "./keyed.ts";
 
 const keys = deriveMaskKeys("a test secret that is long enough");
 const otherKeys = deriveMaskKeys("another secret, also long enough");
@@ -69,5 +76,40 @@ describe("permuteInteger", () => {
       (value) => permuteInteger(value, keys) !== permuteInteger(value, otherKeys),
     );
     expect(differing.length).toBeGreaterThan(3);
+  });
+});
+
+describe("permuteBelow", () => {
+  it("is a bijection on [0, count) for awkward domain sizes", () => {
+    for (const count of [1n, 2n, 3n, 10n, 90n, 1000n, 4097n]) {
+      const outputs = new Set<bigint>();
+      for (let value = 0n; value < count; value += 1n) {
+        const permuted = permuteBelow(value, count, keys.feistel64);
+        expect(permuted >= 0n && permuted < count).toBe(true);
+        outputs.add(permuted);
+      }
+      expect(outputs.size).toBe(Number(count));
+    }
+  });
+});
+
+describe("permuteLargeDouble", () => {
+  it("keeps the sign and the side of the int64 limit", () => {
+    for (const value of [2 ** 53, 2 ** 62, -(2 ** 63), 2 ** 63, 1e300, -1e300]) {
+      const permuted = permuteLargeDouble(value, keys);
+      expect(Math.sign(permuted)).toBe(Math.sign(value));
+      const inInt64 = (candidate: number) => candidate >= -(2 ** 63) && candidate < 2 ** 63;
+      expect(inInt64(permuted)).toBe(inInt64(value));
+    }
+  });
+
+  it("depends on the secret", () => {
+    expect(permuteLargeDouble(2 ** 70, keys)).not.toBe(permuteLargeDouble(2 ** 70, otherKeys));
+  });
+});
+
+describe("permuteInteger outside the int64 range", () => {
+  it("refuses values no Long can hold", () => {
+    expect(() => permuteInteger(2n ** 63n, keys)).toThrow(/outside the 64-bit integer range/);
   });
 });

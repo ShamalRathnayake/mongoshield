@@ -18,11 +18,12 @@
  *   await shield.restore({ backup: id, rename: { "app.*": "app_restored.*" } });
  */
 
-import type { Document } from "mongodb";
+import type { Document, MongoClient } from "mongodb";
 import { placeHold, recordVerification, releaseHold } from "./catalog/annotations.ts";
 import { type CatalogEntry, listBackups } from "./catalog/catalog.ts";
 import { type PruneResult, pruneBackups } from "./catalog/prune.ts";
 import type { RetentionPolicy } from "./catalog/retention.ts";
+import type { PruneScope } from "./catalog/scope.ts";
 import { defaultCompression } from "./compression/index.ts";
 import { runCopy } from "./copy/copy.ts";
 import { runBackup } from "./engine/backup.ts";
@@ -66,6 +67,7 @@ import {
 } from "./journal/index.ts";
 import { type Logger, silentLogger } from "./logger.ts";
 import { type MongoConnection, openConnection } from "./mongo/connection.ts";
+import { describeDeployment } from "./mongo/deployment.ts";
 import type { StorageAdapter } from "./storage/types.ts";
 import {
   ATTRIBUTES,
@@ -101,6 +103,14 @@ export interface ShieldPruneOptions {
   readonly dryRun?: boolean;
   /** The current time; mainly for tests. */
   readonly now?: Date;
+  /**
+   * Apply the policy only to the backups of one source/selection, e.g.
+   * `{ clusterId: await shield.sourceClusterId(), labels: { "mongoshield.shape": "…" } }`.
+   * Every other backup in the storage location is left alone and reported in
+   * `outOfScope`. Without a scope the policy covers every backup in the location,
+   * which is only right when one job writes there.
+   */
+  readonly scope?: PruneScope;
   readonly signal?: AbortSignal;
 }
 
@@ -147,17 +157,21 @@ export class MongoShield {
   async backup(options: BackupOptions = {}): Promise<BackupResult> {
     const source = this.#requireSource("backup");
     return traceBackup(this.#telemetry, () =>
-      this.#withConnection(source, (connection) => {
-        const context: BackupContext = {
-          client: connection.client,
-          storage: this.storage,
-          logger: this.#logger,
-          compression: this.compression,
-          encryption: this.#encryption,
-          ...this.#engineTelemetry(),
-        };
-        return runBackup(context, options);
-      }),
+      this.#withConnection(
+        source,
+        (connection) => {
+          const context: BackupContext = {
+            client: connection.client,
+            storage: this.storage,
+            logger: this.#logger,
+            compression: this.compression,
+            encryption: this.#encryption,
+            ...this.#engineTelemetry(),
+          };
+          return runBackup(context, options);
+        },
+        options.signal,
+      ),
     );
   }
 
@@ -169,14 +183,17 @@ export class MongoShield {
     const target = options.target ?? this.#requireSource("restore");
     const details = { mode: options.mode ?? "fail-if-exists", dryRun: options.dryRun === true };
     return traceRestore(this.#telemetry, details, () =>
-      this.#withConnection(target, (connection) =>
-        options.at === undefined
-          ? this.#withErasures(connection, options, () =>
-              runRestore(this.#restoreContext(connection), options),
-            )
-          : this.#withErasures(connection, options, () =>
-              this.#restoreToPointInTime(connection, options, options.at as Date | ClusterTime),
-            ),
+      this.#withConnection(
+        target,
+        (connection) =>
+          options.at === undefined
+            ? this.#withErasures(connection, options, () =>
+                runRestore(this.#restoreContext(connection), options),
+              )
+            : this.#withErasures(connection, options, () =>
+                this.#restoreToPointInTime(connection, options, options.at as Date | ClusterTime),
+              ),
+        options.signal,
       ),
     );
   }
@@ -235,6 +252,7 @@ export class MongoShield {
           mode: options.mode,
           decryption: options.decryption,
           writeConcern: options.writeConcern,
+          skipIndexes: options.skipIndexes,
           logger: this.#logger,
           signal: options.signal,
           onProgress: options.onProgress,
@@ -258,8 +276,10 @@ export class MongoShield {
   /** Works out what `restore()` would do, without writing anything. */
   async planRestore(options: RestoreOptions): Promise<RestorePlan> {
     const target = options.target ?? this.#requireSource("plan a restore");
-    return this.#withConnection(target, (connection) =>
-      planRestore(this.#restoreContext(connection), options),
+    return this.#withConnection(
+      target,
+      (connection) => planRestore(this.#restoreContext(connection), options),
+      options.signal,
     );
   }
 
@@ -288,12 +308,16 @@ export class MongoShield {
    */
   async drill(options: ShieldDrillOptions): Promise<DrillReport> {
     return traceDrill(this.#telemetry, () =>
-      this.#withConnection(options.target, async (connection) => {
-        const context = this.#restoreContext(connection);
-        const report = await drillBackup(context, options);
-        await recordDrill(this.storage, report);
-        return report;
-      }),
+      this.#withConnection(
+        options.target,
+        async (connection) => {
+          const context = this.#restoreContext(connection);
+          const report = await drillBackup(context, options);
+          await recordDrill(this.storage, report);
+          return report;
+        },
+        options.signal,
+      ),
     );
   }
 
@@ -310,12 +334,18 @@ export class MongoShield {
    */
   async copy(options: CopyOptions): Promise<CopyResult> {
     const from = options.from ?? this.#requireSource("copy");
-    return this.#withConnection(from, (source) =>
-      this.#withConnection(options.to, (target) =>
-        this.#withErasures(target, options, () =>
-          runCopy({ source: source.client, target: target.client, logger: this.#logger }, options),
+    return this.#withConnection(
+      from,
+      (source) =>
+        this.#withConnection(options.to, (target) =>
+          this.#withErasures(target, options, () =>
+            runCopy(
+              { source: source.client, target: target.client, logger: this.#logger },
+              options,
+            ),
+          ),
         ),
-      ),
+      options.signal,
     );
   }
 
@@ -350,12 +380,28 @@ export class MongoShield {
       const result = await pruneBackups(this.storage, policy, { logger: this.#logger, ...options });
       // Journal segments older than the oldest remaining base backup can never be
       // replayed onto anything, so they go too. Gap records are always kept.
+      // The base backups are listed WITHOUT the scope: the journal is shared by the
+      // whole location, and a segment another scope's backup still needs must stay.
       if (options.dryRun !== true) {
         const oldestBase = (await listBaseBackups(this.storage)).at(-1);
         if (oldestBase) await pruneJournal(this.storage, { olderThan: oldestBase.clusterTime });
       }
       return result;
     });
+  }
+
+  /**
+   * The stable, non-secret id of the configured source deployment: the
+   * `source.clusterId` its backups record (a hash, never a host name). Pass it in
+   * a prune `scope` so retention only covers this deployment's backups.
+   */
+  async sourceClusterId(options: { readonly signal?: AbortSignal } = {}): Promise<string> {
+    const source = this.#requireSource("identify the source deployment");
+    return this.#withConnection(
+      source,
+      async (connection) => (await describeDeployment(connection.client)).clusterId,
+      options.signal,
+    );
   }
 
   /** Releases the storage adapter's resources (connections, file handles). */
@@ -366,25 +412,41 @@ export class MongoShield {
   // --- Recovery recipes (extras/*.ts) ------------------------------------------
 
   /**
+   * Runs `task` with a client connected to the configured source, and closes the
+   * connection afterwards (a client passed as `source.client` is never closed). For
+   * recipes that look at the live deployment besides restoring into it, such as
+   * `rollback` finding the collections a migration created.
+   */
+  async withSourceClient<T>(task: (client: MongoClient) => Promise<T>): Promise<T> {
+    return this.#withConnection(this.#requireSource("connect to the source"), (connection) =>
+      task(connection.client),
+    );
+  }
+
+  /**
    * Restores only one tenant's documents (e.g. `{ tenantId: "acme" }`) across every
    * selected collection, leaving other tenants untouched.
    */
   async restoreTenant(options: ShieldRestoreTenantOptions): Promise<RestoreTenantResult> {
     const target = options.target ?? this.#requireSource("restore a tenant");
-    return this.#withConnection(target, async (connection) => {
-      // The erasure helper reads which namespaces were written from a `plan`; a tenant
-      // restore reports them per namespace, so they are mapped into that shape.
-      const result = await this.#withErasures(connection, options, async () => {
-        const tenant = await restoreTenant(this.#restoreContext(connection), options);
-        const entries = tenant.namespaces.map((ns) => ({
-          from: ns.namespace,
-          to: ns.targetNamespace,
-        }));
-        return { ...tenant, plan: { entries } };
-      });
-      const { plan: _plan, ...tenantResult } = result;
-      return tenantResult;
-    });
+    return this.#withConnection(
+      target,
+      async (connection) => {
+        // The erasure helper reads which namespaces were written from a `plan`; a tenant
+        // restore reports them per namespace, so they are mapped into that shape.
+        const result = await this.#withErasures(connection, options, async () => {
+          const tenant = await restoreTenant(this.#restoreContext(connection), options);
+          const entries = tenant.namespaces.map((ns) => ({
+            from: ns.namespace,
+            to: ns.targetNamespace,
+          }));
+          return { ...tenant, plan: { entries } };
+        });
+        const { plan: _plan, ...tenantResult } = result;
+        return tenantResult;
+      },
+      options.signal,
+    );
   }
 
   /** How one document looked in each backup (and in the change journal, if any). */
@@ -425,8 +487,10 @@ export class MongoShield {
    */
   async restoreDocuments(options: ShieldRestoreDocumentsOptions): Promise<RestoreDocumentsResult> {
     const target = options.to ?? this.#requireSource("restore documents");
-    return this.#withConnection(target, (connection) =>
-      restoreDocuments(this.#restoreContext(connection), options),
+    return this.#withConnection(
+      target,
+      (connection) => restoreDocuments(this.#restoreContext(connection), options),
+      options.signal,
     );
   }
 
@@ -497,8 +561,14 @@ export class MongoShield {
   async #withConnection<T>(
     source: SourceOptions,
     task: (connection: MongoConnection) => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
-    const connection = await openConnection(source, { logger: this.#logger });
+    // The signal also covers connecting: Ctrl-C while the driver is still looking for a
+    // server must cancel at once, not after the 30 s server selection timeout.
+    const connection = await openConnection(source, {
+      logger: this.#logger,
+      ...(signal ? { signal } : {}),
+    });
     try {
       return await task(connection);
     } finally {

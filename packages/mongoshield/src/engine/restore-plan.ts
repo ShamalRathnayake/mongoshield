@@ -319,15 +319,35 @@ export async function inspectTargets(
   return states;
 }
 
-/** Collection name → type for one database (only the listCollections privilege is needed). */
+/**
+ * Collection name → type for one database (only the listCollections privilege is needed).
+ *
+ * @throws MongoShieldError `MS_PERMISSION_DENIED` when the user may not even list the
+ *   target database: it certainly cannot restore into it, and the planning step is the
+ *   first to find out (before the write privileges are checked).
+ */
 async function listExistingTypes(
   client: MongoClient,
   database: string,
 ): Promise<Map<string, NamespaceType>> {
-  const infos = await client
-    .db(database)
-    .listCollections({}, { nameOnly: true, authorizedCollections: true })
-    .toArray();
+  let infos: Document[];
+  try {
+    infos = await client
+      .db(database)
+      .listCollections({}, { nameOnly: true, authorizedCollections: true })
+      .toArray();
+  } catch (error) {
+    if (!(error instanceof MongoServerError && error.code === UNAUTHORIZED_CODE)) throw error;
+    throw new MongoShieldError(
+      "MS_PERMISSION_DENIED",
+      `The MongoDB user cannot restore into database ${database}: missing listCollections on database ${database}.`,
+      {
+        cause: error,
+        hint: 'Grant the built-in `restore` role (db: "admin"), or `readWrite` on the target databases.',
+        details: { operation: "restore", missing: [`listCollections on database ${database}`] },
+      },
+    );
+  }
   const types = new Map<string, NamespaceType>();
   for (const info of infos) {
     types.set(info.name, normalizeType(info));

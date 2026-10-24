@@ -104,13 +104,29 @@ function usageLine(command: CommandSpec): string {
   return parts.join(" ");
 }
 
+/**
+ * Flags longer than this get their description on the next line. Without a limit, one
+ * flag with many choices (`--read-preference <primary|…|nearest>`) would push every
+ * description on the page past column 80, and each line would wrap.
+ */
+const MAX_FLAG_LABEL_WIDTH = 40;
+
 /** A two-column list of flags and their descriptions. */
 function renderOptions(options: Readonly<Record<string, OptionSpec>>, out: Output): string {
-  const rows: string[][] = [];
-  for (const [name, spec] of Object.entries(options)) {
-    rows.push([out.style("cyan", flagLabel(name, spec)), optionDescription(spec)]);
-  }
-  return renderRows(rows);
+  const rows = Object.entries(options).map(([name, spec]) => ({
+    // Labels are plain text here, so `.length` is their width on screen.
+    label: flagLabel(name, spec),
+    description: optionDescription(spec),
+  }));
+  const fitting = rows.map((row) => row.label.length).filter((w) => w <= MAX_FLAG_LABEL_WIDTH);
+  const width = Math.max(0, ...fitting);
+
+  const lines = rows.map(({ label, description }) => {
+    const styled = out.style("cyan", label);
+    if (label.length > width) return `${styled}\n${" ".repeat(width + 2)}${description}`;
+    return `${styled}${" ".repeat(width - label.length + 2)}${description}`;
+  });
+  return lines.join("\n");
 }
 
 /** `-c, --config <path>` / `--compression <zstd|gzip|none>` / `--include <pattern>…`. */

@@ -17,7 +17,9 @@
  *                    drop: false, db: "" }
  *                which copies them into `admin.system.users` WITH their password
  *                hashes and skips users that already exist. `replace` drops the
- *                existing ones first. The temporary collection is always dropped.
+ *                existing ones first. The temporary collection has a unique name
+ *                per run, so concurrent restores never mix their users, and is
+ *                always dropped (see mergeUsers).
  *
  * `createUser` cannot take a password hash, only a password. So when the target
  * refuses the merge (Atlas, or a user without the `restore` role), users are created
@@ -26,11 +28,16 @@
  * updated with `updateUser` (roles, custom data) and keep their current password.
  *
  * Users and roles that are not in the backup are never dropped or changed.
+ *
+ * Field order: backed-up users are parsed with their stored field order recorded and
+ * written (to the temporary collection, or as `customData` of `createUser` /
+ * `updateUser`) in that order (src/format/field-order.ts), so custom data with
+ * integer-like field names comes back exactly as it was.
  */
 
 import { randomBytes } from "node:crypto";
 import {
-  BSON,
+  type Db,
   type Document,
   type MongoClient,
   MongoServerError,
@@ -38,7 +45,11 @@ import {
   type WriteConcernSettings,
 } from "mongodb";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
+import {
+  deserializeInStoredOrder,
+  inStoredOrderAnywhere,
+  valueInStoredOrder,
+} from "../format/field-order.ts";
 import { type AuthzEntry, isAuthzEntry, type Manifest } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
 import { type NamespaceFilter, splitNamespace } from "../mongo/index.ts";
@@ -110,7 +121,7 @@ async function readEntryDocuments(
   for (const file of entry.files) {
     for await (const raw of openDocumentStream(source, file, { signal })) {
       if (!(raw instanceof Uint8Array)) continue;
-      documents.push(BSON.deserialize(raw, LOSSLESS_DESERIALIZE_OPTIONS));
+      documents.push(deserializeInStoredOrder(raw));
     }
   }
   return documents;
@@ -398,9 +409,20 @@ export async function restoreUsers(
  * mongorestore's way: temporary collection + `_mergeAuthzCollections`. Returns false
  * (having changed nothing that matters) when the target refuses it.
  *
+ * Which temporary collection: one with a unique name per run
+ * (`admin.mongoshield_tmp_users_<time>_<random>`), so restores running at the same time
+ * on one server (MongoShield or mongorestore) never see each other's users. The merge
+ * must be able to READ that collection, though, and the built-in `restore` role grants
+ * `find` in `admin` only on mongorestore's own `tempusers` and `temproles`. So when the
+ * merge is refused as unauthorized, the restore claims `admin.tempusers` instead:
+ * `createCollection` is atomic, so it gets the collection to itself or, when another
+ * restore holds it, fails and the users are created with `createUser`.
+ *
  * In `replace` mode the existing users (`dropFirst`) are dropped right before the
- * merge, since the merge keeps existing users. The temporary collection is written
- * first: that is the step refused most often, and then nothing has been dropped.
+ * (first) merge, since the merge keeps existing users. The temporary collection is
+ * written first: that is the step refused most often, and then nothing has been
+ * dropped. Temporary collections are always dropped afterwards, and ones left behind
+ * by a crashed restore more than a day ago are dropped on the way.
  */
 async function mergeUsers(
   client: MongoClient,
@@ -409,20 +431,63 @@ async function mergeUsers(
   settings: AuthzRestoreSettings,
 ): Promise<boolean> {
   const admin = client.db("admin");
-  const temporary = `mongoshield_restore_users_${randomBytes(6).toString("hex")}`;
+  await dropStaleTemporaryCollections(admin, settings.logger);
+  const pendingDrops = [...dropFirst];
+  const unique = await mergeThrough(client, uniqueTemporaryName(), users, pendingDrops, settings);
+  if (unique.outcome === "merged") return true;
+  if (unique.outcome === "refused" || !isUnauthorized(unique.error)) {
+    return refuseMerge(settings, unique.error);
+  }
+  if (!(await claimCollection(admin, MONGORESTORE_TEMP_USERS))) {
+    return refuseMerge(settings, unique.error);
+  }
+  const claimed = await mergeThrough(
+    client,
+    MONGORESTORE_TEMP_USERS,
+    users,
+    pendingDrops,
+    settings,
+  );
+  return claimed.outcome === "merged" ? true : refuseMerge(settings, claimed.error);
+}
+
+/** How one merge attempt ended. */
+type MergeAttempt =
+  | { readonly outcome: "merged" }
+  /** The target refuses merges altogether (Atlas, no such command, …). */
+  | { readonly outcome: "refused"; readonly error: unknown }
+  /** Refused for this temporary collection: unauthorized; another one may work. */
+  | { readonly outcome: "retry"; readonly error: unknown };
+
+/**
+ * One merge through the temporary collection `temporary` (dropped afterwards in any
+ * case). The users of `pendingDrops` are dropped once the collection is written, and
+ * removed from the list, so a second attempt does not drop them again.
+ */
+async function mergeThrough(
+  client: MongoClient,
+  temporary: string,
+  users: readonly Document[],
+  pendingDrops: Document[],
+  settings: AuthzRestoreSettings,
+): Promise<MergeAttempt> {
+  const admin = client.db("admin");
   const writeConcern = commandWriteConcern(settings.writeConcern);
   try {
     try {
-      // Copies, because insertMany would add an `_id` to documents lacking one.
+      // In stored order: the root is a copy made by `selectUsersAndRoles`, so nested
+      // values (custom data) are searched for a recorded order. `forceServerObjectId`
+      // keeps the driver from touching the documents (it would add an `_id` to one
+      // lacking it, and cannot read the `_id` of a Map).
       await admin.collection(temporary).insertMany(
-        users.map((user) => ({ ...user })),
-        { ordered: true },
+        users.map((user) => inStoredOrderAnywhere(user)),
+        { ordered: true, forceServerObjectId: true },
       );
     } catch (error) {
-      if (isMergeRefused(error)) return refuseMerge(settings, error);
+      if (isMergeRefused(error)) return refusal(error);
       throw authzError(error, "Preparing the users");
     }
-    for (const user of dropFirst) {
+    for (let user = pendingDrops.shift(); user !== undefined; user = pendingDrops.shift()) {
       await runAuthzCommand(client, user.db, `Dropping user ${String(user._id)} to replace it`, {
         dropUser: user.user,
         ...writeConcern,
@@ -439,21 +504,105 @@ async function mergeUsers(
         ...writeConcern,
       });
     } catch (error) {
-      if (isMergeRefused(error)) return refuseMerge(settings, error);
+      if (isMergeRefused(error)) return refusal(error);
       throw authzError(error, "Restoring the users");
     }
-    return true;
+    return { outcome: "merged" };
   } finally {
-    await admin
-      .collection(temporary)
-      .drop()
-      .catch((error: unknown) => {
-        settings.logger.debug("Dropping the temporary users collection failed", {
-          collection: `admin.${temporary}`,
-          error: String(error),
-        });
-      });
+    await dropTemporaryCollection(admin, temporary, settings.logger);
   }
+}
+
+/** An unauthorized merge may work through another collection; other refusals never do. */
+function refusal(error: unknown): MergeAttempt {
+  return isUnauthorized(error) ? { outcome: "retry", error } : { outcome: "refused", error };
+}
+
+/** mongorestore's temporary users collection in `admin` (see mergeUsers). */
+const MONGORESTORE_TEMP_USERS = "tempusers";
+
+/** Prefix of MongoShield's own temporary users collections in `admin`. */
+const TEMPORARY_USERS_PREFIX = "mongoshield_tmp_users_";
+
+/** Temporary collections older than this are left over from a crash and dropped. */
+const STALE_TEMPORARY_MS = 24 * 60 * 60 * 1000;
+
+/** NamespaceExists: the collection `claimCollection` wanted is already there. */
+const NAMESPACE_EXISTS_CODE = 48;
+
+/**
+ * `mongoshield_tmp_users_<creation time in ms, base 36>_<random hex>`: unique, and
+ * telling its age, so stale ones can be recognised (see dropStaleTemporaryCollections).
+ */
+function uniqueTemporaryName(now = Date.now()): string {
+  return `${TEMPORARY_USERS_PREFIX}${now.toString(36)}_${randomBytes(6).toString("hex")}`;
+}
+
+/** The creation time of a temporary collection's name, or undefined for other names. */
+export function temporaryCollectionTime(name: string): number | undefined {
+  const match = /^mongoshield_tmp_users_([0-9a-z]+)_[0-9a-f]+$/.exec(name);
+  if (match?.[1] === undefined) return undefined;
+  const time = Number.parseInt(match[1], 36);
+  return Number.isSafeInteger(time) ? time : undefined;
+}
+
+/**
+ * Drops MongoShield temporary users collections older than a day: a restore that
+ * crashed before its `finally` left them, and they hold password hashes. Best effort:
+ * a user who may not list or drop them simply leaves them.
+ */
+async function dropStaleTemporaryCollections(admin: Db, logger: Logger): Promise<void> {
+  let names: string[];
+  try {
+    const infos = await admin
+      .listCollections(
+        { name: { $regex: `^${TEMPORARY_USERS_PREFIX}` } },
+        { nameOnly: true, authorizedCollections: true },
+      )
+      .toArray();
+    names = infos.map((info) => String(info.name));
+  } catch (error) {
+    logger.debug("Listing old temporary users collections failed", { error: String(error) });
+    return;
+  }
+  const now = Date.now();
+  for (const name of names) {
+    const time = temporaryCollectionTime(name);
+    if (time === undefined || now - time < STALE_TEMPORARY_MS) continue;
+    logger.info("Dropping a temporary users collection left by an earlier restore", {
+      collection: `admin.${name}`,
+    });
+    await dropTemporaryCollection(admin, name, logger);
+  }
+}
+
+/** Creates `admin.<name>`; false when it exists already (someone else is using it). */
+async function claimCollection(admin: Db, name: string): Promise<boolean> {
+  try {
+    await admin.createCollection(name);
+    return true;
+  } catch (error) {
+    if (error instanceof MongoServerError && error.code === NAMESPACE_EXISTS_CODE) return false;
+    if (isMergeRefused(error)) return false;
+    throw authzError(error, "Preparing the users");
+  }
+}
+
+/** Drops a temporary collection; failing to is logged, not fatal. */
+async function dropTemporaryCollection(admin: Db, name: string, logger: Logger): Promise<void> {
+  await admin
+    .collection(name)
+    .drop()
+    .catch((error: unknown) => {
+      logger.debug("Dropping the temporary users collection failed", {
+        collection: `admin.${name}`,
+        error: String(error),
+      });
+    });
+}
+
+function isUnauthorized(error: unknown): boolean {
+  return error instanceof MongoServerError && error.code === UNAUTHORIZED_CODE;
 }
 
 /** Logs why users are restored with createUser instead, and returns false. */
@@ -492,7 +641,7 @@ export async function createUsersWithoutCredentials(
     const id = String(user._id);
     const details = {
       roles: documentsIn(user.roles),
-      ...(isDocument(user.customData) ? { customData: user.customData } : {}),
+      ...(isDocument(user.customData) ? { customData: valueInStoredOrder(user.customData) } : {}),
       ...authenticationRestrictionsOf(user),
     };
     if (existing.has(id)) {

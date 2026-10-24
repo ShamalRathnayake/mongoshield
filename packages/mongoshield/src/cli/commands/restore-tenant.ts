@@ -142,8 +142,14 @@ async function runRestoreTenantCommand(context: CommandContext): Promise<number>
       };
       const plan = await restoreTenant(engine, { ...options, dryRun: true });
       printPlan(context, plan, targetUri);
-      if (context.flags.boolean("dry-run") || plan.totals.matched + plan.totals.deleted === 0) {
-        return finish(context, plan);
+      if (context.flags.boolean("dry-run")) return finish(context, plan);
+      if (plan.totals.matched + plan.totals.deleted === 0) {
+        // The plan is a dry run; saying "Dry run" here would suggest --dry-run was given.
+        if (context.out.settings.json) return finish(context, plan);
+        context.out.success(
+          "Nothing to restore: the tenant has no documents in the backup or the target.",
+        );
+        return 0;
       }
       await confirmIfDestructive(context, plan, targetUri);
       return finish(context, await restoreTenant(engine, options));

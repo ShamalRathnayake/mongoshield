@@ -21,6 +21,12 @@
  */
 
 import type { Document } from "mongodb";
+import {
+  entriesInStoredOrder,
+  isIntegerLikeKey,
+  recordStoredFieldOrder,
+  storedFieldOrder,
+} from "../format/field-order.ts";
 
 /**
  * A BSON type as named by the `$type` query operator (`"double"`, `"string"`, …),
@@ -181,6 +187,25 @@ export function isDocument(value: unknown): value is Document {
   return bsonKind(value) === "object";
 }
 
+// ---------------------------------------------------------------------------
+// Stored field order
+// ---------------------------------------------------------------------------
+
+/*
+ * Field order as stored in BSON lives in src/format/field-order.ts, which every path
+ * that parses documents shares (find, restore, copy, replay). It is re-exported here
+ * because the filter evaluator and `find` are its main readers:
+ *
+ * JavaScript objects list integer-like keys ("0", "1", "42") first, whatever order
+ * they were assigned in, while the server compares embedded documents field by field
+ * in stored order: `{ "1": "a", "0": "b" }` is not equal to `{ "0": "b", "1": "a" }`.
+ * `orderedEntries` lists a parsed document's fields in stored order.
+ */
+export { isIntegerLikeKey, recordStoredFieldOrder, storedFieldOrder };
+
+/** The entries of a document in stored order (see `entriesInStoredOrder`). */
+export const orderedEntries = entriesInStoredOrder;
+
 /**
  * The fields of an embedded document, in stored order. DBRefs are turned back into
  * the `{ $ref, $id, $db, … }` document they are stored as.
@@ -262,8 +287,8 @@ function compareSameRank(left: unknown, right: unknown): number {
  * the other sorts first.
  */
 function compareDocuments(left: Document, right: Document): number {
-  const leftEntries = Object.entries(left);
-  const rightEntries = Object.entries(right);
+  const leftEntries = orderedEntries(left);
+  const rightEntries = orderedEntries(right);
   const shared = Math.min(leftEntries.length, rightEntries.length);
   for (let index = 0; index < shared; index++) {
     const [leftName, leftValue] = leftEntries[index] ?? ["", undefined];

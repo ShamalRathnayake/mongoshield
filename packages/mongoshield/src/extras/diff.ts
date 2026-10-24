@@ -27,6 +27,12 @@
  * treats such documents as different too). `_id`s are compared by their exact BSON
  * bytes, so an Int32 1 and a Double 1 count as different documents.
  *
+ * Converge backups are compared in their state at the END of their window (T1), like
+ * `find` reads them: the changes recorded during the backup are overlaid on the dumped
+ * documents (src/engine/find-window.ts). Documents the window did not touch keep their
+ * stored bytes; the others are encoded again in their stored field order. A collection
+ * the window dropped is still listed, with the documents it had at T1 (none).
+ *
  * The live side is read without a snapshot, so a deployment that is being written to
  * gives an approximate answer. Collections whose `_id` is not unique (time series) are
  * compared approximately: duplicate `_id`s collapse into one record.
@@ -38,6 +44,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Binary, BSON, type Document, type MongoClient } from "mongodb";
 import type { EngineContext } from "../engine/context.ts";
+import { orderedEntries } from "../engine/filter-values.ts";
+import { documentsAtWindowEnd, hasChangeWindow } from "../engine/find-window.ts";
 import { readMetadataFile } from "../engine/read-pipeline.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
 import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
@@ -47,6 +55,7 @@ import { compileNamespaceFilter, discoverNamespaces, splitNamespace } from "../m
 import type { BackupSelector, DecryptionOptions, NamespacePattern } from "../types.ts";
 import {
   type OpenedBackup,
+  openedNamespace,
   openSelectedBackup,
   parseRawDocument,
   rawDocumentsOf,
@@ -161,8 +170,16 @@ export interface DiffResult {
 interface SideNamespace {
   readonly ns: string;
   readonly type: CollectionType;
-  /** Exact for backups, an estimate for live collections. */
+  /**
+   * Exact for plain backups, an estimate for live collections, the dumped count for
+   * converge backups (see `atWindowEnd`).
+   */
   readonly documentCount: number;
+  /**
+   * True when `documents()` overlays a converge backup's window, so the count at T1
+   * is only known by reading them.
+   */
+  readonly atWindowEnd: boolean;
   metadata(): Promise<{ readonly options: Document; readonly indexes: readonly Document[] }>;
   documents(): AsyncIterable<Uint8Array>;
 }
@@ -270,13 +287,55 @@ function backupNamespace(
   entry: CollectionEntry,
   signal: AbortSignal | undefined,
 ): SideNamespace {
+  const atWindowEnd = hasChangeWindow(backup.manifest) && entry.type !== "view";
   return {
     ns: entry.ns,
     type: entry.type,
     documentCount: entry.documents,
+    atWindowEnd,
     metadata: () => readMetadataFile(backup.source, entry.metadata, { signal }),
-    documents: () => rawDocumentsOf(backup.source, entry.files, signal),
+    documents: () =>
+      atWindowEnd
+        ? documentsAtT1(backup, entry, signal)
+        : rawDocumentsOf(backup.source, entry.files, signal),
   };
+}
+
+/** The documents of a converge backup's namespace at the end of its window, as BSON. */
+async function* documentsAtT1(
+  backup: OpenedBackup,
+  entry: CollectionEntry,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<Uint8Array> {
+  const documents = documentsAtWindowEnd(openedNamespace(backup, entry), { signal });
+  for await (const match of documents) {
+    yield match.raw ?? BSON.serialize(orderedFields(match.document), { checkKeys: false });
+  }
+}
+
+/** The fields of a document as a Map in stored order (see `inStoredOrder`). */
+function orderedFields(document: Document): Map<string, unknown> {
+  const ordered = new Map<string, unknown>();
+  for (const [field, child] of orderedEntries(document)) ordered.set(field, inStoredOrder(child));
+  return ordered;
+}
+
+/**
+ * A parsed document as Maps in its stored field order, for encoding: BSON.serialize
+ * writes a plain object's fields in JavaScript order, which lists integer-like names
+ * ("0", "1") first, but keeps a Map's order (see find-parse.ts for why the order is
+ * recorded at all). BSON values, dates and regular expressions are kept as they are.
+ */
+function inStoredOrder(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((element: unknown) => inStoredOrder(element));
+  return isPlainDocument(value) ? orderedFields(value) : value;
+}
+
+/** An embedded document: not an array, Date, RegExp or BSON value (those have `_bsontype`). */
+function isPlainDocument(value: unknown): value is Document {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  if (value instanceof Date || value instanceof RegExp) return false;
+  return Reflect.get(value, "_bsontype") === undefined;
 }
 
 /** The live deployment's namespaces (by default within the databases of the `from` backup). */
@@ -301,6 +360,7 @@ async function liveSide(
       ns: spec.ns,
       type: spec.type,
       documentCount: spec.estimatedDocuments,
+      atWindowEnd: false,
       metadata: async () => ({ options: spec.options, indexes: spec.indexes }),
       documents: () =>
         spec.type === "view" ? emptyDocuments() : liveDocuments(client, spec.ns, options.signal),
@@ -358,7 +418,7 @@ async function diffNamespace(
   settings: CompareSettings,
 ): Promise<{ diff: NamespaceDiff; spilled: boolean }> {
   if (from === undefined || to === undefined) {
-    return { diff: oneSidedDiff(from, to), spilled: false };
+    return { diff: await oneSidedDiff(from, to, settings.signal), spilled: false };
   }
 
   const [fromMetadata, toMetadata] = [await from.metadata(), await to.metadata()];
@@ -390,15 +450,16 @@ async function diffNamespace(
 }
 
 /** A namespace that exists on one side only. */
-function oneSidedDiff(
+async function oneSidedDiff(
   from: SideNamespace | undefined,
   to: SideNamespace | undefined,
-): NamespaceDiff {
+  signal: AbortSignal | undefined,
+): Promise<NamespaceDiff> {
   const present = from ?? to;
   if (present === undefined)
     throw new MongoShieldError("MS_INTERNAL", "A namespace on neither side.");
-  const fromCount = from?.documentCount ?? 0;
-  const toCount = to?.documentCount ?? 0;
+  const fromCount = from === undefined ? 0 : await documentCountOf(from, signal);
+  const toCount = to === undefined ? 0 : await documentCountOf(to, signal);
   return {
     namespace: present.ns,
     presence: from === undefined ? "only-to" : "only-from",
@@ -416,6 +477,20 @@ function oneSidedDiff(
     options: [],
     identical: false,
   };
+}
+
+/** The side's document count; at the end of the window it means reading them. */
+async function documentCountOf(
+  side: SideNamespace,
+  signal: AbortSignal | undefined,
+): Promise<number> {
+  if (!side.atWindowEnd) return side.documentCount;
+  let count = 0;
+  for await (const _document of side.documents()) {
+    throwIfAborted(signal);
+    count += 1;
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------

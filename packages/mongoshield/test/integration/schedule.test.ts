@@ -10,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
+import { MongoClient } from "mongodb";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { readDrills } from "../../src/catalog/annotations.ts";
 import { listBackups } from "../../src/catalog/catalog.ts";
@@ -20,6 +21,7 @@ import { scheduleCommand } from "../../src/cli/commands/schedule.ts";
 import { type CliIo, Output } from "../../src/cli/io.ts";
 import { reportError } from "../../src/cli/report-error.ts";
 import type { MongoShieldConfig } from "../../src/config/schema.ts";
+import { isMongoShieldError } from "../../src/errors.ts";
 import { createLockOwner } from "../../src/schedule/lock.ts";
 import {
   MONGO_LOCK_COLLECTION,
@@ -359,22 +361,30 @@ describe("the MongoDB lock", () => {
 
   it("is taken over after the lease expires, and the old holder learns it lost", async () => {
     const name = `t-${uniqueDb()}`;
+    // Long enough that the "busy" check below runs inside the lease even on a server
+    // slowed down by the other test files (a 200 ms lease sometimes expired first).
+    const leaseMs = 1500;
+    const acquiredAt = Date.now();
     const first = await mongoLock({
       client: client(),
       owner: createLockOwner(),
-      leaseMs: 200,
+      leaseMs,
       name,
     }).tryAcquire();
     expect(first.acquired).toBe(true);
+    // The lease started between `acquiredAt` and now, so it has surely expired by then.
+    const expiresBy = Date.now() + leaseMs;
     const busy = await mongoLock({
       client: client(),
       owner: createLockOwner(),
-      leaseMs: 200,
+      leaseMs,
       name,
     }).tryAcquire();
-    expect(busy.acquired).toBe(false);
+    // Only meaningful while the first lease still runs; it must not be handed out then.
+    if (Date.now() - acquiredAt < leaseMs) expect(busy.acquired).toBe(false);
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    const expiresIn = expiresBy + 100 - Date.now();
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiresIn)));
     const second = await mongoLock({
       client: client(),
       owner: createLockOwner(),
@@ -403,5 +413,74 @@ describe("the MongoDB lock", () => {
     await Promise.all(shields.map((shield) => shield.close()));
     expect(reports.map((report) => report.status).sort()).toEqual(["skipped", "success"]);
     expect(await locks().countDocuments({ _id: "backup" as never })).toBe(0);
+  });
+
+  it("uses the client it is given, and leaves it open", async () => {
+    const dbName = await seededDb(5);
+    const storage = await mkdtemp(join(workDir, "mongo-lock-client-"));
+    // No source.uri for the lock to connect with: only the given client can hold it.
+    const config: MongoShieldConfig = {
+      storage,
+      backup: { include: [`${dbName}.*`] },
+      schedule: { cron: "* * * * *", lock: "mongo", verify: "none" },
+    };
+    const shield = shieldFor(storage);
+    try {
+      const report = await runScheduledJob(shield, config, { lockClient: client() });
+      expect(report.status).toBe("success");
+      expect(report.lock.kind).toBe("mongo");
+      // The borrowed client still works.
+      expect(await locks().countDocuments({ _id: "backup" as never })).toBe(0);
+    } finally {
+      await shield.close();
+    }
+  });
+
+  it("reports an unreachable deployment as a connection failure, which is retried", async () => {
+    const unreachable = new MongoClient("mongodb://127.0.0.1:1/?directConnection=true", {
+      serverSelectionTimeoutMS: 200,
+    });
+    try {
+      const lock = mongoLock({ client: unreachable, owner: createLockOwner(), leaseMs: 60_000 });
+      await expect(lock.tryAcquire()).rejects.toSatisfy((error) =>
+        isMongoShieldError(error, "MS_CONNECTION_FAILED"),
+      );
+    } finally {
+      await unreachable.close();
+    }
+  });
+
+  it("reports a server error that is neither a privilege nor a connection problem as internal", async () => {
+    // A lease so long that `$$NOW + leaseMs` overflows the server's dates.
+    const name = `t-${uniqueDb()}`;
+    const lock = mongoLock({ client: client(), owner: createLockOwner(), leaseMs: 1e300, name });
+    await expect(lock.tryAcquire()).rejects.toSatisfy(
+      (error) =>
+        isMongoShieldError(error, "MS_INTERNAL") &&
+        /The backup lock could not be updated/.test(error.message),
+    );
+    expect(await locks().countDocuments({ _id: name as never })).toBe(0);
+  });
+
+  it("turns other driver errors while renewing or releasing into typed errors", async () => {
+    const own = new MongoClient(mongoUri());
+    const name = `t-${uniqueDb()}`;
+    const acquired = await mongoLock({
+      client: own,
+      owner: createLockOwner(),
+      leaseMs: 60_000,
+      name,
+    }).tryAcquire();
+    if (!acquired.acquired) throw new Error("expected to acquire the lock");
+    await own.close();
+    for (const step of [() => acquired.lease.renew(), () => acquired.lease.release()]) {
+      await expect(step()).rejects.toSatisfy(
+        (error) =>
+          isMongoShieldError(error) &&
+          /The backup lock could not be updated/.test(error.message) &&
+          error.cause !== undefined,
+      );
+    }
+    await locks().deleteOne({ _id: name as never });
   });
 });

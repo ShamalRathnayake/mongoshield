@@ -11,7 +11,15 @@
  *
  * Every file is checked against the manifest's size and SHA-256 while it is read,
  * and every namespace's document count against the manifest, so the export is
- * exactly the backup. Time-series collections are left out (see `export-data.ts`).
+ * exactly the backup. Two things are written in mongodump's own form rather than
+ * MongoShield's:
+ *
+ * - time-series collections: the backup holds measurements, mongorestore wants the
+ *   internal bucket documents, which the export computes (timeseries-buckets.ts);
+ * - users and roles: written both as `admin/system.users.bson` (restored by a full
+ *   `mongorestore`) and as `<db>/$admin.system.users.bson` (restored by
+ *   `mongorestore --db <db> --restoreDbUsersAndRoles`), with the auth schema version
+ *   mongorestore checks first.
  */
 
 import type { Writable } from "node:stream";
@@ -27,10 +35,12 @@ import type { BackupSelector, DecryptionOptions, NamespacePattern } from "../typ
 import { version } from "../version.ts";
 import { exportArchive } from "./export-archive.ts";
 import {
+  assertSomethingSelected,
   dumpServerVersion,
   type ExportedNamespace,
   type ExportNamespace,
   loadExportNamespace,
+  loadUsersAndRoles,
   selectExportNamespaces,
 } from "./export-data.ts";
 import { exportDirectory } from "./export-directory.ts";
@@ -71,7 +81,12 @@ export interface ExportSummary {
   /** The output path, or `"stream"` when writing to a stream. */
   readonly output: string;
   readonly namespaces: readonly ExportedNamespace[];
-  /** Namespaces left out, with the reason (time-series collections). */
+  /** Users and custom roles written (both 0 when the backup has none or none was selected). */
+  readonly usersAndRoles: { readonly users: number; readonly roles: number };
+  /**
+   * Namespaces left out, with the reason. Nothing is left out any more (time-series
+   * collections and users are exported since 2.0); kept so callers that read it work.
+   */
   readonly skipped: readonly SkippedNamespace[];
   /** Totals over `namespaces`. */
   readonly documents: number;
@@ -101,7 +116,7 @@ export async function exportBackup(
   const manifest = await loadManifest(storage, selector, logger, signal);
   const source = await openBackupSource(storage, manifest, options.decryption, { signal });
   const hasPatterns = (options.include?.length ?? 0) + (options.exclude?.length ?? 0) > 0;
-  const selection = selectExportNamespaces(manifest, filter, hasPatterns);
+  const selection = selectExportNamespaces(manifest, filter);
   logger.info("Exporting backup", {
     id: manifest.id,
     format: options.format,
@@ -113,11 +128,18 @@ export async function exportBackup(
     (entry, _index, jobSignal) => loadExportNamespace(source, entry, jobSignal),
     { concurrency: METADATA_READ_CONCURRENCY, signal },
   );
+  const authz = await loadUsersAndRoles(source, selection.authz, filter, signal);
+  assertSomethingSelected(
+    manifest,
+    { namespaces: namespaces.length, usersAndRoles: authz.users.length + authz.roles.length },
+    hasPatterns,
+  );
   throwIfAborted(signal);
 
   const gzip = options.gzip ?? false;
   const common = {
     source,
+    authz,
     gzip,
     serverVersion: dumpServerVersion(manifest),
     toolVersion: `mongoshield@${version}`,
@@ -144,6 +166,7 @@ export async function exportBackup(
     gzip,
     output: typeof options.output === "string" ? options.output : "stream",
     namespaces: exported,
+    usersAndRoles: { users: authz.users.length, roles: authz.roles.length },
     skipped: selection.skipped,
     documents,
     bytes,

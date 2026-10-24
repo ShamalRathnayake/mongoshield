@@ -11,15 +11,22 @@
  * pipeline restore and verify use (`src/engine/read-pipeline.ts`).
  */
 
+import { BSON, Int32 } from "mongodb";
 import {
   openDocumentStream,
   readMetadataFile,
   type StoredBackupSource,
 } from "../engine/read-pipeline.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import { isAuthzEntry, type Manifest, type NamespaceEntry } from "../format/manifest.ts";
+import {
+  type AuthzEntry,
+  isAuthzEntry,
+  type Manifest,
+  type NamespaceEntry,
+} from "../format/manifest.ts";
 import { type CollectionMetadata, serializeCollectionMetadata } from "../format/metadata.ts";
 import type { NamespaceFilter } from "../mongo/index.ts";
+import { TIMESERIES_BUCKET_PREFIX } from "./archive-format.ts";
 import type { SkippedNamespace } from "./import-target.ts";
 
 /** One namespace to export, with its metadata ready to write. */
@@ -41,59 +48,111 @@ export interface ExportedNamespace {
 
 /** The namespaces of a backup to export, and the ones left out with the reason. */
 export interface ExportSelection {
+  /** Collections, views and time-series collections. */
   readonly entries: readonly NamespaceEntry[];
+  /** The users and roles entries; their documents are filtered one by one. */
+  readonly authz: readonly AuthzEntry[];
   readonly skipped: readonly SkippedNamespace[];
 }
 
 /**
- * Applies include/exclude and leaves out what mongorestore cannot take from a
- * MongoShield backup: time-series collections, whose data MongoShield stores as
- * measurements while mongorestore expects the internal bucket documents.
- *
- * @throws MS_CONFIG_INVALID when patterns were given but select nothing.
+ * Applies include/exclude to the collections. Users and roles entries are always
+ * selected here; `loadUsersAndRoles` keeps the users and roles of the selected
+ * databases, the rule restore uses.
  */
 export function selectExportNamespaces(
   manifest: Manifest,
   filter: NamespaceFilter,
-  hasPatterns: boolean,
 ): ExportSelection {
   const entries: NamespaceEntry[] = [];
-  const skipped: SkippedNamespace[] = [];
+  const authz: AuthzEntry[] = [];
   for (const entry of manifest.namespaces) {
-    if (!filter(entry.ns)) continue;
-    if (isAuthzEntry(entry)) {
-      skipped.push({
-        ns: entry.ns,
-        reason:
-          "users and roles: mongorestore expects them with the server's auth schema version; " +
-          "restore them with `mongoshield restore --users-and-roles create` instead",
-      });
-      continue;
-    }
-    if (entry.type === "timeseries") {
-      skipped.push({
-        ns: entry.ns,
-        reason:
-          "time-series collection: mongorestore needs internal bucket documents, but the backup " +
-          "holds measurements; restore it with `mongoshield restore` instead",
-      });
-      continue;
-    }
-    entries.push(entry);
+    if (isAuthzEntry(entry)) authz.push(entry);
+    else if (filter(entry.ns)) entries.push(entry);
   }
-  if (hasPatterns && entries.length === 0 && skipped.length === 0) {
-    throw new MongoShieldError(
-      "MS_CONFIG_INVALID",
-      "No namespace of the backup matches the filters.",
-      {
-        hint: `The backup holds: ${manifest.namespaces
-          .slice(0, 20)
-          .map((entry) => entry.ns)
-          .join(", ")}.`,
-      },
-    );
+  return { entries, authz, skipped: [] };
+}
+
+/**
+ * Fails when patterns were given but select nothing at all (a typo, most likely),
+ * rather than writing an empty dump.
+ */
+export function assertSomethingSelected(
+  manifest: Manifest,
+  selected: { readonly namespaces: number; readonly usersAndRoles: number },
+  hasPatterns: boolean,
+): void {
+  if (!hasPatterns || selected.namespaces + selected.usersAndRoles > 0) return;
+  throw new MongoShieldError(
+    "MS_CONFIG_INVALID",
+    "No namespace of the backup matches the filters.",
+    {
+      hint: `The backup holds: ${manifest.namespaces
+        .slice(0, 20)
+        .map((entry) => entry.ns)
+        .join(", ")}.`,
+    },
+  );
+}
+
+/** Users and custom roles to export, as raw BSON documents (`admin.system.users` shape). */
+export interface ExportedAuthz {
+  readonly users: readonly Buffer[];
+  readonly roles: readonly Buffer[];
+}
+
+/**
+ * Reads the users and roles entries and keeps the documents of the databases the
+ * patterns select: a user (role) of database D when `D.system.users`
+ * (`D.system.roles`) is selected, like `restore({ usersAndRoles })` does.
+ */
+export async function loadUsersAndRoles(
+  source: StoredBackupSource,
+  entries: readonly AuthzEntry[],
+  filter: NamespaceFilter,
+  signal: AbortSignal,
+): Promise<ExportedAuthz> {
+  const users: Buffer[] = [];
+  const roles: Buffer[] = [];
+  for (const entry of entries) {
+    let count = 0;
+    for await (const document of documentsOf(source, entry, signal)) {
+      count += 1;
+      const database: unknown = BSON.deserialize(document).db;
+      if (typeof database !== "string") continue;
+      if (!filter(`${database}.system.${entry.type}`)) continue;
+      (entry.type === "users" ? users : roles).push(document);
+    }
+    assertDocumentCount(entry, count);
   }
-  return { entries, skipped };
+  return { users, roles };
+}
+
+/** Database of a raw user or role document (validated by `loadUsersAndRoles`). */
+export function authzDatabase(document: Buffer): string {
+  const database: unknown = BSON.deserialize(document).db;
+  return typeof database === "string" ? database : "";
+}
+
+/**
+ * The auth schema version document mongorestore reads before restoring users
+ * (`authSchema` 5: SCRAM-SHA-1 and SCRAM-SHA-256 credentials, MongoDB 4.0+). mongodump
+ * writes `admin.system.version`; without it, mongorestore assumes a 2.4-era dump and
+ * refuses to restore users into a current server.
+ */
+export const AUTH_SCHEMA_DOCUMENT: Buffer = Buffer.from(
+  BSON.serialize({ _id: "authSchema", currentVersion: new Int32(5) }),
+);
+
+/**
+ * The collection a namespace's documents go to in mongodump output: its own name,
+ * or `system.buckets.<name>` for a time-series collection, whose buckets the export
+ * computes from the measurements (timeseries-buckets.ts).
+ */
+export function dumpDataCollection(entry: NamespaceEntry): string {
+  return entry.type === "timeseries"
+    ? `${TIMESERIES_BUCKET_PREFIX}${entry.collection}`
+    : entry.collection;
 }
 
 /** Reads (and checks) a namespace's metadata file and renders it as mongodump JSON. */

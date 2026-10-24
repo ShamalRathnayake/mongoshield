@@ -4,12 +4,13 @@
 // directly, so these tests do not depend on how the command registry lists them.
 
 import { createReadStream } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import { BSON, Timestamp } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseCommandLine } from "../../src/cli/args.ts";
 import type { CommandContext, CommandSpec } from "../../src/cli/command.ts";
@@ -116,7 +117,7 @@ async function archiveEvents(bytes: Buffer): Promise<ArchiveEvent[]> {
 }
 
 describe("mongoshield import", () => {
-  it("imports a dump directory, prints the new backup id with --quiet and warns about skipped namespaces", async () => {
+  it("imports a dump directory and prints the new backup id with --quiet", async () => {
     const run = await runCommand(importCommand, [
       join(FIXTURES, "dump"),
       "--to",
@@ -127,7 +128,42 @@ describe("mongoshield import", () => {
     expect(run.stdout.toString().trim()).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z_[0-9a-f]{6}$/,
     );
-    expect(run.stderr).toContain("Not imported: app.ts");
+    // The time-series collection is imported (its buckets unpacked): nothing is left out.
+    expect(run.stderr).not.toContain("Not imported");
+  });
+
+  it("warns about what it does not import, and shows the consistency", async () => {
+    const dump = join(workDir, "dump-with-profile");
+    await cp(join(FIXTURES, "dump"), dump, { recursive: true });
+    await cp(join(FIXTURES, "dump", "app", "users.bson"), join(dump, "app", "system.profile.bson"));
+    const run = await runCommand(importCommand, [dump, "--to", "./profile-backups"]);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain("Not imported: app.system.profile: system collections");
+    expect(run.stdout.toString()).toMatch(/Consistency\s+none/);
+  });
+
+  it("replays the oplog of a mongodump --oplog directory, or leaves it out with --ignore-oplog", async () => {
+    const dump = join(workDir, "dump-with-oplog");
+    await cp(join(FIXTURES, "dump"), dump, { recursive: true });
+    const entry = BSON.serialize({
+      ts: new Timestamp({ t: 1_792_521_200, i: 1 }),
+      op: "i",
+      ns: "app.users",
+      o: { _id: "late", name: "c" },
+    });
+    await writeFile(join(dump, "oplog.bson"), entry);
+    const replayed = await runCommand(importCommand, [dump, "--to", "./oplog-backups"]);
+    expect(replayed.code).toBe(0);
+    expect(replayed.stdout.toString()).toContain("converge (oplog: 1 change replayed on restore)");
+    const ignored = await runCommand(importCommand, [
+      dump,
+      "--to",
+      "./oplog-backups",
+      "--ignore-oplog",
+    ]);
+    expect(ignored.code).toBe(0);
+    expect(ignored.stderr).toContain("ignoreOplog");
+    expect(ignored.stdout.toString()).toMatch(/Consistency\s+none/);
   });
 
   it("detects an archive file by itself and prints the result as JSON", async () => {
@@ -200,7 +236,7 @@ describe("mongoshield export", () => {
     ]);
     expect(run.code).toBe(0);
     const events = await archiveEvents(run.stdout);
-    expect(events.filter((event) => event.kind === "namespaceEnd")).toHaveLength(5);
+    expect(events.filter((event) => event.kind === "namespaceEnd")).toHaveLength(6);
   });
 
   it("refuses to stream a directory to stdout", async () => {

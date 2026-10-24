@@ -6,6 +6,7 @@
  *   masker.ts    applying rules to documents, with per-rule reporting
  *   hash.ts      the `hash` operation          fake.ts   the `fake` operation
  *   keyed.ts     HMAC-based keyed randomness   paths.ts  field paths with `*`
+ *   numbers.ts   exact numeric values (identities of Doubles and Decimal128s)
  */
 
 export {

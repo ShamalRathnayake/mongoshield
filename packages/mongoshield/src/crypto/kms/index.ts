@@ -10,9 +10,11 @@ export {
   createAwsKmsClient,
 } from "./aws.ts";
 export {
+  type AzureKeyReaderSdkClient,
   type AzureKeyWrapAlgorithm,
   type AzureKeyWrapSdkClient,
   type AzureKmsClientOptions,
+  type AzureOperationOptions,
   type AzureTokenCredential,
   createAzureKmsClient,
 } from "./azure.ts";
@@ -40,6 +42,7 @@ export {
 } from "./stanza.ts";
 export {
   KMS_DATA_KEY_CONTEXT,
+  type KmsCallOptions,
   type KmsCiphertext,
   type KmsClient,
   type KmsClientFactory,

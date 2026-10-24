@@ -12,7 +12,12 @@ import {
   identityToRecipient,
   parseIdentityFile,
 } from "../../src/crypto/index.ts";
-import { createKmsKeyUnwrapper, setKmsClientFactory } from "../../src/crypto/kms/index.ts";
+import {
+  createGcpKmsClient,
+  createKmsKeyUnwrapper,
+  type GcpKmsSdkClient,
+  setKmsClientFactory,
+} from "../../src/crypto/kms/index.ts";
 import { runBackup } from "../../src/engine/backup.ts";
 import { runRestore } from "../../src/engine/restore.ts";
 import { verifyBackup } from "../../src/engine/verify.ts";
@@ -28,6 +33,7 @@ import {
   AWS_KEY,
   AZURE_KEY,
   FakeKms,
+  fakeGcpSdkClient,
   GCP_KEY,
   installFakeKms,
 } from "../helpers/fake-kms.ts";
@@ -391,5 +397,61 @@ describe("KMS backups that cannot be written", () => {
       ),
     );
     expect(error.code).toBe("MS_CONFIG_INVALID");
+  });
+});
+
+describe("KMS calls are cancelled with the run", () => {
+  /** A GCP client whose requests never answer, behind the real adapter. */
+  function hangGcp(operation: "encrypt" | "decrypt"): () => void {
+    const never = new Promise<never>(() => {});
+    return setKmsClientFactory("gcp", (ref) => {
+      const answering = fakeGcpSdkClient(kms);
+      const client: GcpKmsSdkClient = {
+        encrypt: (request) => (operation === "encrypt" ? never : answering.encrypt(request)),
+        decrypt: (request) => (operation === "decrypt" ? never : answering.decrypt(request)),
+      };
+      return createGcpKmsClient(ref.key, { client });
+    });
+  }
+
+  it("a backup aborted while the KMS wraps the key fails with MS_ABORTED", async () => {
+    const restoreFactory = hangGcp("encrypt");
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 200);
+      const error = await failure(
+        runBackup(backupContext(client(), memoryStorage(), { encryption: { kms: [GCP] } }), {
+          include: [`${database}.*`],
+          signal: controller.signal,
+        }),
+      );
+      expect(error.code).toBe("MS_ABORTED");
+    } finally {
+      restoreFactory();
+    }
+  });
+
+  it("a restore aborted while the KMS unwraps the key fails with MS_ABORTED", async () => {
+    const { storage, manifest } = await kmsBackup({ kms: [GCP] });
+    const restoreFactory = hangGcp("decrypt");
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 200);
+      const target = uniqueDb("bkkms_rs");
+      targets.push(target);
+      const error = await failure(
+        runRestore(
+          { client: client(), storage, logger: silentLogger },
+          {
+            backup: manifest.id,
+            rename: { [`${database}.*`]: `${target}.*` },
+            signal: controller.signal,
+          },
+        ),
+      );
+      expect(error.code).toBe("MS_ABORTED");
+    } finally {
+      restoreFactory();
+    }
   });
 });

@@ -102,7 +102,9 @@ async function runEraseCommand(context: CommandContext): Promise<number> {
       ...(by ? { requestedBy: by } : {}),
       ...(secret ? { secret } : {}),
     });
-    if (record.match.kind === "filter" && filterText.includes('"')) {
+    // Every JSON filter has quotes (its keys), so look at the values: only strings in a
+    // filter stored as written are a likely place for personal data.
+    if (record.match.kind === "filter" && holdsString(filter)) {
       context.out.warn(
         "This filter is stored as written (it is not an exact match on strings). Make sure it holds no personal data.",
       );
@@ -167,12 +169,28 @@ function parseFilter(text: string): Document {
   return parsed as Document;
 }
 
-/** The erasure secret from the config or the environment, remembered as a secret. */
+/** True when `value` is, or contains (in documents and arrays), a string. */
+function holdsString(value: unknown): boolean {
+  if (typeof value === "string") return true;
+  if (Array.isArray(value)) return value.some(holdsString);
+  // Plain documents only: BSON values (ObjectId, Long, …) are objects too, without strings.
+  const plainDocument =
+    typeof value === "object" &&
+    value !== null &&
+    Object.getPrototypeOf(value) === Object.prototype;
+  return plainDocument && Object.values(value).some(holdsString);
+}
+
+/**
+ * The erasure secret from the environment or the config, remembered as a secret. The
+ * environment wins, as in setup.ts (which keys the ledger for restores): if the two
+ * disagreed, records written here could not be matched by a later restore.
+ */
 export function erasureSecret(
   context: CommandContext,
   config: MongoShieldConfig,
 ): string | undefined {
-  const secret = config.erasures?.secret ?? context.io.env[ERASURE_SECRET_ENV];
+  const secret = context.io.env[ERASURE_SECRET_ENV]?.trim() || config.erasures?.secret;
   if (secret) context.addSecret(secret);
   return secret || undefined;
 }

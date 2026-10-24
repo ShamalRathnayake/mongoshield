@@ -4,7 +4,9 @@
  * Stores every object as a regular file under one root directory. Keys map
  * one-to-one onto relative paths, so `backups/<id>/manifest.json` becomes
  * `<root>/backups/<id>/manifest.json`. Works for local disks and for network
- * mounts (NFS, SMB) as long as they support `rename` and hard links.
+ * mounts (NFS, SMB) as long as they support `rename`. Hard links are used for
+ * conditional writes where the filesystem has them; FAT/exFAT and some SMB or
+ * FUSE mounts do not, and get a lock-directory fallback (see below).
  *
  *   import { fileStorage } from "mongoshield/storage/file";
  *   const storage = fileStorage({ path: "./backups" });
@@ -18,6 +20,16 @@
  *   S3, not in directory-walk order.
  * - Empty directories are not objects: `delete()` prunes them, and
  *   `listPrefixes()` ignores directories that contain no objects.
+ * - Conditional writes (`ifNoneMatch: "*"`) publish with link(2), which is an
+ *   atomic create-if-absent. On filesystems without hard links (link fails with
+ *   EPERM, ENOTSUP, EOPNOTSUPP, EXDEV or ENOSYS) the adapter instead takes a lock
+ *   directory next to the target (`.<name>.mongoshield-lock`, created with an
+ *   atomic mkdir), checks that the target does not exist, renames the temp file
+ *   into place and removes the lock. With the fallback, conditional writers
+ *   (in any process using this adapter) still exclude each other, so exactly one
+ *   of several racing creates wins; but a concurrent *unconditional* put of the
+ *   same key may be overwritten, and a lock left by a crashed process is only
+ *   broken after a minute (until then, conditional writes of that key wait).
  *
  * Known limitation: a key cannot be both an object and a "directory" (for
  * example `a` and `a/b`), which S3 allows. MongoShield's layout never does this.
@@ -40,6 +52,7 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { assertValidKey, assertValidPrefix } from "./keys.ts";
@@ -78,6 +91,32 @@ const TEMP_FILE_PATTERN = /^\..+\.[0-9a-f]{16}\.tmp$/;
 const STALE_TEMP_FILE_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Lock directories of the no-hard-link fallback look like `.<final name>.mongoshield-lock`.
+ * The name is derived from the target alone, so every writer of one key contends
+ * for the same lock. Reserved: no key segment may have this shape.
+ */
+const LOCK_DIRECTORY_PATTERN = /^\..+\.mongoshield-lock$/;
+
+/**
+ * A lock directory older than this is assumed to be left by a crashed writer and
+ * is removed. The lock is only held for one stat and one rename, so a live
+ * holder never comes close; the margin covers slow network mounts and clock
+ * skew between the client and a file server (which sets the mtime).
+ */
+const STALE_LOCK_MS = 60 * 1000;
+
+/** How long a conditional writer waits between attempts to take a busy lock. */
+const LOCK_RETRY_MS = 25;
+
+/**
+ * Errno codes from link(2) that mean "this filesystem cannot make hard links":
+ * EPERM (Linux on FAT/exFAT and many FUSE mounts), ENOTSUP/EOPNOTSUPP (SMB and
+ * other network filesystems), EXDEV (overlay and union mounts) and ENOSYS
+ * (filesystems that do not implement the call at all).
+ */
+const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "ENOSYS"]);
+
+/**
  * How often `put()` retries creating its temp file when the target directory
  * vanishes underneath it (a concurrent `delete()` may prune an empty directory
  * between our `mkdir` and `open`).
@@ -110,6 +149,13 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
       throw new MongoShieldError(
         "MS_STORAGE_IO",
         `Invalid storage key "${key}": names shaped like temp files (.name.<hex>.tmp) are reserved.`,
+      );
+    }
+    if (key.split("/").some((segment) => LOCK_DIRECTORY_PATTERN.test(segment))) {
+      // A lock directory is never listed, and an object inside one would block the lock.
+      throw new MongoShieldError(
+        "MS_STORAGE_IO",
+        `Invalid storage key "${key}": names shaped like lock directories (.name.mongoshield-lock) are reserved.`,
       );
     }
     return fullPath;
@@ -184,6 +230,13 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
   }
 
   /**
+   * Set once link(2) has failed with one of {@link LINK_UNSUPPORTED_CODES}, so later
+   * conditional writes go straight to the lock-directory fallback. All objects
+   * live under one root, which sits on one filesystem.
+   */
+  let hardLinksUnsupported = false;
+
+  /**
    * Moves a finished temp file into place.
    *
    * Plain writes use `rename`, which atomically replaces any existing object.
@@ -193,30 +246,89 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
    * one atomic filesystem operation, so two racing writers can never both win.
    * The linked file is already complete and fsynced, so readers never see
    * partial content (unlike `open(final, "wx")` followed by writes). The temp
-   * name is unlinked afterwards by the caller.
+   * name is unlinked afterwards by the caller. Filesystems without hard links
+   * use {@link publishUnderLock} instead.
    */
   async function publishTempFile(
     tempPath: string,
     finalPath: string,
     key: string,
     ifNoneMatch: boolean,
+    signal: AbortSignal | undefined,
   ): Promise<void> {
     if (!ifNoneMatch) {
       await rename(tempPath, finalPath);
       return;
     }
+    if (hardLinksUnsupported) {
+      await publishUnderLock(tempPath, finalPath, key, signal);
+      return;
+    }
     try {
       await link(tempPath, finalPath);
     } catch (error) {
-      if (errnoCode(error) === "EEXIST") {
-        throw new MongoShieldError(
-          "MS_STORAGE_PRECONDITION_FAILED",
-          `${location}${key} already exists.`,
-          { cause: error },
-        );
-      }
-      throw error;
+      if (errnoCode(error) === "EEXIST") throw alreadyExists(key, error);
+      if (!LINK_UNSUPPORTED_CODES.has(errnoCode(error) ?? "")) throw error;
+      hardLinksUnsupported = true;
+      await publishUnderLock(tempPath, finalPath, key, signal);
     }
+  }
+
+  /**
+   * The conditional publish for filesystems without hard links: while holding
+   * the target's lock directory, check that the target is absent and rename the
+   * temp file onto it. Every conditional writer of this key takes the same lock,
+   * so the check and the rename cannot interleave with another one's. The lock
+   * is removed on every path, including failures.
+   */
+  async function publishUnderLock(
+    tempPath: string,
+    finalPath: string,
+    key: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const lockPath = lockPathFor(finalPath);
+    await acquireLock(lockPath, finalPath, key, signal);
+    try {
+      if (await pathExists(finalPath)) throw alreadyExists(key);
+      await rename(tempPath, finalPath);
+    } finally {
+      await rmdir(lockPath).catch(() => {});
+    }
+  }
+
+  /**
+   * Takes the lock directory with an exclusive mkdir (atomic on every
+   * filesystem, including FAT and SMB). While another writer holds it, waits;
+   * but if the target appears meanwhile, the answer is already known and the
+   * write fails at once. A lock older than {@link STALE_LOCK_MS} is broken.
+   */
+  async function acquireLock(
+    lockPath: string,
+    finalPath: string,
+    key: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    for (;;) {
+      throwIfAborted(signal);
+      try {
+        await mkdir(lockPath);
+        return;
+      } catch (error) {
+        if (errnoCode(error) !== "EEXIST") throw error;
+      }
+      if (await pathExists(finalPath)) throw alreadyExists(key);
+      if (await removeIfStaleLock(lockPath)) continue;
+      await sleep(LOCK_RETRY_MS, undefined, signal ? { signal } : {});
+    }
+  }
+
+  function alreadyExists(key: string, cause?: unknown): MongoShieldError {
+    return new MongoShieldError(
+      "MS_STORAGE_PRECONDITION_FAILED",
+      `${location}${key} already exists.`,
+      cause === undefined ? {} : { cause },
+    );
   }
 
   async function put(
@@ -238,7 +350,7 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
       tempPath = temp.path;
       const stats = await writeAndSync(temp.handle, body, signal);
       throwIfAborted(signal);
-      await publishTempFile(temp.path, finalPath, key, putOptions.ifNoneMatch === "*");
+      await publishTempFile(temp.path, finalPath, key, putOptions.ifNoneMatch === "*", signal);
       await syncDirectory(dirname(finalPath));
       succeeded = true;
       // rename/link keep the inode, so the temp file's size and mtime are the object's.
@@ -326,6 +438,8 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
       if (!entry.name.startsWith(namePrefix)) continue;
       const entryPath = join(directory, entry.name);
       const key = directoryKey + entry.name;
+      // A conditional writer's lock (see publishUnderLock): never an object, never walked.
+      if (entry.isDirectory() && LOCK_DIRECTORY_PATTERN.test(entry.name)) continue;
       if (entry.isDirectory()) {
         yield* walk(entryPath, `${key}/`, "", signal);
         continue;
@@ -388,6 +502,7 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
     for (const entry of entries) {
       throwIfAborted(signal);
       if (!entry.isDirectory() || !entry.name.startsWith(namePrefix)) continue;
+      if (LOCK_DIRECTORY_PATTERN.test(entry.name)) continue;
       // Like S3, a "sub-directory" only exists while some object lives below it.
       if (await containsObject(join(directory, entry.name))) yield `${directoryKey}${entry.name}/`;
     }
@@ -467,6 +582,42 @@ function baseName(key: string): string {
 function tempNameFor(finalPath: string): string {
   const name = finalPath.slice(finalPath.lastIndexOf(sep) + 1);
   return `.${name}.${randomBytes(8).toString("hex")}.tmp`;
+}
+
+/** `.<name>.mongoshield-lock`, next to the target; the same for every writer of that key. */
+function lockPathFor(finalPath: string): string {
+  const name = finalPath.slice(finalPath.lastIndexOf(sep) + 1);
+  return join(dirname(finalPath), `.${name}.mongoshield-lock`);
+}
+
+/** True if something (file or directory) exists at `path`. */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+
+/**
+ * Removes a lock directory left by a crashed writer. Returns true if the lock was
+ * stale (or is already gone), so the caller should try to take it right away.
+ * Two waiters may both find the same lock stale; only one rmdir removes it, and
+ * mkdir then still lets only one of them in.
+ */
+async function removeIfStaleLock(lockPath: string): Promise<boolean> {
+  let stats: Stats;
+  try {
+    stats = await lstat(lockPath);
+  } catch (error) {
+    if (isMissing(error)) return true;
+    throw error;
+  }
+  if (Date.now() - stats.mtimeMs <= STALE_LOCK_MS) return false;
+  await rmdir(lockPath).catch(() => {});
+  return true;
 }
 
 /**

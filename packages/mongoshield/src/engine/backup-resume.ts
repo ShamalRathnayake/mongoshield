@@ -7,6 +7,10 @@
  * - the options fingerprint matches (same patterns, query, compression, encryption,
  *   retention): otherwise the parts would not belong to one backup;
  * - the source is the same deployment (`clusterId`), if both runs know it;
+ * - for `resume: "auto"`, the labels are the same too: two scheduled jobs with the
+ *   same selection (say plans "hourly" and "nightly") must never continue each
+ *   other's checkpoint, or one plan's backup would be committed with the other's
+ *   labels and pruned by the wrong retention scope;
  * - no manifest exists yet for it (a backup cannot be committed twice);
  * - every file it claims is finished still exists with its recorded size.
  */
@@ -44,6 +48,11 @@ export interface ResumeRequest {
   /** `BackupOptions.resume`: a backup id, `"latest"` or `"auto"`. */
   readonly resume: string;
   readonly fingerprint: BackupFingerprint;
+  /**
+   * The labels of this run. `"auto"` only continues a checkpoint with exactly these
+   * labels; a named or the latest checkpoint keeps its own (it is that backup).
+   */
+  readonly labels: Readonly<Record<string, string>>;
   readonly deployment: DeploymentInfo;
   readonly signal: AbortSignal | undefined;
 }
@@ -89,8 +98,8 @@ export async function findCheckpointToResume(
 }
 
 /**
- * `resume: "auto"`: the newest checkpoint made with the same options for the same
- * deployment and not yet committed, or `undefined`. Damaged candidates still fail
+ * `resume: "auto"`: the newest checkpoint made with the same options and labels for
+ * the same deployment and not yet committed, or `undefined`. Damaged candidates still fail
  * loudly: silently starting over would hide the damage.
  */
 async function findMatchingCheckpoint(request: ResumeRequest): Promise<Checkpoint | undefined> {
@@ -108,6 +117,7 @@ async function findMatchingCheckpoint(request: ResumeRequest): Promise<Checkpoin
     const sameOptions =
       fingerprintDifferences(checkpoint.fingerprint, request.fingerprint).length === 0;
     if (!sameOptions || !sameDeployment(checkpoint, request.deployment)) continue;
+    if (!sameLabels(checkpoint.labels, request.labels)) continue;
     if (await hasManifest(request.storage, id, request.signal)) continue;
     await assertFilesIntact(checkpoint, request);
     return checkpoint;
@@ -161,6 +171,16 @@ async function assertFilesIntact(checkpoint: Checkpoint, request: ResumeRequest)
       details: { problems },
     },
   );
+}
+
+/** Exactly the same label keys and values; key order does not matter. */
+function sameLabels(
+  stored: Readonly<Record<string, string>>,
+  wanted: Readonly<Record<string, string>>,
+): boolean {
+  const storedKeys = Object.keys(stored);
+  if (storedKeys.length !== Object.keys(wanted).length) return false;
+  return storedKeys.every((key) => Object.hasOwn(wanted, key) && wanted[key] === stored[key]);
 }
 
 /** Same `clusterId` (checkpoints of old writers may not record one). */

@@ -22,8 +22,11 @@
  * Security:
  * - Authentication is by private key (`privateKey`/`privateKeyPath`, optionally
  *   with a `passphrase`) or an SSH agent. Passwords are deliberately not supported.
- * - The server's host key is always verified against `hostFingerprint` (the
- *   OpenSSH `SHA256:…` form). Unknown hosts are refused unless you opt out with
+ * - The server's host key is always verified, against `hostFingerprint` (the
+ *   OpenSSH `SHA256:…` form) and/or an OpenSSH `known_hosts` file
+ *   (`knownHostsPath`, or its contents as `knownHosts`; plain, hashed and
+ *   `[host]:port` entries, see ./known-hosts.ts). A key accepted by either is
+ *   trusted. Unknown hosts are refused unless you opt out with
  *   `allowUnknownHostKey: true`, which allows man-in-the-middle attacks.
  *
  * How the contract is met:
@@ -74,6 +77,15 @@ import {
   toBuffer,
 } from "./adapter-utils.ts";
 import { assertValidKey, assertValidPrefix } from "./keys.ts";
+import {
+  checkKnownHost,
+  entriesForHost,
+  expandHome,
+  hostKeyAlgorithmsFor,
+  type KnownHostEntry,
+  type KnownHostVerdict,
+  parseKnownHosts,
+} from "./known-hosts.ts";
 import { rejectRetention } from "./retention.ts";
 import type {
   GetOptions,
@@ -110,7 +122,17 @@ export interface SftpStorageOptions {
    */
   readonly hostFingerprint?: string | readonly string[];
   /**
-   * Accept any host key when no `hostFingerprint` is given. Dangerous: anyone
+   * Path to an OpenSSH `known_hosts` file, e.g. `~/.ssh/known_hosts` (a leading
+   * `~/` means the home directory). Read on each (re)connect. The server must
+   * present a key listed for `host` (or `[host]:port` on other ports); a host
+   * listed with other keys, or a `@revoked` key, is refused. An alternative to
+   * `hostFingerprint`; both may be given.
+   */
+  readonly knownHostsPath?: string;
+  /** The contents of a `known_hosts` file, instead of `knownHostsPath`. */
+  readonly knownHosts?: string;
+  /**
+   * Accept any host key when neither `hostFingerprint` nor known hosts are given. Dangerous: anyone
    * who can intercept the connection can read and replace your backups. Only
    * for throwaway test setups.
    */
@@ -189,6 +211,13 @@ interface SshConnectConfig {
   hostVerifier: (key: Buffer) => boolean;
   readyTimeout: number;
   keepaliveInterval: number;
+  /**
+   * Algorithm preferences. ssh2 applies the operations of an object in key order,
+   * so `{ remove, prepend }` moves the listed algorithms to the front.
+   */
+  algorithms?: {
+    serverHostKey: { remove: readonly string[]; prepend: readonly string[] };
+  };
 }
 
 /** The subset of ssh2's `Client` this adapter uses. */
@@ -667,8 +696,10 @@ interface SftpSettings {
   readonly privateKeyPath?: string;
   readonly agent?: string;
   readonly passphrase?: string;
-  /** Normalized fingerprints (base64 without `SHA256:` and padding); empty = accept any. */
+  /** Normalized fingerprints (base64 without `SHA256:` and padding). */
   readonly fingerprints: readonly string[];
+  /** Where the known hosts come from, if configured (`path` already has `~` expanded). */
+  readonly knownHosts?: { readonly path: string } | { readonly text: string };
   readonly root: string;
   readonly readyTimeoutMs: number;
   readonly keepaliveIntervalMs: number;
@@ -715,10 +746,11 @@ function validateOptions(options: SftpStorageOptions): SftpSettings {
       ? [options.hostFingerprint]
       : (options.hostFingerprint ?? [])
   ).map(normalizeFingerprint);
-  if (fingerprints.length === 0 && options.allowUnknownHostKey !== true) {
+  const knownHosts = knownHostsSource(options, invalid);
+  if (fingerprints.length === 0 && !knownHosts && options.allowUnknownHostKey !== true) {
     throw invalid(
-      `Refusing to connect to ${options.host} without a host key fingerprint.`,
-      `Get it with \`ssh-keyscan -p ${port} ${options.host} | ssh-keygen -lf -\`, verify it out of band, and pass it as hostFingerprint ("SHA256:…").`,
+      `Refusing to connect to ${options.host} without a host key fingerprint or known_hosts file.`,
+      `Get it with \`ssh-keyscan -p ${port} ${options.host} | ssh-keygen -lf -\`, verify it out of band, and pass it as hostFingerprint ("SHA256:…"), or pass knownHostsPath.`,
     );
   }
 
@@ -735,10 +767,28 @@ function validateOptions(options: SftpStorageOptions): SftpSettings {
     ...(agent ? { agent } : {}),
     ...(options.passphrase === undefined ? {} : { passphrase: options.passphrase }),
     fingerprints,
+    ...(knownHosts ? { knownHosts } : {}),
     root,
     readyTimeoutMs: options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS,
     keepaliveIntervalMs: options.keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_MS,
   };
+}
+
+/** The configured known hosts: a file (with `~/` expanded) or literal contents. */
+function knownHostsSource(
+  options: SftpStorageOptions,
+  invalid: (message: string, hint?: string) => MongoShieldError,
+): SftpSettings["knownHosts"] {
+  const { knownHostsPath, knownHosts } = options;
+  if (knownHostsPath !== undefined && knownHosts !== undefined) {
+    throw invalid("sftpStorage() takes knownHostsPath or knownHosts, not both.");
+  }
+  if (knownHosts !== undefined) return { text: knownHosts };
+  if (knownHostsPath === undefined) return undefined;
+  if (typeof knownHostsPath !== "string" || knownHostsPath.trim() === "") {
+    throw invalid("sftpStorage() needs a non-empty knownHostsPath.");
+  }
+  return { path: expandHome(knownHostsPath) };
 }
 
 /** `"SHA256:abc="` and `"abc"` both become `"abc"`: OpenSSH prints base64 without padding. */
@@ -782,17 +832,19 @@ async function connect(settings: SftpSettings, onClose: () => void): Promise<Con
     settings.privateKeyPath === undefined
       ? settings.privateKey
       : await readPrivateKey(settings.privateKeyPath);
+  const knownHosts = await loadKnownHosts(settings);
+  const verifier = hostKeyVerifier(settings, knownHosts);
 
   return new Promise<Connection>((resolve, reject) => {
     const client = new ssh2.Client();
     let ready = false;
-    // Remembered so a refused host key can be reported with what was presented.
-    let rejectedFingerprint: string | undefined;
 
     client.on("error", (error) => {
       if (ready) return; // later errors also end in "close", which triggers a reconnect
+      // A refused host key is reported with what was presented and why it was refused.
+      const rejection = verifier.rejection();
       reject(
-        rejectedFingerprint === undefined ? error : Object.assign(error, { rejectedFingerprint }),
+        rejection === undefined ? error : Object.assign(error, { hostKeyRejection: rejection }),
       );
     });
     client.on("close", () => {
@@ -821,18 +873,99 @@ async function connect(settings: SftpSettings, onClose: () => void): Promise<Con
       ...(privateKey === undefined ? {} : { privateKey: Buffer.from(privateKey) }),
       ...(settings.passphrase === undefined ? {} : { passphrase: settings.passphrase }),
       ...(settings.agent === undefined ? {} : { agent: settings.agent }),
-      // ssh2 hands us the raw host key blob; its SHA-256 is the OpenSSH fingerprint.
-      hostVerifier: (hostKey: Buffer) => {
-        if (settings.fingerprints.length === 0) return true; // allowUnknownHostKey
-        const presented = sshFingerprint(hostKey);
-        const accepted = settings.fingerprints.includes(presented.slice("SHA256:".length));
-        if (!accepted) rejectedFingerprint = presented;
-        return accepted;
-      },
+      hostVerifier: verifier.verify,
       readyTimeout: settings.readyTimeoutMs,
       keepaliveInterval: settings.keepaliveIntervalMs,
+      ...preferredHostKeyAlgorithms(settings, knownHosts),
     });
   });
+}
+
+/** Why a host key was refused, attached to the connection error for {@link sftpError}. */
+interface HostKeyRejection {
+  /** The presented key's `SHA256:…` fingerprint. */
+  readonly fingerprint: string;
+  /** What known_hosts said, or `fingerprint-mismatch` when only fingerprints were configured. */
+  readonly reason: Exclude<KnownHostVerdict, "trusted"> | "fingerprint-mismatch";
+  /** The known_hosts file consulted, for messages (`known_hosts` for literal contents). */
+  readonly source?: string;
+}
+
+/**
+ * The `hostVerifier` for one connection attempt, and what it refused (if anything).
+ * A key is trusted when it matches a configured fingerprint or a known_hosts entry
+ * for this host; a `@revoked` key is refused even if a fingerprint matches.
+ */
+function hostKeyVerifier(
+  settings: SftpSettings,
+  knownHosts: readonly KnownHostEntry[] | undefined,
+): { verify: (hostKey: Buffer) => boolean; rejection: () => HostKeyRejection | undefined } {
+  let rejection: HostKeyRejection | undefined;
+  const source = knownHostsLabel(settings);
+  const verify = (hostKey: Buffer): boolean => {
+    // allowUnknownHostKey: nothing to verify against.
+    if (settings.fingerprints.length === 0 && knownHosts === undefined) return true;
+    // ssh2 hands us the raw host key blob; its SHA-256 is the OpenSSH fingerprint.
+    const fingerprint = sshFingerprint(hostKey);
+    const verdict =
+      knownHosts === undefined
+        ? undefined
+        : checkKnownHost(knownHosts, settings.host, settings.port, hostKey);
+    if (verdict === "trusted") return true;
+    const fingerprintMatches = settings.fingerprints.includes(fingerprint.slice("SHA256:".length));
+    if (fingerprintMatches && verdict !== "revoked") return true;
+    rejection = {
+      fingerprint,
+      reason: verdict ?? "fingerprint-mismatch",
+      ...(source === undefined ? {} : { source }),
+    };
+    return false;
+  };
+  return { verify, rejection: () => rejection };
+}
+
+/**
+ * Asks the server for a host key type that known_hosts lists for it, like OpenSSH.
+ * Without this, a server with ed25519 and RSA keys presents ed25519 even when
+ * only its RSA key is listed, and the connection is refused.
+ */
+function preferredHostKeyAlgorithms(
+  settings: SftpSettings,
+  knownHosts: readonly KnownHostEntry[] | undefined,
+): Pick<SshConnectConfig, "algorithms"> {
+  if (knownHosts === undefined) return {};
+  const keyTypes = entriesForHost(knownHosts, settings.host, settings.port).map(
+    (entry) => entry.keyType,
+  );
+  const preferred = hostKeyAlgorithmsFor(keyTypes);
+  if (preferred.length === 0) return {};
+  return { algorithms: { serverHostKey: { remove: preferred, prepend: preferred } } };
+}
+
+/** Reads and parses the configured known hosts; `undefined` when none are configured. */
+async function loadKnownHosts(settings: SftpSettings): Promise<KnownHostEntry[] | undefined> {
+  const source = settings.knownHosts;
+  if (source === undefined) return undefined;
+  if ("text" in source) return parseKnownHosts(source.text);
+  try {
+    return parseKnownHosts(await readFile(source.path, "utf8"));
+  } catch (error) {
+    throw new MongoShieldError(
+      "MS_CONFIG_INVALID",
+      `Could not read the known_hosts file ${source.path}.`,
+      {
+        cause: error,
+        hint: `Create it with \`ssh-keyscan -p ${settings.port} ${settings.host} >> ${source.path}\` after verifying the fingerprints out of band, or set knownHostsPath (MONGOSHIELD_SFTP_KNOWN_HOSTS) or hostFingerprint.`,
+      },
+    );
+  }
+}
+
+/** The known_hosts file named in messages, if known hosts are configured. */
+function knownHostsLabel(settings: SftpSettings): string | undefined {
+  const source = settings.knownHosts;
+  if (source === undefined) return undefined;
+  return "path" in source ? source.path : "known_hosts";
 }
 
 /**
@@ -1080,6 +1213,73 @@ function statusOf(error: unknown): number | undefined {
   return numberProperty(error, "code");
 }
 
+/** Reads the {@link HostKeyRejection} that `connect` attached to a handshake error. */
+function hostKeyRejectionOf(error: unknown): HostKeyRejection | undefined {
+  const rejection = propertyOf(error, "hostKeyRejection");
+  const fingerprint = stringProperty(rejection, "fingerprint");
+  const reason = stringProperty(rejection, "reason");
+  if (fingerprint === undefined || reason === undefined) return undefined;
+  const source = stringProperty(rejection, "source");
+  const known = ["revoked", "changed", "unknown", "fingerprint-mismatch"] as const;
+  const matched = known.find((candidate) => candidate === reason);
+  if (matched === undefined) return undefined;
+  return { fingerprint, reason: matched, ...(source === undefined ? {} : { source }) };
+}
+
+/** The error for a refused host key: what was presented, and what to do about it. */
+function hostKeyError(
+  rejection: HostKeyRejection,
+  cause: unknown,
+  context: SftpErrorContext,
+): MongoShieldError {
+  const { operation, target, settings } = context;
+  const presented = `the server presented host key ${rejection.fingerprint}`;
+  const source = rejection.source ?? "known_hosts";
+  const intercepting =
+    "If the server's key was rotated on purpose, verify the new fingerprint out of band and update";
+  const prefix = `Could not ${operation} ${target}: ${presented}`;
+  switch (rejection.reason) {
+    case "revoked":
+      return new MongoShieldError(
+        "MS_STORAGE_FORBIDDEN",
+        `${prefix}, which ${source} marks @revoked.`,
+        {
+          cause,
+          hint: "A revoked key must never be trusted again. Ask the server's administrator for its current host key.",
+        },
+      );
+    case "unknown": {
+      const fingerprints = settings.fingerprints.length > 0 ? " or hostFingerprint" : "";
+      return new MongoShieldError(
+        "MS_STORAGE_FORBIDDEN",
+        `${prefix}, but ${settings.host}:${settings.port} is not listed in ${source}${fingerprints}.`,
+        {
+          cause,
+          hint: `Verify the fingerprint out of band, then add the host: \`ssh-keyscan -p ${settings.port} ${settings.host} >> ${source}\` (or pass hostFingerprint).`,
+        },
+      );
+    }
+    case "changed":
+      return new MongoShieldError(
+        "MS_STORAGE_FORBIDDEN",
+        `${prefix}, which does not match the keys ${source} lists for ${settings.host}:${settings.port}.`,
+        {
+          cause,
+          hint: `${intercepting} ${source}. Otherwise someone may be intercepting the connection.`,
+        },
+      );
+    case "fingerprint-mismatch":
+      return new MongoShieldError(
+        "MS_STORAGE_FORBIDDEN",
+        `${prefix}, which does not match hostFingerprint.`,
+        {
+          cause,
+          hint: `${intercepting} hostFingerprint. Otherwise someone may be intercepting the connection.`,
+        },
+      );
+  }
+}
+
 /** Context for {@link sftpError}. */
 interface SftpErrorContext {
   readonly operation: Operation;
@@ -1109,17 +1309,8 @@ function sftpError(error: unknown, context: SftpErrorContext): MongoShieldError 
   };
   const server = `${settings.host}:${settings.port}`;
 
-  const rejectedFingerprint = stringProperty(error, "rejectedFingerprint");
-  if (rejectedFingerprint !== undefined) {
-    return new MongoShieldError(
-      "MS_STORAGE_FORBIDDEN",
-      `Could not ${operation} ${target}: the server presented host key ${rejectedFingerprint}, which does not match hostFingerprint.`,
-      {
-        cause: error,
-        hint: "If the server's key was rotated on purpose, verify the new fingerprint out of band and update hostFingerprint. Otherwise someone may be intercepting the connection.",
-      },
-    );
-  }
+  const rejection = hostKeyRejectionOf(error);
+  if (rejection !== undefined) return hostKeyError(rejection, error, context);
   // ssh2 parses the key before connecting; a wrong passphrase or a malformed
   // key fails there, without ever reaching the server.
   if (/privateKey|passphrase/i.test(reason) && stringProperty(error, "level") === undefined) {

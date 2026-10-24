@@ -20,6 +20,11 @@
  * The values are SOURCE values (read before masking), because they are used to query
  * the source. They live in the target only while the copy runs: `dropAll()` removes
  * them on success, failure and abort alike.
+ *
+ * Values keep their stored field order (src/format/field-order.ts): an embedded
+ * document referenced by value (`{ b: 1, "1": 2 }`) is written to the set, read back
+ * and used in `$in` in that order. In JavaScript order it would be another value,
+ * matching nothing in the source.
  */
 
 import {
@@ -32,7 +37,7 @@ import {
 } from "mongodb";
 import { commandWriteConcern } from "../engine/restore-collections.ts";
 import { throwIfAborted } from "../errors.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
+import { deserializeInStoredOrder, valueInStoredOrder } from "../format/field-order.ts";
 import type { Logger } from "../logger.ts";
 import { collectPathValues } from "../mask/paths.ts";
 import { bsonTag } from "../mask/values.ts";
@@ -146,20 +151,26 @@ export class ReferenceSets {
     return false;
   }
 
-  /** The values of `set` in `round`, in batches of `batchSize`. */
+  /**
+   * The values of `set` in `round`, in batches of `batchSize`: exact BSON types, and
+   * documents with their stored field order recorded (pass them through
+   * `valueInStoredOrder` when querying with them).
+   */
   async *values(
     set: ReferenceSet,
     round: number,
     batchSize: number,
     signal: AbortSignal | undefined,
   ): AsyncGenerator<unknown[]> {
+    // Raw, then parsed losslessly in stored order (see the file header).
     const cursor = this.#db(set)
       .collection(set.collection)
-      .find({ round }, { projection: { _id: 1 }, batchSize, ...LOSSLESS_DESERIALIZE_OPTIONS });
+      .find({ round }, { projection: { _id: 1 }, batchSize, raw: true });
     try {
       let batch: unknown[] = [];
-      for await (const document of cursor) {
-        batch.push(document._id);
+      for await (const raw of cursor) {
+        if (!(raw instanceof Uint8Array)) continue;
+        batch.push(deserializeInStoredOrder(raw)._id);
         if (batch.length >= batchSize) {
           throwIfAborted(signal);
           yield batch;
@@ -188,7 +199,11 @@ export class ReferenceSets {
 
   /** Inserts values with the current round; values already in the set are skipped. */
   async #add(set: ReferenceSet, values: readonly unknown[]): Promise<void> {
-    const documents: Document[] = values.map((value) => ({ _id: value, round: this.#round }));
+    // Each value in stored order, so the set holds the stored value (see the header).
+    const documents: Document[] = values.map((value) => ({
+      _id: valueInStoredOrder(value),
+      round: this.#round,
+    }));
     try {
       await this.#db(set)
         .collection(set.collection)

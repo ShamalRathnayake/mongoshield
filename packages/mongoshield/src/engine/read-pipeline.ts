@@ -33,7 +33,11 @@ import {
   identityToRecipient,
   parseIdentityFile,
 } from "../crypto/index.ts";
-import { createKmsKeyUnwrapper, isKmsRecipientLabel } from "../crypto/kms/index.ts";
+import {
+  createKmsKeyUnwrapper,
+  isKmsRecipientLabel,
+  resolveKmsClient,
+} from "../crypto/kms/index.ts";
 import { abortError, isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { createBsonSplitter } from "../format/bson-stream.ts";
 import { resolveBackupKey } from "../format/layout.ts";
@@ -178,7 +182,8 @@ export async function openBackupSource(
       storage,
       manifest.id,
       keyFile,
-      { keyUnwrappers: [createKmsKeyUnwrapper()] },
+      // The signal reaches the KMS call, so a cancelled restore does not wait for it.
+      { keyUnwrappers: [createKmsKeyUnwrapper(resolveKmsClient, { signal: options.signal })] },
       options,
     );
     return sourceFromManifest(storage, manifest, { identities: [identity] });

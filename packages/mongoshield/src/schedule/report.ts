@@ -90,7 +90,14 @@ export interface RunReport {
   readonly prune?: {
     readonly deletedBackups: number;
     readonly deletedBytes: number;
+    /** Backups of this job's scope that the policy kept. */
     readonly kept: number;
+    /**
+     * Backups of other sources or selections in the same storage location, which
+     * this job's retention left alone (see `PruneScope`). Absent in reports of
+     * releases before scoped retention.
+     */
+    readonly outOfScope?: number;
   };
   readonly error?: {
     readonly step: RunStep;

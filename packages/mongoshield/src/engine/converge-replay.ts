@@ -22,6 +22,10 @@
  * Drops: a dropped collection is emptied rather than dropped, so its restored options
  * survive in case it is created again later in the window; collections still dropped
  * at the end of the window are dropped for real at the end of the replay.
+ *
+ * Indexes: `createIndexes` / `dropIndexes` events are collected per target
+ * (converge-indexes.ts) and returned as `indexChanges`; the caller applies them once
+ * the documents and the dumped indexes are in place.
  */
 
 import {
@@ -38,6 +42,7 @@ import type { ClusterTime, StoredFile } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
 import { splitNamespace } from "../mongo/index.ts";
 import { needsFullDocument, readChangeEvents, type StoredChangeEvent } from "./converge-events.ts";
+import { IndexChangeTracker, type IndexReplayPlan } from "./converge-indexes.ts";
 import { type ReplayStep, replayStepFor } from "./converge-operations.ts";
 import type { ReplayTargets } from "./converge-targets.ts";
 import { compareClusterTimes } from "./converge-time.ts";
@@ -107,6 +112,11 @@ export interface ReplayResult {
   readonly toleratedErrors: number;
   /** Target namespaces that no longer exist after the replay (dropped or renamed away). */
   readonly removedTargets: ReadonlySet<string>;
+  /**
+   * Index changes made during the window, per target that still exists, for
+   * `applyIndexChanges` (converge-indexes.ts) once the documents are in.
+   */
+  readonly indexChanges: ReadonlyMap<string, IndexReplayPlan>;
   /** Things the user should know, also logged as warnings. */
   readonly warnings: readonly string[];
 }
@@ -149,6 +159,7 @@ class Replayer {
   /** Targets emptied by a drop and not created again (yet). */
   readonly #dropped = new Set<string>();
   readonly #removed = new Set<string>();
+  readonly #indexes = new IndexChangeTracker();
   readonly #warnings: string[] = [];
   #events = 0;
   #applied = 0;
@@ -199,12 +210,15 @@ class Replayer {
       skipped: this.#skipped,
       toleratedErrors: this.#tolerated,
     });
+    const indexChanges = new Map(this.#indexes.plans());
+    for (const target of this.#removed) indexChanges.delete(target);
     return {
       events: this.#events,
       applied: this.#applied,
       skipped: this.#skipped,
       toleratedErrors: this.#tolerated,
       removedTargets: this.#removed,
+      indexChanges,
       warnings: this.#warnings,
     };
   }
@@ -217,11 +231,15 @@ class Replayer {
       case "create":
         return this.#create(step.ns, step.options);
       case "drop":
-        return this.#drop(step.ns);
+        return this.#drop(step.ns, step.keepsIndexes);
       case "dropDatabase":
-        for (const ns of this.#request.targets.sourcesInDatabase(step.db)) await this.#drop(ns);
+        for (const ns of this.#request.targets.sourcesInDatabase(step.db)) {
+          await this.#drop(ns, false);
+        }
         this.#applied += 1;
         return;
+      case "indexes":
+        return this.#recordIndexes(step.ns, step.changes);
       case "rename":
         return this.#rename(step.from, step.to);
       case "ignore":
@@ -279,8 +297,12 @@ class Replayer {
     });
   }
 
-  /** Empties the target; it is dropped at the end unless something creates it again. */
-  async #drop(ns: string): Promise<void> {
+  /**
+   * Empties the target; it is dropped at the end unless something creates it again.
+   * A real drop also forgets the target's indexes (`keepsIndexes` is false); the
+   * synthesized drop before a rename destination's documents keeps them.
+   */
+  async #drop(ns: string, keepsIndexes: boolean): Promise<void> {
     const target = this.#request.targets.targetOf(ns);
     if (target === undefined) {
       this.#skipped += 1;
@@ -291,6 +313,18 @@ class Replayer {
       await this.#collection(target).deleteMany({}, this.#writeOptions());
     });
     this.#dropped.add(target);
+    if (!keepsIndexes) this.#indexes.reset(target);
+    this.#applied += 1;
+  }
+
+  /** Index changes are applied after the replay (see the file header). */
+  #recordIndexes(ns: string, changes: Parameters<IndexChangeTracker["record"]>[1]): void {
+    const target = this.#request.targets.targetOf(ns);
+    if (target === undefined) {
+      this.#skipped += 1;
+      return;
+    }
+    this.#indexes.record(target, changes);
     this.#applied += 1;
   }
 
@@ -308,7 +342,7 @@ class Replayer {
       this.#skipped += 1;
       return;
     }
-    if (toTarget === undefined) return this.#drop(from);
+    if (toTarget === undefined) return this.#drop(from, false);
     if (fromTarget === undefined) {
       this.#skipped += 1;
       this.#warn(
@@ -339,6 +373,7 @@ class Replayer {
     });
     this.#dropped.delete(fromTarget);
     this.#removed.add(fromTarget);
+    this.#indexes.rename(fromTarget, toTarget);
     this.#markExists(toTarget);
     this.#applied += 1;
   }

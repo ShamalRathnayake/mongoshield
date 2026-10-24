@@ -12,8 +12,8 @@
  *
  * Times: a backup stands at the cluster time it is consistent at (snapshot: its read
  * time; converge: the end of its window), or at its completion time for consistency
- * "none". Note that converge backups are read as dumped (like `find`), so a document
- * changed during their window may show an older version.
+ * "none". Converge backups show the document as it was at the end of their window
+ * (like `find`, the changes recorded during the backup are overlaid on the dump).
  *
  * `_id`s are compared with query equality (`$eq`), so `42` finds an `_id` stored as
  * Int32, Long or Double 42. Memory: one document per backup plus the matching events.
@@ -137,11 +137,12 @@ export async function documentHistory(
   // `$eq` keeps an id that is itself a document (`{ a: 1 }`) from being read as operators.
   const idMatcher = compileFilter({ _id: { $eq: options.id } });
 
-  const manifests = await backupsHolding(context, options.namespace, limit, options.signal);
+  const holding = await backupsHolding(context, options.namespace, limit, options.signal);
+  const manifests = holding.map((backup) => backup.manifest);
   const versions: HistoryVersion[] = [];
-  for (const manifest of manifests) {
+  for (const backup of holding) {
     throwIfAborted(options.signal);
-    versions.push(await versionInBackup(context, manifest, idMatcher, options));
+    versions.push(await versionInBackup(context, backup, idMatcher, options));
   }
 
   const journal =
@@ -188,23 +189,34 @@ function validateBackupLimit(backups: "all" | number | undefined): number {
   return backups;
 }
 
+/** A backup that holds the namespace, with the namespace's manifest entry. */
+interface HoldingBackup {
+  readonly manifest: Manifest;
+  readonly entry: CollectionEntry;
+}
+
 /** The newest `limit` complete backups that hold `namespace` with documents. */
 async function backupsHolding(
   context: EngineContext,
   namespace: string,
   limit: number,
   signal: AbortSignal | undefined,
-): Promise<Manifest[]> {
+): Promise<HoldingBackup[]> {
   const entries = await listBackups(context.storage, {
     logger: context.logger,
     ...(signal ? { signal } : {}),
   });
-  const manifests = entries
-    .filter((entry) => entry.status === "complete")
-    .map(manifestOf)
-    .filter((manifest) => documentNamespace(manifest, namespace) !== undefined)
-    .sort((left, right) => compareClusterTimes(backupTime(right), backupTime(left)));
-  return manifests.slice(0, limit);
+  const holding: HoldingBackup[] = [];
+  for (const catalogEntry of entries) {
+    if (catalogEntry.status !== "complete") continue;
+    const manifest = manifestOf(catalogEntry);
+    const entry = documentNamespace(manifest, namespace);
+    if (entry !== undefined) holding.push({ manifest, entry });
+  }
+  holding.sort((left, right) =>
+    compareClusterTimes(backupTime(right.manifest), backupTime(left.manifest)),
+  );
+  return holding.slice(0, limit);
 }
 
 /** The cluster time a backup stands for (see the file header). */
@@ -215,18 +227,17 @@ function backupTime(manifest: Manifest): ClusterTime {
 /** Looks the document up in one backup. */
 async function versionInBackup(
   context: EngineContext,
-  manifest: Manifest,
+  backup: HoldingBackup,
   idMatcher: DocumentMatcher,
   options: DocumentHistoryOptions,
 ): Promise<BackupVersion> {
-  const entry = documentNamespace(manifest, options.namespace);
+  const { manifest, entry } = backup;
   const base = {
     kind: "backup",
     backupId: manifest.id,
     time: backupTime(manifest),
     completedAt: new Date(manifest.completedAt),
   } as const;
-  if (entry === undefined) return { ...base, state: "absent" };
 
   const source = await openBackupSource(context.storage, manifest, options.decryption, {
     signal: options.signal,
@@ -234,7 +245,10 @@ async function versionInBackup(
   const narrowed: CollectionEntry = { ...entry, files: partsThatMayHold(entry.files, options.id) };
   const opened = { manifest, entry: narrowed, source };
   // `_id`s are unique, so the first match is the document; returning closes the file.
-  for await (const match of matchingDocuments(opened, idMatcher, options.signal)) {
+  const matches = matchingDocuments(opened, idMatcher, options.signal, {
+    logger: context.logger,
+  });
+  for await (const match of matches) {
     return { ...base, state: "present", document: match.document };
   }
   return { ...base, state: "absent" };

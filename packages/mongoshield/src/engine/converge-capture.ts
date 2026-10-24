@@ -9,54 +9,56 @@
  *     ─▶ the collections are dumped meanwhile (backup.ts)
  *     ─▶ T1 = now ─▶ drain until the stream has passed T1 ─▶ drop events after T1
  *
- * Why the low-level `aggregate` / `getMore` commands instead of the driver's
- * ChangeStream: the drain must know how far the stream has read even when no event
- * arrives, which only the raw replies say (`postBatchResumeToken`, `operationTime`),
- * and `fieldsAsRaw` hands over each event as the exact bytes the server sent, which
- * are stored without being re-encoded.
+ * The stream itself (converge-stream.ts) uses the low-level `aggregate` / `getMore`
+ * commands, because the drain must know how far the stream has read even when no
+ * event arrives (`postBatchResumeToken`, `operationTime`) and the events are stored as
+ * the exact bytes the server sent. It also reassembles events the server split
+ * (`$changeStreamSplitLargeEvent`) and resumes after transient errors (a dropped
+ * connection, a killed session) from the last batch's resume token.
  *
  * Backpressure: the events come from an async generator behind `Readable.from`, and
  * the generator only asks the server for the next batch when the storage side has
  * taken the previous ones. Memory stays flat however busy the database is.
  *
- * Failure is never silent: a lost history (`ChangeStreamHistoryLost`), a dropped
- * connection or a failed write fails the capture, which aborts the dumps and fails
- * the backup. A converge backup that missed events is never committed.
+ * Failure is never silent: a lost history (`ChangeStreamHistoryLost`), a connection
+ * that stays down after the stream's bounded resume attempts, or a failed write fails
+ * the capture, which aborts the dumps and fails the backup. A converge backup that
+ * missed events is never committed.
  */
 
 import { Readable } from "node:stream";
-import {
-  BSON,
-  type ClientSession,
-  type Document,
-  Long,
-  type MongoClient,
-  MongoServerError,
-} from "mongodb";
+import { setTimeout as sleep } from "node:timers/promises";
+import { type Document, Long, type MongoClient, MongoServerError } from "mongodb";
 import { createCompressor } from "../compression/index.ts";
 import { createEncryptStream } from "../crypto/index.ts";
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
+import { deserializeInStoredOrder, valueInStoredOrder } from "../format/field-order.ts";
 import { changesFileKey, resolveBackupKey } from "../format/layout.ts";
 import type { ChangesFile, ClusterTime, Compression } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
 import { type CollectionSpec, compileNamespaceFilter, splitNamespace } from "../mongo/index.ts";
+import { compileNamespaceRules } from "../mongo/namespace-filter.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import type { BackupOptions } from "../types.ts";
 import { createCoalescer } from "./backup-coalesce.ts";
-import { toBackupError } from "./backup-errors.ts";
+import { isCatalogChangedUnderSnapshot, toBackupError } from "./backup-errors.ts";
 import type { FileEncryption } from "./backup-key.ts";
 import { writeStoredFile } from "./backup-write.ts";
 import {
   type ChangeEvent,
   collectionNamespaceOf,
   needsFullDocument,
-  parseChangeEvent,
+  serializeChangeEvent,
 } from "./converge-events.ts";
 import { BINARY_COLLATION } from "./converge-operations.ts";
 import {
-  clusterTimeOfReply,
-  clusterTimeOfResumeToken,
+  type ChangeStreamBatch,
+  HISTORY_LOST_CODES,
+  ResumableChangeStream,
+  type ResumePolicy,
+  serverDatabaseFilter,
+} from "./converge-stream.ts";
+import {
   compareClusterTimes,
   formatClusterTime,
   readLatestClusterTime,
@@ -76,6 +78,18 @@ const AWAIT_DATA_MS = 1000;
  */
 export const DRAIN_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * Reads of a rename's destination that the server refuses because the collection's
+ * catalog entry changed at or after the requested time (sharded clusters, see
+ * `#openDestinationRead`): attempts, and the wait before the n-th retry (n times this).
+ * Ten attempts wait 25 + 50 + … + 225 ms, about 1.1 s in all: the rename's catalog
+ * change commits on the shard within milliseconds of its change event, and short
+ * waits give a collection that is replaced again and again (a `$out` loop) the best
+ * chance to be read between two replacements.
+ */
+export const DESTINATION_READ_ATTEMPTS = 10;
+const DESTINATION_RETRY_DELAY_MS = 25;
+
 /** Databases never backed up unless named explicitly (see namespace discovery). */
 const INTERNAL_DATABASES = ["admin", "config", "local"];
 
@@ -84,13 +98,6 @@ const INTERNAL_DATABASES = ["admin", "config", "local"];
  * write into before renaming them over their target, e.g. `tmp.agg_out.<uuid>`.
  */
 const SCRATCH_COLLECTION_PREFIX = "tmp.";
-
-/** Server error codes that mean the change stream lost part of the window. */
-const HISTORY_LOST_CODES = new Set([
-  286, // ChangeStreamHistoryLost: the oplog no longer reaches back to T0
-  280, // ChangeStreamFatalError: e.g. the resume point fell off the oplog
-  136, // CappedPositionLost: the oplog rolled over under the cursor
-]);
 
 /** Server error code for "not authorized". */
 const UNAUTHORIZED_CODE = 13;
@@ -103,9 +110,6 @@ const RAW_BATCH_OPTIONS = {
   fieldsAsRaw: { firstBatch: true, nextBatch: true },
   promoteLongs: false,
 } as const;
-
-/** Re-encoding an enriched event exactly as it was parsed (see `LOSSLESS_DESERIALIZE_OPTIONS`). */
-const SERIALIZE_OPTIONS = { checkKeys: false, ignoreUndefined: false } as const;
 
 /** What `startChangeCapture` needs. */
 export interface ChangeCaptureRequest {
@@ -130,6 +134,8 @@ export interface ChangeCaptureRequest {
   readonly signal: AbortSignal | undefined;
   /** Write-once retention for the changes file (`backup({ retainDays })`). */
   readonly retainUntil?: Date | undefined;
+  /** How the change stream is reopened after transient errors (tests shorten it). */
+  readonly resume?: ResumePolicy | undefined;
 }
 
 /** The captured window, for the manifest. */
@@ -167,35 +173,25 @@ export interface ChangeCapture {
  */
 export async function startChangeCapture(request: ChangeCaptureRequest): Promise<ChangeCapture> {
   const scope = createCaptureScope(request.specs, request);
-  // getMore must run in the session that opened the cursor. No causal consistency:
-  // it would only add `afterClusterTime` to commands that do not need it.
-  const session = request.client.startSession({ causalConsistency: false });
-  let reply: Document;
-  try {
-    reply = await request.client.db("admin").command(
-      {
-        aggregate: 1,
-        pipeline: [
-          {
-            $changeStream: {
-              allChangesForCluster: true,
-              startAtOperationTime: toTimestamp(request.from),
-              // DDL events (create, rename, …) and `disambiguatedPaths` need this.
-              showExpandedEvents: true,
-            },
-          },
-          { $match: scope.serverFilter },
-        ],
-        cursor: {},
-      },
-      { session, ...RAW_BATCH_OPTIONS },
-    );
-  } catch (error) {
-    await session.endSession().catch(() => {});
-    throw toCaptureError(error, request.from);
-  }
+  // Aborts the capture: on failure, on stop(), and (linked) on the caller's abort.
+  const controller = new AbortController();
+  const signal =
+    request.signal === undefined
+      ? controller.signal
+      : AbortSignal.any([controller.signal, request.signal]);
+  const stream = await ResumableChangeStream.open({
+    client: request.client,
+    startAt: request.from,
+    match: scope.serverFilter,
+    comment: `mongoshield backup ${request.backupId} (converge)`,
+    logger: request.logger,
+    signal,
+    awaitDataMs: AWAIT_DATA_MS,
+    resume: request.resume,
+    toError: (error) => toCaptureError(error, request.from),
+  });
 
-  const capture = new CaptureRun(request, scope, session, reply);
+  const capture = new CaptureRun(request, scope, stream, controller, signal);
   request.logger.debug("Capturing changes", { from: formatClusterTime(request.from) });
   return capture;
 }
@@ -206,7 +202,7 @@ export async function startChangeCapture(request: ChangeCaptureRequest): Promise
 
 /** Decides which change events the capture keeps. */
 export interface CaptureScope {
-  /** `$match` run by the server, to skip whole databases cheaply. */
+  /** `$match` run by the server, to skip whole databases cheaply (`serverDatabaseFilter`). */
   readonly serverFilter: Document;
   /** True for collection namespaces whose changes belong in the window. */
   keepsNamespace(ns: string): boolean;
@@ -256,9 +252,12 @@ export function createCaptureScope(
     return event.operationType === "rename" && to !== undefined && keepsNamespace(to);
   };
 
-  const skippedDatabases = INTERNAL_DATABASES.filter((db) => !databases.has(db));
   return {
-    serverFilter: { "ns.db": { $nin: skippedDatabases } },
+    serverFilter: serverDatabaseFilter(
+      compileNamespaceRules(patterns),
+      databases,
+      INTERNAL_DATABASES,
+    ),
     keepsNamespace,
     keeps,
   };
@@ -273,22 +272,20 @@ class CaptureRun implements ChangeCapture {
   readonly signal: AbortSignal;
   readonly #request: ChangeCaptureRequest;
   readonly #scope: CaptureScope;
-  readonly #session: ClientSession;
+  readonly #stream: ResumableChangeStream;
   readonly #relativeKey: string;
   /** Aborts the capture: on failure, on stop(), and (linked) on the caller's abort. */
-  readonly #controller = new AbortController();
+  readonly #controller: AbortController;
   readonly #writing: Promise<{ readonly size: number; readonly sha256: string }>;
   readonly #warnings: string[];
 
-  /** The first reply, consumed by the generator. */
-  #firstReply: Document | undefined;
-  /** The server cursor, until it is exhausted or killed. */
-  #cursorId: Long | number | undefined;
   #failure: MongoShieldError | undefined;
   #stopping = false;
   /** T1, once `finish()` has read it. */
   #stopAt: ClusterTime | undefined;
   #drainStartedAt = 0;
+  /** The latest time a rename's destination was read at after a refusal (see #extendEnd). */
+  #latestDestinationRead: ClusterTime | undefined;
   #events = 0;
 
   /** First cluster time of a `create` event per namespace. */
@@ -299,19 +296,16 @@ class CaptureRun implements ChangeCapture {
   constructor(
     request: ChangeCaptureRequest,
     scope: CaptureScope,
-    session: ClientSession,
-    firstReply: Document,
+    stream: ResumableChangeStream,
+    controller: AbortController,
+    signal: AbortSignal,
   ) {
     this.#request = request;
     this.#scope = scope;
-    this.#session = session;
-    this.#firstReply = firstReply;
-    this.#cursorId = cursorIdOf(firstReply);
+    this.#stream = stream;
+    this.#controller = controller;
+    this.signal = signal;
     this.#warnings = initialWarnings(request);
-    this.signal =
-      request.signal === undefined
-        ? this.#controller.signal
-        : AbortSignal.any([this.#controller.signal, request.signal]);
 
     this.#relativeKey = changesFileKey({
       compression: request.compression,
@@ -358,7 +352,10 @@ class CaptureRun implements ChangeCapture {
       if (this.#failure !== undefined) throw this.#failure;
       // T1 must not be earlier than anything the dump read: see readLatestClusterTime.
       const to = await readLatestClusterTime(this.#request.client);
-      this.#stopAt = to;
+      // Never before a destination read at a later time (see #extendEnd).
+      const latestRead = this.#latestDestinationRead;
+      this.#stopAt =
+        latestRead !== undefined && compareClusterTimes(latestRead, to) > 0 ? latestRead : to;
       this.#drainStartedAt = performance.now();
       this.#request.logger.debug("Draining the change stream", { to: formatClusterTime(to) });
       digest = await this.#writing;
@@ -411,15 +408,10 @@ class CaptureRun implements ChangeCapture {
    * fetching the next batch only when the previous one has been consumed.
    */
   async *#readEvents(): AsyncGenerator<Buffer> {
-    let reply = this.#firstReply ?? {};
-    this.#firstReply = undefined;
-    let batch = batchOf(reply, "firstBatch");
-
     for (;;) {
+      const batch = await this.#stream.next();
       let passedEnd = false;
-      for (const raw of batch) {
-        const event = parseChangeEvent(raw);
-        if (event.operationType === "invalidate") throw streamInvalidated();
+      for (const { raw, event } of batch.events) {
         // Events arrive in cluster-time order: once one is past T1, so is the rest.
         if (
           this.#stopAt !== undefined &&
@@ -434,12 +426,10 @@ class CaptureRun implements ChangeCapture {
         yield await this.#storedBytes(raw, event);
         if (this.#needsDestinationSnapshot(event)) yield* this.#destinationSnapshot(event);
       }
-      if (passedEnd || this.#reachedEnd(reply, batch.length)) return;
+      if (passedEnd || this.#reachedEnd(batch)) return;
 
       throwIfAborted(this.signal);
       this.#assertDrainInTime();
-      reply = await this.#getMore();
-      batch = batchOf(reply, "nextBatch");
     }
   }
 
@@ -452,20 +442,17 @@ class CaptureRun implements ChangeCapture {
    * (`operationTime` alone is not enough: a full batch returns before the stream has
    * read everything up to it.)
    */
-  #reachedEnd(reply: Document, batchSize: number): boolean {
+  #reachedEnd(batch: ChangeStreamBatch): boolean {
     const stopAt = this.#stopAt;
     if (stopAt === undefined) return false;
-    const cursor = asDocument(reply.cursor);
-    const position = clusterTimeOfResumeToken(cursor?.postBatchResumeToken);
-    if (position !== undefined) {
-      const comparison = compareClusterTimes(position, stopAt);
-      return comparison > 0 || (comparison === 0 && batchSize === 0);
+    if (batch.position !== undefined) {
+      const comparison = compareClusterTimes(batch.position, stopAt);
+      return comparison > 0 || (comparison === 0 && batch.empty);
     }
-    const operationTime = clusterTimeOfReply(reply);
     return (
-      batchSize === 0 &&
-      operationTime !== undefined &&
-      compareClusterTimes(operationTime, stopAt) >= 0
+      batch.empty &&
+      batch.operationTime !== undefined &&
+      compareClusterTimes(batch.operationTime, stopAt) >= 0
     );
   }
 
@@ -479,19 +466,6 @@ class CaptureRun implements ChangeCapture {
         hint: "The replica set's majority may be lagging far behind. Check replication, then run the backup again.",
       },
     );
-  }
-
-  async #getMore(): Promise<Document> {
-    const cursorId = this.#cursorId;
-    if (cursorId === undefined || isZero(cursorId)) throw streamInvalidated();
-    const reply = await this.#request.client
-      .db("admin")
-      .command(
-        { getMore: cursorId, collection: "$cmd.aggregate", maxTimeMS: AWAIT_DATA_MS },
-        { session: this.#session, ...RAW_BATCH_OPTIONS },
-      );
-    this.#cursorId = cursorIdOf(reply) ?? cursorId;
-    return reply;
   }
 
   /** Bookkeeping for `#needsDestinationSnapshot`. */
@@ -519,11 +493,18 @@ class CaptureRun implements ChangeCapture {
       );
       return bytes;
     }
-    const enriched = { ...event.document, fullDocument: document };
-    return Buffer.from(BSON.serialize(enriched, SERIALIZE_OPTIONS));
+    return serializeChangeEvent({ ...event.document, fullDocument: document });
   }
 
-  /** The changed document as of the event's cluster time, or undefined if it cannot be read. */
+  /**
+   * The changed document as of the event's cluster time, or undefined if it cannot be
+   * read.
+   *
+   * Field order (src/format/field-order.ts): an embedded-document `_id` is looked up
+   * in its stored order, because the server compares embedded documents field by
+   * field and the reordered JavaScript object would match nothing. The document read
+   * keeps its stored order too, so `serializeChangeEvent` writes it byte for byte.
+   */
   async #documentAt(event: ChangeEvent): Promise<Document | undefined> {
     const db = event.ns?.db;
     const collection = event.ns?.coll;
@@ -532,7 +513,7 @@ class CaptureRun implements ChangeCapture {
       const reply = await this.#request.client.db(db).command(
         {
           find: collection,
-          filter: { _id: event.documentKey?._id },
+          filter: { _id: valueInStoredOrder(event.documentKey?._id) },
           limit: 1,
           singleBatch: true,
           collation: BINARY_COLLATION,
@@ -541,9 +522,7 @@ class CaptureRun implements ChangeCapture {
         { fieldsAsRaw: { firstBatch: true } },
       );
       const [found] = batchOf(reply, "firstBatch");
-      return found === undefined
-        ? undefined
-        : BSON.deserialize(found, LOSSLESS_DESERIALIZE_OPTIONS);
+      return found === undefined ? undefined : deserializeInStoredOrder(found);
     } catch (error) {
       this.#request.logger.debug("Reading a document at an update's cluster time failed", {
         ns: `${db}.${collection}`,
@@ -584,6 +563,12 @@ class CaptureRun implements ChangeCapture {
    * Replaying them makes the destination exactly what it was at the rename, whatever
    * the renamed collection held. Fails the backup when the snapshot read fails (for
    * example when the capture fell further behind than the snapshot window).
+   *
+   * The read may happen at a later time than the rename (see `#openDestinationRead`):
+   * the records then hold the destination as of that later time, still stamped with
+   * the rename's cluster time, and the events between the two follow in the file.
+   * Replaying them onto a newer state converges, for the same reason replaying the
+   * window onto a dump read at some moment inside it does (CONSISTENCY.md).
    */
   async *#destinationSnapshot(event: ChangeEvent): AsyncGenerator<Buffer> {
     const to = event.to;
@@ -592,64 +577,137 @@ class CaptureRun implements ChangeCapture {
     const clusterTime = toTimestamp(event.clusterTime);
     const synthesized = (fields: Document): Buffer => {
       this.#events += 1;
-      const document = { ...fields, clusterTime, ns, synthesized: true };
-      return Buffer.from(BSON.serialize(document, SERIALIZE_OPTIONS));
+      return serializeChangeEvent({ ...fields, clusterTime, ns, synthesized: true });
     };
     this.#request.logger.debug("Recording a rename's destination as of the rename", {
       ns: `${ns.db}.${ns.coll}`,
       at: formatClusterTime(event.clusterTime),
     });
 
-    yield synthesized({ operationType: "drop" });
-    yield synthesized({ operationType: "create", operationDescription: {} });
-    for await (const raw of this.#snapshotDocuments(ns.db, ns.coll, clusterTime)) {
-      const fullDocument = BSON.deserialize(raw, LOSSLESS_DESERIALIZE_OPTIONS);
-      yield synthesized({
-        operationType: "insert",
-        documentKey: { _id: fullDocument._id },
-        fullDocument,
-      });
-    }
-  }
-
-  /** Every document of a collection as of `atClusterTime`, batch by batch. */
-  async *#snapshotDocuments(
-    db: string,
-    collection: string,
-    atClusterTime: ReturnType<typeof toTimestamp>,
-  ): AsyncGenerator<Uint8Array> {
     // The cursor's getMores must run in the session of its find.
     const session = this.#request.client.startSession({ causalConsistency: false });
-    const database = this.#request.client.db(db);
+    const database = this.#request.client.db(ns.db);
     let cursorId: Long | number | undefined;
     try {
-      let reply = await database.command(
-        {
-          find: collection,
-          filter: {},
-          readConcern: { level: "snapshot", atClusterTime },
-        },
-        { session, ...RAW_BATCH_OPTIONS },
-      );
+      let reply = await this.#openDestinationRead(ns, event.clusterTime, session);
       cursorId = cursorIdOf(reply);
-      yield* batchOf(reply, "firstBatch");
-      while (cursorId !== undefined && !isZero(cursorId)) {
+      yield synthesized({ operationType: "drop" });
+      yield synthesized({ operationType: "create", operationDescription: {} });
+      let batch = batchOf(reply, "firstBatch");
+      for (;;) {
+        for (const raw of batch) {
+          // Parsed with its stored field order recorded, so the synthesized insert
+          // (written by `serializeChangeEvent`) holds the document byte for byte; the
+          // `_id` in `documentKey` is the same object and keeps its order as well.
+          const fullDocument = deserializeInStoredOrder(raw);
+          yield synthesized({
+            operationType: "insert",
+            documentKey: { _id: fullDocument._id },
+            fullDocument,
+          });
+        }
+        if (cursorId === undefined || isZero(cursorId)) break;
         throwIfAborted(this.signal);
         reply = await database.command(
-          { getMore: cursorId, collection },
+          { getMore: cursorId, collection: ns.coll },
           { session, ...RAW_BATCH_OPTIONS },
         );
         cursorId = cursorIdOf(reply);
-        yield* batchOf(reply, "nextBatch");
+        batch = batchOf(reply, "nextBatch");
       }
     } finally {
       if (cursorId !== undefined && !isZero(cursorId)) {
         await database
-          .command({ killCursors: collection, cursors: [cursorId] }, { session })
+          .command({ killCursors: ns.coll, cursors: [cursorId] }, { session })
           .catch(() => {});
       }
       await session.endSession().catch(() => {});
     }
+  }
+
+  /**
+   * Opens the snapshot read of a rename's destination: at the rename's cluster time,
+   * or, when the server refuses that time because the collection's catalog entry
+   * changed at or after it, at a later one.
+   *
+   * Why the server refuses: on a sharded cluster a shard cannot read a collection as
+   * of a time before its current catalog entry. The rename (also the one `$out` ends
+   * with) commits its catalog change on the shard after the change event's cluster
+   * time, and the collection may have been replaced again since (a `$out` loop). The
+   * capture also sees events late through mongos (it waits for every shard), often
+   * after T1 is known, so even T1 may be too early for the current collection.
+   *
+   * So each retry reads at the newest cluster time the client knows (the logical
+   * clock, `readLatestClusterTime`), after an ordinary read that makes mongos refresh
+   * its routing for the collection. When that time is after T1, the end of the window
+   * moves to it (`#extendEnd`): T1 only has to be after every dump, and a later T1
+   * just means the drain records, and restore replays, a few more events (the same
+   * reason T1 errs late, see converge-time.ts). A bounded number of attempts is made,
+   * then the backup fails with `MS_UNSUPPORTED_TOPOLOGY`.
+   */
+  async #openDestinationRead(
+    ns: { readonly db: string; readonly coll: string },
+    renamedAt: ClusterTime,
+    session: ReturnType<MongoClient["startSession"]>,
+  ): Promise<Document> {
+    const database = this.#request.client.db(ns.db);
+    let at = renamedAt;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const reply = await database.command(
+          {
+            find: ns.coll,
+            filter: {},
+            readConcern: { level: "snapshot", atClusterTime: toTimestamp(at) },
+          },
+          { session, ...RAW_BATCH_OPTIONS },
+        );
+        if (attempt > 1) this.#extendEnd(at);
+        return reply;
+      } catch (error) {
+        if (!isCatalogChangedUnderSnapshot(error)) throw error;
+        if (attempt >= DESTINATION_READ_ATTEMPTS) {
+          throw destinationUnreadable(ns, renamedAt, attempt, error);
+        }
+        await sleep(DESTINATION_RETRY_DELAY_MS * attempt, undefined, { signal: this.signal });
+        await database
+          .command({
+            find: ns.coll,
+            filter: {},
+            limit: 1,
+            singleBatch: true,
+            projection: { _id: 1 },
+          })
+          .catch(() => {});
+        const latest = await readLatestClusterTime(this.#request.client);
+        if (compareClusterTimes(latest, at) > 0) at = latest;
+        this.#request.logger.debug("Reading a rename's destination at a later time", {
+          ns: `${ns.db}.${ns.coll}`,
+          renamedAt: formatClusterTime(renamedAt),
+          at: formatClusterTime(at),
+          attempt: attempt + 1,
+        });
+      }
+    }
+  }
+
+  /**
+   * Moves the end of the window (T1) to `time` when T1 is known and earlier: the
+   * drain then keeps reading up to `time`, and the manifest records it as `to`.
+   * Before `finish()` has T1, it takes the later of the T1 it reads and `time`.
+   */
+  #extendEnd(time: ClusterTime): void {
+    const latest = this.#latestDestinationRead;
+    if (latest === undefined || compareClusterTimes(time, latest) > 0) {
+      this.#latestDestinationRead = time;
+    }
+    const stopAt = this.#stopAt;
+    if (stopAt === undefined || compareClusterTimes(time, stopAt) <= 0) return;
+    this.#request.logger.debug("Moving the end of the backup window later", {
+      from: formatClusterTime(stopAt),
+      to: formatClusterTime(time),
+    });
+    this.#stopAt = time;
   }
 
   #addWarning(warning: string): void {
@@ -658,24 +716,7 @@ class CaptureRun implements ChangeCapture {
 
   /** Kills the server cursor and ends the session. Safe to call more than once. */
   async #release(): Promise<void> {
-    const cursorId = this.#cursorId;
-    this.#cursorId = undefined;
-    const { client, logger } = this.#request;
-    try {
-      if (cursorId !== undefined && !isZero(cursorId)) {
-        await client
-          .db("admin")
-          .command(
-            { killCursors: "$cmd.aggregate", cursors: [cursorId] },
-            { session: this.#session },
-          );
-      }
-    } catch (error) {
-      logger.debug("Closing the change stream failed", { error: String(error) });
-    }
-    await this.#session.endSession().catch((error: unknown) => {
-      logger.debug("Ending the change stream session failed", { error: String(error) });
-    });
+    await this.#stream.close();
   }
 }
 
@@ -733,11 +774,21 @@ function asDocument(value: unknown): Document | undefined {
   return typeof value === "object" && value !== null ? value : undefined;
 }
 
-function streamInvalidated(): MongoShieldError {
+/** No snapshot read of a rename's destination worked, up to T1. */
+function destinationUnreadable(
+  ns: { readonly db: string; readonly coll: string },
+  renamedAt: ClusterTime,
+  attempts: number,
+  cause: MongoServerError,
+): MongoShieldError {
   return new MongoShieldError(
-    "MS_INTERNAL",
-    "The change stream of the backup window was closed by the server.",
-    { hint: "Run the backup again; if it keeps happening, report it as a bug." },
+    "MS_UNSUPPORTED_TOPOLOGY",
+    `The backup could not read ${ns.db}.${ns.coll} as of its rename at ${formatClusterTime(renamedAt)}, nor at a later time up to the end of the window (${attempts} attempts), because the server reports a catalog change: ${cause.message}`,
+    {
+      cause,
+      hint: 'The collection was renamed or replaced (e.g. by $out) again and again during the backup. Run the backup again; on sharded clusters avoid $out and renameCollection into backed-up collections during converge backups, or use consistency "none".',
+      details: { serverCode: cause.code, renamedAt, attempts },
+    },
   );
 }
 

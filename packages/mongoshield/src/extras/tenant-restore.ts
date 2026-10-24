@@ -51,6 +51,7 @@ import {
 import { type BatchLimits, DEFAULT_BATCH_LIMITS } from "../engine/restore-documents.ts";
 import { assertValidTargetNamespace, compileRenameMap } from "../engine/restore-rename.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
+import { valueInStoredOrder } from "../format/field-order.ts";
 import { type CollectionEntry, collectionEntries } from "../format/manifest.ts";
 import { compileNamespaceFilter, splitNamespace } from "../mongo/index.ts";
 import type {
@@ -389,7 +390,9 @@ async function restoreNamespace(
     targetExists: exists,
     options,
   };
-  const matches = matchingDocuments(opened, planned.matcher, options.signal);
+  const matches = matchingDocuments(opened, planned.matcher, options.signal, {
+    logger: context.logger,
+  });
   for await (const batch of batchMatches(matches, options.batchLimits ?? DEFAULT_BATCH_LIMITS)) {
     throwIfAborted(options.signal);
     counts.matched += batch.length;
@@ -446,16 +449,16 @@ async function countReplaceTenantBatch(
   exists: boolean,
   counts: Counts,
 ): Promise<void> {
+  // `_id`s in stored field order, so an embedded-document `_id` with integer-like
+  // field names matches the stored one (src/format/field-order.ts).
   const ids = documents
     .filter((document) => document._id !== undefined)
-    .map((document) => document._id);
+    .map((document) => valueInStoredOrder(document._id));
   let blocked = 0;
   if (exists && ids.length > 0) {
     try {
-      blocked = await collection.countDocuments(
-        { $and: [{ _id: { $in: ids } }, { $nor: [filter] }] },
-        { collation: BINARY_COLLATION },
-      );
+      const query: Document = { $and: [{ _id: { $in: ids } }, { $nor: [filter] }] };
+      blocked = await collection.countDocuments(query, { collation: BINARY_COLLATION });
     } catch (error) {
       throw toWriteError(collection.namespace, error);
     }

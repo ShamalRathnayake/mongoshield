@@ -5,6 +5,10 @@
  *   <dir>/prelude.json[.gz]                  {"ServerVersion":…,"ToolVersion":…}
  *   <dir>/<db>/<stem>.metadata.json[.gz]     the metadata, as mongodump writes it
  *   <dir>/<db>/<stem>.bson[.gz]              every document, parts joined (not for views)
+ *   <dir>/<db>/system.buckets.<stem>.bson    time-series collections: computed buckets
+ *   <dir>/admin/system.{users,roles,version}.bson      users and roles, for a full restore
+ *   <dir>/<db>/$admin.system.{users,roles,version}.bson  the same per database, for
+ *                                                      --db <db> --restoreDbUsersAndRoles
  *
  * Names follow mongodump exactly (`dump-names.ts`), so the directory is
  * indistinguishable from one mongodump would write. Files are created with the
@@ -27,15 +31,22 @@ import { createCountingStream } from "../format/hashing.ts";
 import type { Logger } from "../logger.ts";
 import { collectionFileStem } from "./dump-names.ts";
 import {
+  AUTH_SCHEMA_DOCUMENT,
   assertDocumentCount,
+  authzDatabase,
   documentsOf,
+  dumpDataCollection,
+  type ExportedAuthz,
   type ExportedNamespace,
   type ExportNamespace,
 } from "./export-data.ts";
+import { createBucketPacker, timeSeriesSettings } from "./timeseries-buckets.ts";
 
 /** What the directory writer needs. */
 export interface DirectoryExportTarget {
   readonly source: StoredBackupSource;
+  /** Users and roles to write (both empty for none). */
+  readonly authz: ExportedAuthz;
   /** The output directory; it must be missing or empty. */
   readonly directory: string;
   readonly gzip: boolean;
@@ -63,11 +74,13 @@ export async function exportDirectory(
     if (target.serverVersion !== undefined) {
       await writePrelude(target, created);
     }
-    return await mapWithConcurrency(
+    const exported = await mapWithConcurrency(
       namespaces,
       (namespace, _index, signal) => exportNamespace({ ...target, signal }, namespace, created),
       { concurrency: target.parallelism, signal: target.signal },
     );
+    await writeUsersAndRoles(target, created);
+    return exported;
   } catch (error) {
     await removeCreated(created, target.logger);
     throw error;
@@ -99,12 +112,21 @@ async function exportNamespace(
   if (entry.type === "view") {
     return { ns: entry.ns, type: entry.type, documents: 0, bytes: 0 };
   }
+  // Counted before packing: the manifest counts measurements, not buckets.
   const counter = createCountingStream();
-  const dataPath = join(databaseDirectory, `${stem}.bson${extension}`);
+  const written = createCountingStream();
+  const packing =
+    entry.type === "timeseries"
+      ? [createBucketPacker(timeSeriesSettings(namespace.metadata, entry.ns), entry.ns)]
+      : [];
+  const dataPath = join(
+    databaseDirectory,
+    `${collectionFileStem(dumpDataCollection(entry))}.bson${extension}`,
+  );
   await writeFile(
     dataPath,
     Readable.from(documentsOf(target.source, entry, target.signal)),
-    [counter.stream, createCoalescer()],
+    [counter.stream, ...packing, written.stream, createCoalescer()],
     target,
     created,
   );
@@ -115,7 +137,51 @@ async function exportNamespace(
     documents: counts.items,
     path: dataPath,
   });
-  return { ns: entry.ns, type: entry.type, documents: counts.items, bytes: counts.bytes };
+  return { ns: entry.ns, type: entry.type, documents: counts.items, bytes: written.counts().bytes };
+}
+
+/**
+ * Users and roles in both of mongodump's forms (see the file header), each with the
+ * auth schema version mongorestore checks before restoring them. Nothing is written
+ * when there are none.
+ */
+async function writeUsersAndRoles(target: DirectoryExportTarget, created: string[]): Promise<void> {
+  const { users, roles } = target.authz;
+  if (users.length + roles.length === 0) return;
+  const files: {
+    db: string;
+    prefix: string;
+    users: readonly Buffer[];
+    roles: readonly Buffer[];
+  }[] = [{ db: "admin", prefix: "", users, roles }];
+  const databases = [...new Set([...users, ...roles].map(authzDatabase))].sort();
+  for (const db of databases) {
+    // mongorestore refuses --restoreDbUsersAndRoles for admin, whose users the full form holds.
+    if (db === "admin" || db === "") continue;
+    files.push({
+      db,
+      prefix: "$admin.",
+      users: users.filter((user) => authzDatabase(user) === db),
+      roles: roles.filter((role) => authzDatabase(role) === db),
+    });
+  }
+
+  const extension = target.gzip ? ".gz" : "";
+  for (const file of files) {
+    assertSafeDatabaseName(file.db);
+    const directory = join(target.directory, file.db);
+    await mkdir(directory, { recursive: true });
+    const contents = [
+      ["system.users", file.users],
+      ["system.roles", file.roles],
+      ["system.version", [AUTH_SCHEMA_DOCUMENT]],
+    ] as const;
+    for (const [collection, documents] of contents) {
+      const path = join(directory, `${file.prefix}${collection}.bson${extension}`);
+      await writeFile(path, Readable.from(documents), [createCoalescer()], target, created);
+    }
+  }
+  target.logger.info("Exported users and roles", { users: users.length, roles: roles.length });
 }
 
 /** `prelude.json`: mongorestore reads `ServerVersion` from it (mongodump 100.12+ writes it). */

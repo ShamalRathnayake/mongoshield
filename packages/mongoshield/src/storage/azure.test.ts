@@ -726,6 +726,144 @@ describe("azureStorage", () => {
     });
   });
 
+  describe("cancellation reaches every request", () => {
+    it("passes the signal as abortSignal to download, properties, listings and deletes", async () => {
+      container.store("base/a/x", Buffer.from("1"));
+      const { signal } = new AbortController();
+      const adapter = storage();
+      await readAll(await adapter.get("a/x", { signal }));
+      await adapter.head("a/x", { signal });
+      await collect(adapter.list("", { signal }));
+      await collect(adapter.listPrefixes("", { signal }));
+      await adapter.delete(["a/x"], { signal });
+      expect(container.callsTo("download")[0]?.args[2]).toMatchObject({ abortSignal: signal });
+      expect(container.callsTo("getProperties")[0]?.args[0]).toEqual({ abortSignal: signal });
+      expect(container.callsTo("listBlobsFlat")[0]?.args[0]).toMatchObject({ abortSignal: signal });
+      expect(container.callsTo("listBlobsByHierarchy")[0]?.args[1]).toMatchObject({
+        abortSignal: signal,
+      });
+      expect(container.callsTo("deleteBlobs")[0]?.args[1]).toEqual({ abortSignal: signal });
+    });
+
+    it("passes it to individual deletes too, once Blob Batch is known to be unavailable", async () => {
+      container.store("base/a", Buffer.from("1"));
+      container.failures.set("batch", restError(400, "InvalidUri"));
+      const { signal } = new AbortController();
+      await storage().delete(["a"], { signal });
+      expect(container.callsTo("deleteIfExists")[0]?.args[0]).toEqual({ abortSignal: signal });
+    });
+
+    it("reports a batch that fails because the signal fired as MS_ABORTED, without falling back", async () => {
+      container.store("base/a", Buffer.from("1"));
+      const controller = new AbortController();
+      container.getBlobBatchClient = () => ({
+        deleteBlobs: async () => {
+          controller.abort();
+          throw Object.assign(new Error("aborted"), { name: "AbortError" });
+        },
+      });
+      const error = await rejection(storage().delete(["a"], { signal: controller.signal }));
+      expect(isMongoShieldError(error, "MS_ABORTED")).toBe(true);
+      expect(container.callsTo("deleteIfExists")).toHaveLength(0);
+    });
+  });
+
+  describe("sparse responses", () => {
+    it("reports a download without a readable body as MS_STORAGE_IO", async () => {
+      container.getBlobClient = (name: string) =>
+        ({
+          name,
+          download: async () => ({ readableStreamBody: undefined }),
+        }) as unknown as ReturnType<FakeContainer["getBlobClient"]>;
+      const error = await rejection(storage().get("a"));
+      expect(isMongoShieldError(error, "MS_STORAGE_IO")).toBe(true);
+      expect(String(error)).toContain("no readable body");
+    });
+
+    it("fills in defaults when properties or listing items lack size, date or etag", async () => {
+      container.getBlobClient = (name: string) =>
+        ({
+          name,
+          getProperties: async () => ({}),
+        }) as unknown as ReturnType<FakeContainer["getBlobClient"]>;
+      expect(await storage().head("a")).toEqual({ key: "a", size: 0, lastModified: new Date(0) });
+
+      // The SDK's item types allow absent fields; the fake's own type does not.
+      container.listBlobsFlat = (() => ({
+        byPage: () =>
+          mapPages(
+            (async function* () {
+              yield [{ name: "base/b", properties: { lastModified: new Date(7) } }];
+            })(),
+            (page) => ({ segment: { blobItems: page } }),
+          ),
+      })) as unknown as FakeContainer["listBlobsFlat"];
+      expect(await collect(storage().list(""))).toEqual([
+        { key: "b", size: 0, lastModified: new Date(7) },
+      ]);
+    });
+
+    it("skips hierarchy pages without prefixes and prefixes outside the base", async () => {
+      container.listBlobsByHierarchy = (() => ({
+        byPage: () =>
+          mapPages(
+            (async function* () {
+              yield {};
+              yield { blobPrefixes: [{ name: "elsewhere/" }, { name: "base/ok/" }] };
+            })(),
+            (segment) => ({ segment: { blobItems: [], ...segment } }),
+          ),
+      })) as unknown as FakeContainer["listBlobsByHierarchy"];
+      expect(await collect(storage().listPrefixes(""))).toEqual(["ok/"]);
+    });
+
+    it("reports upload results without a date or etag with the local clock and no etag", async () => {
+      container.getBlockBlobClient = () =>
+        ({
+          uploadData: async () => ({}),
+          uploadStream: async () => ({}),
+        }) as unknown as ReturnType<FakeContainer["getBlockBlobClient"]>;
+      const before = Date.now();
+      const info = await storage().put("a", Buffer.from("x"));
+      expect(info.etag).toBeUndefined();
+      expect(info.lastModified.getTime()).toBeGreaterThanOrEqual(before);
+    });
+
+    it("describes a failed batch entry without a status message", async () => {
+      container.store("base/a", Buffer.from("1"));
+      container.getBlobBatchClient = () => ({
+        deleteBlobs: async () => ({ subResponses: [{ status: 500, statusMessage: "" }] }),
+      });
+      const error = await rejection(storage().delete(["a"]));
+      expect(isMongoShieldError(error, "MS_STORAGE_IO")).toBe(true);
+      expect(String(error)).toContain("delete failed");
+    });
+  });
+
+  describe("immutability checks that fail", () => {
+    const retainUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    it("fails the put when reading the container properties fails for another reason", async () => {
+      container.containerProperties = restError(500, "InternalError");
+      const failure = await rejection(storage().put("a", Buffer.from("x"), { retainUntil }));
+      expect(isMongoShieldError(failure, "MS_STORAGE_IO")).toBe(true);
+      expect(container.callsTo("uploadData")).toHaveLength(0);
+    });
+
+    it("does not mistake a locked-blob conflict for a container without immutability", async () => {
+      container.store("base/a", Buffer.from("old"));
+      container.failures.set("upload", restError(409, "BlobImmutableDueToPolicy", "immutable"));
+      const failure = await rejection(storage().put("a", Buffer.from("x"), { retainUntil }));
+      expect(isMongoShieldError(failure, "MS_STORAGE_FORBIDDEN")).toBe(true);
+    });
+  });
+
+  it("rejects a non-integer concurrency", () => {
+    expect(() => storage({ uploadConcurrency: 2.5 })).toThrow(
+      expect.objectContaining({ code: "MS_CONFIG_INVALID" }),
+    );
+  });
+
   it("can be closed more than once", async () => {
     const adapter = storage();
     await adapter.close?.();

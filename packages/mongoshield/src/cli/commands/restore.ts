@@ -9,6 +9,8 @@
  *   3. Dropping, upserting, or inserting into non-empty collections needs a "yes":
  *      interactively, or with --yes. Without a terminal and without --yes it refuses.
  *   4. --dry-run stops after the plan and writes nothing.
+ *   5. When a target already holds documents, every backup file is checksummed before
+ *      the first write (`verifyFirst`, see `shouldVerifyFirst`).
  */
 
 import type { MongoShieldConfigInput } from "../../config/schema.ts";
@@ -107,6 +109,15 @@ export const restoreCommand: CommandSpec = {
       type: "boolean",
       description: "Do not recreate Atlas Search / Vector Search indexes",
     },
+    "verify-first": {
+      type: "boolean",
+      description:
+        "Check every file's size and SHA-256 before writing anything (default when a target already has documents)",
+    },
+    "no-verify-first": {
+      type: "boolean",
+      description: "Skip that check even when targets already have documents",
+    },
     "users-and-roles": {
       type: "string",
       choices: USERS_AND_ROLES_MODES,
@@ -152,12 +163,43 @@ async function runRestoreCommand(context: CommandContext): Promise<number> {
     if (options.dryRun) return finishDryRun(context, plan);
 
     await confirmIfDestructive(context, plan, targetUri);
-    const result = await restoreWithProgress(context, cli, options);
+    const verifyFirst = shouldVerifyFirst(context, plan);
+    const result = await restoreWithProgress(context, cli, { ...options, verifyFirst });
     printRestoreResult(context, result);
     return 0;
   } finally {
     await cli.shield.close();
   }
+}
+
+/**
+ * Whether to checksum every file before writing (`verifyFirst`). Explicit flags win;
+ * otherwise it is on exactly when the restore writes into a target that already
+ * holds documents (or may: an uncountable target counts as non-empty).
+ *
+ * Why that default: a damaged file is normally found while it is being restored. Into
+ * empty targets that leaves only restored data behind, which `--drop` replaces on the
+ * next run. Into existing data (drop, insert, upsert into non-empty collections) it
+ * leaves a mix of live and half-restored documents, or a dropped collection, so the
+ * extra read of the backup is worth paying there. For empty targets it would double
+ * the transfer of every restore for little gain.
+ */
+function shouldVerifyFirst(context: CommandContext, plan: RestorePlan): boolean {
+  const { flags } = context;
+  if (flags.boolean("verify-first") && flags.boolean("no-verify-first")) {
+    throw usageError("--verify-first contradicts --no-verify-first.", NAME);
+  }
+  if (flags.boolean("verify-first")) return true;
+  if (flags.boolean("no-verify-first")) return false;
+  return plan.entries.some(writesIntoExistingData);
+}
+
+/** True for plan entries that change or remove documents a target already holds. */
+function writesIntoExistingData(entry: RestorePlanEntry): boolean {
+  if (entry.existingDocuments === 0) return false;
+  return (
+    entry.action === "drop-and-create" || entry.action === "insert" || entry.action === "upsert"
+  );
 }
 
 /** Flags as a config layer: where backups are read from, and decryption secrets. */

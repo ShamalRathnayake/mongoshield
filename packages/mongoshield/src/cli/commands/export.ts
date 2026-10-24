@@ -12,8 +12,10 @@
  * export-text.ts next to this file (engine: src/extras/export-text.ts).
  *
  * The backup is decrypted, decompressed and checked on the way; split parts are
- * joined. Time-series collections are left out (with a warning): mongorestore
- * cannot restore them from a MongoShield backup. Use `mongoshield restore` for those.
+ * joined. Time-series measurements are written as the bucket documents mongorestore
+ * expects, and users and roles (backups taken with --users-and-roles) as mongodump
+ * writes them, for `mongorestore` (full restore) and `mongorestore --db <db>
+ * --restoreDbUsersAndRoles`.
  */
 
 import { isAbsolute, resolve } from "node:path";
@@ -21,7 +23,7 @@ import type { MongoShieldConfigInput } from "../../config/schema.ts";
 import { type ExportOptions, type ExportSummary, exportBackup } from "../../interop/export.ts";
 import { usageError } from "../args.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
-import { formatBytes, formatCount, formatDuration } from "../format.ts";
+import { formatBytes, formatCount, formatDuration, plural } from "../format.ts";
 import {
   createCliLogger,
   createCliShield,
@@ -52,7 +54,8 @@ export const exportCommand: CommandSpec = {
     "Writes a backup as a mongodump directory (restore with `mongorestore --dir`)",
     "or archive (restore with `mongorestore --archive`), decrypted and checked.",
     "With --gzip the files are gzipped like `mongodump --gzip` (then restore with",
-    "`mongorestore --gzip`). Time-series collections are not exported.",
+    "`mongorestore --gzip`). Time-series collections become mongorestore's bucket",
+    "documents; users and roles are written for `mongorestore --restoreDbUsersAndRoles`.",
   ].join("\n"),
   positionals: [
     { name: "backup", optional: true, description: 'Backup id, or "latest" (default)' },
@@ -200,6 +203,7 @@ function printSummary(context: CommandContext, summary: ExportSummary, toStdout:
       ["Format", `${summary.format}${summary.gzip ? " (gzip)" : ""}`],
       ["Namespaces", formatCount(summary.namespaces.length)],
       ["Documents", formatCount(summary.documents)],
+      ...usersAndRolesRow(summary),
       ["Data", formatBytes(summary.bytes)],
       ["Duration", formatDuration(summary.durationMs)],
     ],
@@ -212,6 +216,13 @@ function printSummary(context: CommandContext, summary: ExportSummary, toStdout:
   }
   out.result(lines);
   out.info(out.style("dim", `Restore with: ${restoreHint(summary)}`));
+}
+
+/** "2 users, 1 role" when the export holds users or roles. */
+function usersAndRolesRow(summary: ExportSummary): [string, string][] {
+  const { users, roles } = summary.usersAndRoles;
+  if (users + roles === 0) return [];
+  return [["Users and roles", `${plural(users, "user")}, ${plural(roles, "role")}`]];
 }
 
 /** The mongorestore command line for the exported output. */

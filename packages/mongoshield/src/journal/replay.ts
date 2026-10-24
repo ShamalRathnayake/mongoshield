@@ -14,12 +14,15 @@
  * A base backup restored as of its cluster time B, followed by every event after B in
  * order, reaches exactly the state at the last event replayed.
  *
- * Unlike a converge restore, the replay runs after the base restore has built its
- * indexes, so collections created after the base backup get no secondary indexes
- * (the same limit as collections created during a converge window).
+ * Indexes: the base restore has built the base backup's indexes already. Index
+ * changes after the base backup (`createIndexes` / `dropIndexes` events, including the
+ * indexes of collections created after it) are collected during the replay and
+ * applied once the documents are in, like a converge restore does
+ * (src/engine/converge-indexes.ts); `skipIndexes` leaves them out.
  */
 
 import type { MongoClient, WriteConcernSettings } from "mongodb";
+import { applyIndexChanges } from "../engine/converge-indexes.ts";
 import { replayChangeEvents } from "../engine/converge-replay.ts";
 import {
   checkWindowTargets,
@@ -70,6 +73,8 @@ export interface ReplayJournalOptions {
   readonly writeConcern?: WriteConcernSettings | undefined;
   /** Skip document validation (needs the bypassDocumentValidation privilege). */
   readonly bypassDocumentValidation?: boolean | undefined;
+  /** Leave out the index changes made after the base backup (as restore's `skipIndexes`). */
+  readonly skipIndexes?: boolean | undefined;
   readonly logger?: Logger | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly onProgress?: ((event: ProgressEvent) => void) | undefined;
@@ -89,6 +94,9 @@ export interface ReplayJournalResult {
   readonly toleratedErrors: number;
   /** Target namespaces dropped or renamed away by the replay. */
   readonly removedTargets: readonly string[];
+  /** Indexes built and dropped to reproduce the index changes after the base backup. */
+  readonly indexesCreated: number;
+  readonly indexesDropped: number;
   readonly warnings: readonly string[];
   readonly durationMs: number;
 }
@@ -155,6 +163,23 @@ export async function replayJournal(options: ReplayJournalOptions): Promise<Repl
     signal,
     progressLabel: JOURNAL_PROGRESS_LABEL,
   });
+  let indexesCreated = 0;
+  let indexesDropped = 0;
+  const warnings = [...result.warnings];
+  if (options.skipIndexes !== true) {
+    for (const [target, plan] of result.indexChanges) {
+      throwIfAborted(signal);
+      const applied = await applyIndexChanges(client, target, plan, {
+        writeConcern: options.writeConcern,
+        logger,
+      });
+      indexesCreated += applied.created;
+      indexesDropped += applied.dropped;
+      for (const name of applied.conflicts) {
+        warnings.push(`${target} kept its own index instead of the conflicting index ${name}.`);
+      }
+    }
+  }
   tracker.finish();
 
   return {
@@ -165,7 +190,9 @@ export async function replayJournal(options: ReplayJournalOptions): Promise<Repl
     skipped: result.skipped,
     toleratedErrors: result.toleratedErrors,
     removedTargets: [...result.removedTargets],
-    warnings: result.warnings,
+    indexesCreated,
+    indexesDropped,
+    warnings,
     durationMs: Math.round(performance.now() - startedAt),
   };
 }

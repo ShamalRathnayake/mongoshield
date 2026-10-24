@@ -12,11 +12,21 @@
  * Every data key is bound to the additional authenticated data
  * `mongoshield:purpose=backup-key`. The ciphertext names the key version itself, so
  * rotating the key does not affect old backups as long as old versions stay enabled.
+ *
+ * Cancellation: google-gax takes no AbortSignal (its call options only have
+ * timeouts and retries), and the generated client's promise drops gax's `cancel()`.
+ * So on abort the adapter rejects with MS_ABORTED at once and the request, which
+ * carries one 16-byte key, finishes unobserved in the background.
  */
 
 import { MongoShieldError } from "../../errors.ts";
-import { type KmsFailureKind, kmsCallError, loadSdk, propertyOf } from "./errors.ts";
-import { KMS_DATA_KEY_CONTEXT, type KmsCiphertext, type KmsClient } from "./types.ts";
+import { callKms, type KmsFailureKind, kmsCallError, loadSdk, propertyOf } from "./errors.ts";
+import {
+  KMS_DATA_KEY_CONTEXT,
+  type KmsCallOptions,
+  type KmsCiphertext,
+  type KmsClient,
+} from "./types.ts";
 
 /** The only algorithm used: GCP symmetric encryption (AES-256-GCM inside the KMS). */
 export const GCP_KMS_ALGORITHM = "GOOGLE_SYMMETRIC_ENCRYPTION";
@@ -90,9 +100,10 @@ export function createGcpKmsClient(key: string, options: GcpKmsClientOptions = {
   return {
     provider: "gcp",
     key,
-    async encryptDataKey(dataKey: Uint8Array): Promise<KmsCiphertext> {
+    async encryptDataKey(dataKey: Uint8Array, call: KmsCallOptions = {}): Promise<KmsCiphertext> {
       const { client } = await connect();
-      const [response] = await callGcp("encrypt", key, () =>
+      const target = { provider: "gcp", operation: "encrypt", key, signal: call.signal } as const;
+      const [response] = await callKms(target, classifyGcpError, () =>
         client.encrypt({
           name: key,
           plaintext: dataKey,
@@ -105,7 +116,7 @@ export function createGcpKmsClient(key: string, options: GcpKmsClientOptions = {
       }
       return { key, algorithm: GCP_KMS_ALGORITHM, ciphertext };
     },
-    async decryptDataKey(wrapped: KmsCiphertext): Promise<Uint8Array> {
+    async decryptDataKey(wrapped: KmsCiphertext, call: KmsCallOptions = {}): Promise<Uint8Array> {
       if (wrapped.algorithm !== GCP_KMS_ALGORITHM) {
         throw kmsCallError(
           "gcp",
@@ -116,7 +127,8 @@ export function createGcpKmsClient(key: string, options: GcpKmsClientOptions = {
         );
       }
       const { client } = await connect();
-      const [response] = await callGcp("decrypt", key, () =>
+      const target = { provider: "gcp", operation: "decrypt", key, signal: call.signal } as const;
+      const [response] = await callKms(target, classifyGcpError, () =>
         client.decrypt({
           name: key,
           ciphertext: wrapped.ciphertext,
@@ -142,19 +154,6 @@ function toBytes(value: GcpBytes): Uint8Array | undefined {
   if (value === null || value === undefined) return undefined;
   const bytes = typeof value === "string" ? Buffer.from(value, "base64") : value;
   return bytes.length === 0 ? undefined : bytes;
-}
-
-/** Runs one SDK call and turns its failure into a MongoShieldError. */
-async function callGcp<Output>(
-  operation: "encrypt" | "decrypt",
-  key: string,
-  call: () => Promise<Output>,
-): Promise<Output> {
-  try {
-    return await call();
-  } catch (error) {
-    throw kmsCallError("gcp", operation, key, classifyGcpError(error), error);
-  }
 }
 
 /** gRPC status codes (https://grpc.io/docs/guides/status-codes/) used below. */

@@ -7,27 +7,21 @@
  * detection, Ctrl-C handling and the exit code.
  *
  * Ctrl-C: the first press aborts the running operation through an
- * AbortController, so it stops cleanly (connections closed, no half-written
- * manifest, exit code 60). A second press exits immediately (exit code 130,
- * the shell convention for SIGINT).
+ * AbortController, so it stops cleanly (exit code 60); a second press exits
+ * immediately with 130. See interrupt.ts.
  */
 
 import process from "node:process";
+import { createInterruptHandler } from "./interrupt.ts";
 import type { CliIo } from "./io.ts";
 import { runCli } from "./run.ts";
 
-/** Exit code for "terminated by SIGINT" (128 + signal number 2). */
-const SIGINT_EXIT_CODE = 130;
-
 const controller = new AbortController();
-let interruptCount = 0;
-
-function onInterrupt(): void {
-  interruptCount++;
-  if (interruptCount > 1) process.exit(SIGINT_EXIT_CODE);
-  process.stderr.write("\nCancelling… (press Ctrl-C again to exit immediately)\n");
-  controller.abort();
-}
+const onInterrupt = createInterruptHandler({
+  abort: () => controller.abort(),
+  exit: (code) => process.exit(code),
+  write: (message) => process.stderr.write(message),
+});
 
 /**
  * `mongoshield list | head` closes the pipe early. That is the reader's

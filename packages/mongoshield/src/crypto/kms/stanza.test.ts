@@ -19,6 +19,7 @@ import { createDecryptStream, type DecryptStreamOptions } from "../decrypt.ts";
 import { createEncryptStream, type EncryptStreamOptions } from "../encrypt.ts";
 import { encodeHeader, findHeaderEnd, parseHeader, type Stanza } from "../header.ts";
 import { generateIdentity } from "../keys.ts";
+import { resolveKmsClient } from "./registry.ts";
 import {
   createKmsKeyUnwrapper,
   createKmsKeyWrapper,
@@ -26,6 +27,7 @@ import {
   describeKmsStanza,
   encodeKeyId,
   KMS_STANZA_TYPE,
+  type KmsClientResolver,
 } from "./stanza.ts";
 
 const PLAINTEXT = Buffer.from("the backup's own identity would be here\n");
@@ -225,6 +227,54 @@ describe("the mongoshield-kms stanza", () => {
     const file = await encrypt({ keyWrappers: wrappers({ provider: "aws", key: AWS_KEY }) });
     const error = await failure(decrypt(file, { keyUnwrappers: [async () => Buffer.alloc(8)] }));
     expect(error.details?.stage).toBe("header");
+  });
+});
+
+describe("cancellation of KMS calls", () => {
+  /** A resolver whose client records the options of every call. */
+  function recordingResolver(seen: unknown[]): KmsClientResolver {
+    return async (ref) => {
+      const real = await resolveKmsClient(ref);
+      return {
+        provider: real.provider,
+        key: real.key,
+        encryptDataKey: (dataKey, options) => {
+          seen.push(options);
+          return real.encryptDataKey(dataKey, options);
+        },
+        decryptDataKey: (wrapped, options) => {
+          seen.push(options);
+          return real.decryptDataKey(wrapped, options);
+        },
+      };
+    };
+  }
+
+  it("passes the wrapper's and unwrapper's signal to the KMS client", async () => {
+    const seen: unknown[] = [];
+    const resolve = recordingResolver(seen);
+    const { signal } = new AbortController();
+    const ref: KmsKeyRef = { provider: "aws", key: AWS_KEY };
+    const file = await encrypt({ keyWrappers: [createKmsKeyWrapper(ref, resolve, { signal })] });
+    await decrypt(file, { keyUnwrappers: [createKmsKeyUnwrapper(resolve, { signal })] });
+    expect(seen).toEqual([{ signal }, { signal }]);
+  });
+
+  it("passes no options at all without a signal, as before signals existed", async () => {
+    const seen: unknown[] = [];
+    const resolve = recordingResolver(seen);
+    const ref: KmsKeyRef = { provider: "gcp", key: GCP_KEY };
+    const file = await encrypt({ keyWrappers: [createKmsKeyWrapper(ref, resolve)] });
+    await decrypt(file, { keyUnwrappers: [createKmsKeyUnwrapper(resolve)] });
+    expect(seen).toEqual([{}, {}]);
+  });
+
+  it("fails encryption with MS_ABORTED when the signal has fired", async () => {
+    const ref: KmsKeyRef = { provider: "azure", key: AZURE_KEY };
+    const wrapper = createKmsKeyWrapper(ref, resolveKmsClient, { signal: AbortSignal.abort() });
+    const error = await failure(encrypt({ keyWrappers: [wrapper] }));
+    expect(error.code).toBe("MS_ABORTED");
+    expect(kms.calls).toEqual([]);
   });
 });
 

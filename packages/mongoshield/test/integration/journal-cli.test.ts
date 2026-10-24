@@ -3,7 +3,7 @@
  * against the shared test replica set and file storage in a temporary directory.
  */
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -40,7 +40,7 @@ afterAll(async () => {
 });
 
 /** Runs the CLI with collected output. */
-async function cli(args: readonly string[], signal?: AbortSignal) {
+async function cli(args: readonly string[], signal?: AbortSignal, cwd = workDir) {
   let stdout = "";
   let stderr = "";
   const sink = (append: (text: string) => void) =>
@@ -58,7 +58,7 @@ async function cli(args: readonly string[], signal?: AbortSignal) {
       stderr += text;
     }),
     env: {},
-    cwd: workDir,
+    cwd,
     isTTY: false,
     ...(signal ? { signal } : {}),
   };
@@ -113,4 +113,70 @@ it("rejects an unknown action", async () => {
   const result = await cli(["journal", "rewind"]);
   expect(result.code).toBe(2);
   expect(result.stderr).toContain("Unknown journal action");
+});
+
+it("takes segment and gap settings from the config's journal section", async () => {
+  const dir = await mkdtemp(join(workDir, "config-"));
+  const storage = join(dir, "storage");
+  await writeFile(
+    join(dir, "mongoshield.config.json"),
+    JSON.stringify({
+      source: { uri: mongoUri() },
+      storage,
+      backup: { include: [`${database}.*`] },
+      journal: { segmentSeconds: 1, segmentBytes: 2048, onGap: "fail" },
+    }),
+  );
+  const stop = new AbortController();
+  const running = cli(["journal", "start"], stop.signal, dir);
+  await client().db(database).collection("items").insertOne({ n: 2 });
+  // One-second segments (the default would be five minutes): the config was read.
+  await waitFor(async () => {
+    const status = await cli(["journal", "status", "--json"], undefined, dir);
+    return status.code === 0 && JSON.parse(status.stdout).segments > 0;
+  });
+  stop.abort();
+  const started = await running;
+  expect(started.code).toBe(0);
+  expect(started.stderr).toContain("Segments close after 1.0s or 2.0 KiB");
+  expect(started.stderr).toContain("on a gap in the change history: stop");
+});
+
+it("lets the flags override the config's journal section", async () => {
+  const dir = await mkdtemp(join(workDir, "override-"));
+  await writeFile(
+    join(dir, "mongoshield.config.json"),
+    JSON.stringify({
+      source: { uri: mongoUri() },
+      storage: join(dir, "storage"),
+      backup: { include: [`${database}.*`] },
+      journal: { segmentSeconds: 3600, onGap: "fail" },
+    }),
+  );
+  const stop = new AbortController();
+  const running = cli(
+    ["journal", "start", "--segment-seconds", "2", "--segment-size", "1MiB", "--on-gap", "backup"],
+    stop.signal,
+    dir,
+  );
+  await waitFor(async () => {
+    const status = await cli(["journal", "status", "--json"], undefined, dir);
+    return status.code === 0 && JSON.parse(status.stdout).segments > 0;
+  });
+  stop.abort();
+  const started = await running;
+  expect(started.code).toBe(0);
+  expect(started.stderr).toContain("Segments close after 2.0s or 1.0 MiB");
+  expect(started.stderr).toContain("take a new base backup");
+});
+
+it("rejects a journal section the schema does not know", async () => {
+  const dir = await mkdtemp(join(workDir, "invalid-"));
+  await writeFile(
+    join(dir, "mongoshield.config.json"),
+    JSON.stringify({ storage: join(dir, "storage"), journal: { segmentSeconds: 0 } }),
+  );
+  const result = await cli(["journal", "status"], undefined, dir);
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("journal.segmentSeconds");
 });

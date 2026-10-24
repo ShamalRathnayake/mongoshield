@@ -198,6 +198,15 @@ function usageErrorFromParser(
     const didYouMean = suggestion ? ` Did you mean --${suggestion}?` : "";
     return usageError(`Unknown option ${unknown[1]}${unknown[2]}.${didYouMean}`, commandName);
   }
+  // `--backups -1`: Node cannot tell a negative value from a flag; its tip on how to
+  // write it is in a later sentence, so keep that part.
+  const ambiguous = /^Option '(-{1,2}[^' ]+)[^']*' argument is ambiguous/.exec(message);
+  if (ambiguous?.[1]) {
+    return usageError(
+      `${firstSentence.replace(/\.$/, "")}. To pass a value starting with "-", write ${ambiguous[1]}=<value>.`,
+      commandName,
+    );
+  }
   return usageError(`${firstSentence.replace(/\.$/, "")}.`, commandName);
 }
 

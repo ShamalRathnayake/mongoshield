@@ -65,7 +65,8 @@ export type { TelemetryOptions } from "./types.ts";
 export type { HoldRecord, VerificationRecord } from "./catalog/annotations.ts";
 export { type CatalogEntry, type CatalogStatus, listBackups } from "./catalog/catalog.ts";
 export { selectBackup } from "./catalog/select.ts";
-export type { PruneResult } from "./catalog/prune.ts";
+export type { OutOfScopeBackup, OutOfScopeReason, PruneResult } from "./catalog/prune.ts";
+export { type PruneScope, PLAN_LABEL } from "./catalog/scope.ts";
 export {
   type KeptBackup,
   planRetention,
@@ -99,7 +100,9 @@ export { type NotifyTarget, notifyRun, pingHeartbeat, sendWebhook } from "./noti
 export {
   type BackupGuardPolicy,
   type BeforeCommitHook,
+  backupShapeLabel,
   checkBackupSanity,
+  GUARD_SHAPE_LABEL,
   type GuardFinding,
   type GuardResult,
 } from "./engine/backup-guard.ts";
@@ -161,7 +164,13 @@ export type { BackupSelection } from "./extras/stored-files.ts";
 export type { RekeyRecord } from "./catalog/rekey-records.ts";
 
 // Copying between deployments, with masking and subsetting (staging and local data).
-export type { CopyOptions, CopyPlan, CopyPlanEntry, CopyResult } from "./types.ts";
+export type {
+  CopyOptions,
+  CopyPlan,
+  CopyPlanEntry,
+  CopyResult,
+  CopyResumeState,
+} from "./types.ts";
 export {
   defineMask,
   type FakeKind,
@@ -183,7 +192,12 @@ export {
 
 // Config files.
 export { defineConfig } from "./config/define.ts";
-export type { MongoShieldConfig, MongoShieldConfigInput } from "./config/schema.ts";
+export { validateConfig } from "./config/load.ts";
+export {
+  ConfigSchema,
+  type MongoShieldConfig,
+  type MongoShieldConfigInput,
+} from "./config/schema.ts";
 
 // Encryption keys (age format).
 export {

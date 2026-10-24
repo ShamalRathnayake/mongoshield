@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { gunzipSync } from "node:zlib";
+import { BSON } from "mongodb";
 import { describe, expect, it } from "vitest";
 import { generateIdentity } from "../crypto/index.ts";
 import { isMongoShieldError } from "../errors.ts";
@@ -18,7 +19,14 @@ import { createArchiveReader } from "./archive-reader.ts";
 import { exportBackup } from "./export.ts";
 import { selectExportNamespaces } from "./export-data.ts";
 import { importMongodump } from "./import.ts";
-import { fixturePath, rejection, splitBson, useTempDirectories } from "./test-fixtures.ts";
+import {
+  fixturePath,
+  rejection,
+  splitBson,
+  storedDocuments,
+  useTempDirectories,
+} from "./test-fixtures.ts";
+import { timeSeriesSettings, unpackBucket } from "./timeseries-buckets.ts";
 
 const tempDirectory = useTempDirectories();
 
@@ -57,6 +65,8 @@ describe("exportBackup to a directory", () => {
         "capped.metadata.json",
         "empty.bson",
         "empty.metadata.json",
+        "system.buckets.ts.bson",
+        "ts.metadata.json",
         "users.bson",
         "users.metadata.json",
         "v1.metadata.json",
@@ -71,8 +81,24 @@ describe("exportBackup to a directory", () => {
     expect(JSON.parse(await readFile(join(output, "prelude.json"), "utf8")).ServerVersion).toBe(
       "7.0.32",
     );
-    expect(summary.documents).toBe(3);
+    expect(summary.documents).toBe(5);
     expect(summary.namespaces.map((item) => item.ns)).toContain("app.v1");
+  });
+
+  it("writes time-series measurements as buckets that unpack to the same measurements", async () => {
+    const { storage, id, manifest } = await importedBackup();
+    const output = join(await tempDirectory(), "dump");
+    await exportBackup(storage, id, { format: "directory", output });
+    const buckets = splitBson(await readFile(join(output, "app", "system.buckets.ts.bson")));
+    // Different meta values never share a bucket.
+    expect(buckets).toHaveLength(2);
+    const metadata = parseCollectionMetadata(
+      await readFile(join(output, "app", "ts.metadata.json"), "utf8"),
+    );
+    const settings = timeSeriesSettings(metadata, "app.ts");
+    const unpacked = buckets.flatMap((bucket) => unpackBucket(bucket, settings, "app.ts"));
+    expect(unpacked).toEqual(await storedDocuments(storage, manifest, "app.ts"));
+    expect(BSON.deserialize(buckets[0] ?? Buffer.alloc(0)).control).toMatchObject({ version: 1 });
   });
 
   it("writes metadata that means the same as mongodump's", async () => {
@@ -139,6 +165,7 @@ describe("exportBackup to a directory", () => {
     expect(summary.namespaces.map((item) => item.ns)).toEqual([
       "app.capped",
       "app.empty",
+      "app.ts",
       "app.we/ird name+x~é",
     ]);
   });
@@ -196,7 +223,7 @@ describe("exportBackup to an archive", () => {
     const bytes = Buffer.concat(chunks);
     expect([bytes[0], bytes[1]]).toEqual([0x1f, 0x8b]);
     const events = await readArchiveEvents(gunzipSync(bytes));
-    expect(events.filter((event) => event.kind === "namespaceEnd")).toHaveLength(5);
+    expect(events.filter((event) => event.kind === "namespaceEnd")).toHaveLength(6);
   });
 
   it("round-trips through importMongodump", async () => {
@@ -231,24 +258,31 @@ describe("exportBackup to an archive", () => {
       output: join(directory, "b.archive"),
       decryption: { identities: [key.identity] },
     });
-    expect(summary.documents).toBe(3);
+    expect(summary.documents).toBe(5);
   });
 });
 
 describe("selectExportNamespaces", () => {
-  it("leaves out time-series collections, which mongorestore cannot take as measurements", async () => {
+  it("selects users and roles entries apart from the collections, whatever the patterns", async () => {
     const { manifest } = await importedBackup();
     const users = manifest.namespaces.find((entry) => entry.ns === "app.users");
     if (users === undefined) throw new Error("no users");
-    const withTimeseries: Manifest = {
+    const withAuthz: Manifest = {
       ...manifest,
       namespaces: [
         ...manifest.namespaces,
-        { ...users, ns: "app.metrics", collection: "metrics", type: "timeseries" },
+        {
+          ...users,
+          ns: "admin.system.users",
+          db: "admin",
+          collection: "system.users",
+          type: "users",
+        },
       ],
     };
-    const selection = selectExportNamespaces(withTimeseries, () => true, false);
-    expect(selection.entries.map((entry) => entry.ns)).not.toContain("app.metrics");
-    expect(selection.skipped.map((item) => item.ns)).toEqual(["app.metrics"]);
+    const selection = selectExportNamespaces(withAuthz, (ns) => ns === "app.users");
+    expect(selection.entries.map((entry) => entry.ns)).toEqual(["app.users"]);
+    expect(selection.authz.map((entry) => entry.ns)).toEqual(["admin.system.users"]);
+    expect(selection.skipped).toEqual([]);
   });
 });

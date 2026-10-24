@@ -5,9 +5,10 @@
  * verification, authentication, reconnects, temp files and error mapping.
  */
 
+import { createHmac, randomBytes } from "node:crypto";
 import { chmod, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { type AddressInfo, createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +20,7 @@ import {
 import { describeStorageConformance } from "../../test/helpers/storage-conformance.ts";
 
 import { isMongoShieldError } from "../errors.ts";
+import { expandHome } from "./known-hosts.ts";
 import { type SftpStorageOptions, sftpStorage, sshFingerprint } from "./sftp.ts";
 import type { StorageAdapter } from "./types.ts";
 
@@ -231,6 +233,147 @@ describe("sftpStorage", () => {
       expect(sshFingerprint(Buffer.from("key"))).toBe(
         "SHA256:LHDhK3oGRvkiefQnx7OOczTY5Tic/xZ6HcMOc/gmtoM",
       );
+    });
+  });
+
+  describe("known_hosts", () => {
+    /** Client options for `target` that verify the host only through known_hosts. */
+    function knownHostsOptions(
+      target: TestSftpServer,
+      knownHosts: Partial<SftpStorageOptions>,
+    ): Partial<SftpStorageOptions> {
+      // An empty list overrides the fingerprint that storage() would merge in.
+      return { ...target.clientOptions, hostFingerprint: [], ...knownHosts };
+    }
+
+    /** `[127.0.0.1]:<port>`: how known_hosts names a host on a non-default port. */
+    function hostPattern(target: TestSftpServer): string {
+      return `[${target.host}]:${target.port}`;
+    }
+
+    /** A hashed host field as `ssh-keygen -H` writes it. */
+    function hashed(name: string): string {
+      const salt = randomBytes(20);
+      const hash = createHmac("sha1", salt).update(name).digest();
+      return `|1|${salt.toString("base64")}|${hash.toString("base64")}`;
+    }
+
+    const hostKey = () => server.hostPublicKeys[0] ?? "";
+
+    it("connects when known_hosts lists the host's key for [host]:port", async () => {
+      const file = join(root, "known_hosts");
+      await writeFile(file, `# servers\n${hostPattern(server)} ${hostKey()}\n`);
+      const adapter = storage(knownHostsOptions(server, { knownHostsPath: file }));
+      await adapter.put("a.txt", Buffer.from("a"));
+      expect(await adapter.head("a.txt")).toBeDefined();
+    });
+
+    it("connects with a hashed entry", async () => {
+      const knownHosts = `${hashed(hostPattern(server))} ${hostKey()}\n`;
+      const adapter = storage(knownHostsOptions(server, { knownHosts }));
+      expect(await adapter.head("missing")).toBeUndefined();
+    });
+
+    it("refuses a host that is not listed, with an ssh-keyscan hint", async () => {
+      const knownHosts = `[other.example.com]:${server.port} ${hostKey()}\n`;
+      const error = await rejection(
+        storage(knownHostsOptions(server, { knownHosts })).head("a.txt"),
+      );
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
+      expect(String(error)).toContain("is not listed in known_hosts");
+      expect(String(error)).toContain(server.hostFingerprint);
+      expect(isMongoShieldError(error) && error.hint).toContain("ssh-keyscan");
+    });
+
+    it("refuses a listed host presenting another key as possible interception", async () => {
+      const other = await startSftpServer();
+      await other.close();
+      const knownHosts = `${hostPattern(server)} ${other.hostPublicKeys[0]}\n`;
+      const error = await rejection(
+        storage(knownHostsOptions(server, { knownHosts })).head("a.txt"),
+      );
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
+      expect(String(error)).toContain("does not match the keys known_hosts lists");
+      expect(isMongoShieldError(error) && error.hint).toMatch(/intercepting/);
+    });
+
+    it("ignores bare host entries on a non-default port, as OpenSSH does", async () => {
+      const knownHosts = `${server.host} ${hostKey()}\n`;
+      const error = await rejection(
+        storage(knownHostsOptions(server, { knownHosts })).head("a.txt"),
+      );
+      expect(String(error)).toContain("is not listed");
+    });
+
+    it("refuses a @revoked key even when hostFingerprint matches it", async () => {
+      const knownHosts = `@revoked * ${hostKey()}\n`;
+      const error = await rejection(
+        storage({ knownHosts, hostFingerprint: server.hostFingerprint }).head("a.txt"),
+      );
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
+      expect(String(error)).toContain("@revoked");
+    });
+
+    it("trusts a key accepted by either hostFingerprint or known_hosts", async () => {
+      const knownHosts = `[other.example.com]:1 ${hostKey()}\n`;
+      const adapter = storage({ knownHosts, hostFingerprint: server.hostFingerprint });
+      expect(await adapter.head("a.txt")).toBeUndefined();
+    });
+
+    it("asks a server with several host keys for a type that known_hosts lists", async () => {
+      const multi = await startSftpServer({ hostKeyTypes: ["ed25519", "ecdsa", "rsa"] });
+      try {
+        // ssh2 prefers ed25519, so without the preference the server would present it.
+        for (const listed of multi.hostPublicKeys.slice(1)) {
+          const knownHosts = `${hostPattern(multi)} ${listed}\n`;
+          const adapter = storage(knownHostsOptions(multi, { knownHosts }));
+          expect(await adapter.head("a.txt")).toBeUndefined();
+          await adapter.close?.();
+        }
+      } finally {
+        await multi.close();
+      }
+    });
+
+    it("reports a missing known_hosts file as MS_CONFIG_INVALID naming it", async () => {
+      const file = join(root, "no-such-known_hosts");
+      const error = await rejection(
+        storage(knownHostsOptions(server, { knownHostsPath: file })).head("a.txt"),
+      );
+      expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
+      expect(String(error)).toContain(file);
+      expect(isMongoShieldError(error) && error.hint).toContain("ssh-keyscan");
+    });
+
+    it("re-reads the known_hosts file when it reconnects", async () => {
+      const file = join(root, "known_hosts");
+      await writeFile(file, "");
+      const adapter = storage(knownHostsOptions(server, { knownHostsPath: file }));
+      await expect(adapter.head("a.txt")).rejects.toMatchObject({ code: "MS_STORAGE_FORBIDDEN" });
+      await writeFile(file, `${hostPattern(server)} ${hostKey()}\n`);
+      expect(await adapter.head("a.txt")).toBeUndefined();
+    });
+
+    it("rejects knownHosts together with knownHostsPath, and an empty path", () => {
+      expect(() =>
+        sftpStorage({ ...server.clientOptions, path: root, knownHosts: "", knownHostsPath: "x" }),
+      ).toThrow(expect.objectContaining({ code: "MS_CONFIG_INVALID" }));
+      expect(() =>
+        sftpStorage({ ...server.clientOptions, path: root, knownHostsPath: " " }),
+      ).toThrow(expect.objectContaining({ code: "MS_CONFIG_INVALID" }));
+    });
+
+    it("counts known_hosts as host verification, so no fingerprint is needed", () => {
+      const { hostFingerprint: _ignored, ...withoutFingerprint } = server.clientOptions;
+      expect(() =>
+        sftpStorage({ ...withoutFingerprint, path: root, knownHostsPath: "~/.ssh/known_hosts" }),
+      ).not.toThrow();
+    });
+
+    it("expands ~ to the home directory", () => {
+      expect(expandHome("~")).toBe(homedir());
+      expect(expandHome("~/.ssh/known_hosts")).toBe(join(homedir(), ".ssh", "known_hosts"));
+      expect(expandHome("/etc/ssh/ssh_known_hosts")).toBe("/etc/ssh/ssh_known_hosts");
     });
   });
 

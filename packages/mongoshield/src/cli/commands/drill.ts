@@ -58,7 +58,8 @@ export const DRILL_OPTIONS: Readonly<Record<string, OptionSpec>> = {
     type: "string",
     valueName: "<n>",
     defaultText: "0",
-    description: "Documents per collection to compare byte for byte with the backup",
+    description:
+      "Documents per collection to compare byte for byte with the backup (time series: field by field)",
   },
   assertions: {
     type: "string",

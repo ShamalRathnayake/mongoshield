@@ -11,18 +11,28 @@
  *   create                    create the collection with the recorded options
  *   drop, dropDatabase,       steps the replayer applies to the restore target
  *   rename
- *   anything else             ignored (indexes and options come from the dump)
+ *   createIndexes,            index changes, applied after the data replay
+ *   dropIndexes                 (converge-indexes.ts)
+ *   anything else             ignored (collection options come from the dump)
  *
  * Every write sets absolute values, so applying an event to a document that already
  * reflects it changes nothing: that is why replay converges (see the spec).
+ *
+ * Documents and values go to the server in their stored field order: the `_id` of the
+ * filter, the replacement document and `$set` values are rebuilt as Maps when they hold
+ * integer-like field names, which JavaScript objects would list first
+ * (src/format/field-order.ts). An embedded `_id` in the wrong order would not even
+ * match the stored document.
  */
 
 import type { AnyBulkWriteOperation, Document } from "mongodb";
+import { inStoredOrderAnywhere, valueInStoredOrder } from "../format/field-order.ts";
 import {
   type ChangeEvent,
   collectionNamespaceOf,
   type UpdateDescription,
 } from "./converge-events.ts";
+import type { IndexChange } from "./converge-indexes.ts";
 import { createOptionsFrom } from "./restore-collections.ts";
 
 /**
@@ -38,7 +48,13 @@ export type ReplayStep =
   | { readonly kind: "write"; readonly ns: string; readonly operations: AnyBulkWriteOperation[] }
   /** A collection created during the window, with its options. */
   | { readonly kind: "create"; readonly ns: string; readonly options: Document }
-  | { readonly kind: "drop"; readonly ns: string }
+  /**
+   * `keepsIndexes` is true for the `drop` the capture synthesizes before recording a
+   * rename's destination (FORMAT.md): the collection is emptied, not really dropped.
+   */
+  | { readonly kind: "drop"; readonly ns: string; readonly keepsIndexes: boolean }
+  /** Index changes on one namespace, in order. */
+  | { readonly kind: "indexes"; readonly ns: string; readonly changes: readonly IndexChange[] }
   | { readonly kind: "dropDatabase"; readonly db: string }
   | { readonly kind: "rename"; readonly from: string; readonly to: string }
   /** Nothing to do; `reason` is logged at debug level. */
@@ -56,7 +72,11 @@ export function replayStepFor(event: ChangeEvent): ReplayStep {
     case "create":
       return ns === undefined ? ignore(event, "it has no namespace") : createStep(event, ns);
     case "drop":
-      return ns === undefined ? ignore(event, "it has no namespace") : { kind: "drop", ns };
+      if (ns === undefined) return ignore(event, "it has no namespace");
+      return { kind: "drop", ns, keepsIndexes: event.document.synthesized === true };
+    case "createIndexes":
+    case "dropIndexes":
+      return ns === undefined ? ignore(event, "it has no namespace") : indexStep(event, ns);
     case "dropDatabase":
       return event.ns === undefined
         ? ignore(event, "it has no database")
@@ -67,9 +87,9 @@ export function replayStepFor(event: ChangeEvent): ReplayStep {
       return { kind: "rename", from: ns, to };
     }
     default:
-      // createIndexes, dropIndexes, modify, shardCollection, …: indexes and options
-      // are restored from the dumped metadata.
-      return ignore(event, "indexes and collection options come from the dump");
+      // modify (collMod), shardCollection, …: collection options are restored from the
+      // dumped metadata.
+      return ignore(event, "collection options come from the dump");
   }
 }
 
@@ -78,7 +98,7 @@ function documentStep(event: ChangeEvent, ns: string): ReplayStep {
   // documentKey also holds the shard key on sharded collections; `_id` alone is unique.
   const id: unknown = event.documentKey?._id;
   if (id === undefined) return ignore(event, "it has no documentKey._id");
-  const filter: Document = { _id: id };
+  const filter: Document = { _id: valueInStoredOrder(id) };
 
   if (event.operationType === "delete") {
     return {
@@ -99,8 +119,9 @@ function documentStep(event: ChangeEvent, ns: string): ReplayStep {
 }
 
 function replaceOperation(filter: Document, document: Document): AnyBulkWriteOperation {
+  const replacement = inStoredOrderAnywhere(document);
   return {
-    replaceOne: { filter, replacement: document, upsert: true, collation: BINARY_COLLATION },
+    replaceOne: { filter, replacement, upsert: true, collation: BINARY_COLLATION },
   };
 }
 
@@ -130,7 +151,8 @@ export function updateOperations(
   const unset: Document = {};
   for (const field of update.removedFields) unset[field] = "";
   const change: Document = {};
-  if (Object.keys(set).length > 0) change.$set = set;
+  // The new values in stored order (a `$set` of an embedded document writes it as given).
+  if (Object.keys(set).length > 0) change.$set = valueInStoredOrder(set);
   if (Object.keys(unset).length > 0) change.$unset = unset;
   if (Object.keys(change).length > 0) operations.push(updateOne(filter, change));
 
@@ -154,6 +176,27 @@ function createStep(event: ChangeEvent, ns: string): ReplayStep {
   }
   const { idIndex: _idIndex, ...options } = description;
   return { kind: "create", ns, options: createOptionsFrom(options) };
+}
+
+/**
+ * A `createIndexes` or `dropIndexes` event: `operationDescription.indexes` lists the
+ * definitions created or dropped (`listIndexes` form, with `name` and `key`).
+ */
+function indexStep(event: ChangeEvent, ns: string): ReplayStep {
+  const indexes: unknown = event.operationDescription?.indexes;
+  const changes: IndexChange[] = [];
+  for (const index of Array.isArray(indexes) ? indexes : []) {
+    if (typeof index !== "object" || index === null) continue;
+    const name: unknown = Reflect.get(index, "name");
+    if (typeof name !== "string") continue;
+    changes.push(
+      event.operationType === "dropIndexes"
+        ? { kind: "drop", name }
+        : { kind: "create", spec: index },
+    );
+  }
+  if (changes.length === 0) return ignore(event, "it names no index");
+  return { kind: "indexes", ns, changes };
 }
 
 function ignore(event: ChangeEvent, reason: string): ReplayStep {

@@ -15,20 +15,23 @@
  * was backed up (see `restoreDocuments` in find-restore.ts).
  *
  * The filter is evaluated in-process, so `find` only supports a subset of MongoDB's
- * query language; see filter.ts for the list. Converge backups are read as dumped:
- * the changes recorded during the backup window (which a full restore replays) are
- * not applied, so a document changed during that window may show an older version.
+ * query language; see filter.ts for the list. Converge backups are read as they were
+ * at the end of their window: the changes recorded while the backup ran are overlaid
+ * on the dumped documents (find-window.ts) before the filter sees them, as a full
+ * restore would replay them.
  */
 
-import { BSON, type Document } from "mongodb";
+import type { Document } from "mongodb";
 import { listBackups, selectBackup } from "../catalog/index.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
 import type { Manifest, NamespaceEntry } from "../format/manifest.ts";
+import type { Logger } from "../logger.ts";
 import type { BackupSelector, DecryptionOptions } from "../types.ts";
 import type { EngineContext } from "./context.ts";
 import { compileFilter, type DocumentMatcher } from "./filter.ts";
+import { parseBackedUpDocument } from "./find-parse.ts";
 import { compileProjection } from "./find-projection.ts";
+import { documentsAtWindowEnd, hasChangeWindow } from "./find-window.ts";
 import { openBackupSource, openDocumentStream, type StoredBackupSource } from "./read-pipeline.ts";
 
 /** Options for `findInBackup`. */
@@ -56,6 +59,11 @@ export interface FindInBackupOptions {
 export interface MatchedDocument {
   readonly document: Document;
   readonly bytes: number;
+  /**
+   * The stored BSON, when the document is exactly as backed up (not changed by a
+   * converge backup's window). Diff compares these bytes rather than re-encoding.
+   */
+  readonly raw?: Buffer;
 }
 
 /** A namespace of a selected backup, opened for reading. */
@@ -95,7 +103,10 @@ export function findInBackup(
   async function* run(): AsyncGenerator<Document> {
     const opened = await openNamespace(context, options);
     let found = 0;
-    for await (const match of matchingDocuments(opened, matcher, options.signal)) {
+    const matches = matchingDocuments(opened, matcher, options.signal, {
+      logger: context.logger,
+    });
+    for await (const match of matches) {
       yield project(match.document);
       found += 1;
       // Returning ends the loop, which closes the open data file stream.
@@ -129,32 +140,47 @@ export async function openNamespace(
   }
 
   const entry = namespaceEntry(manifest, options.namespace);
-  if (manifest.changes !== undefined) {
-    context.logger.warn(
-      "This backup recorded changes made while it ran; find reads the documents as dumped, without replaying them",
-      { backupId: manifest.id },
-    );
-  }
   const source = await openBackupSource(context.storage, manifest, options.decryption, {
     signal: options.signal,
   });
   return { manifest, entry, source };
 }
 
+/** Options of `matchingDocuments` besides what to match. */
+export interface MatchOptions {
+  /** Told when a converge backup's change window is overlaid. */
+  readonly logger?: Logger | undefined;
+  /** Memory for the change window overlay (see find-window.ts). Mainly for tests. */
+  readonly windowMemoryBytes?: number | undefined;
+}
+
 /**
  * Yields every document of an opened namespace that matches, part after part.
- * Stopping the iteration early closes the open data file.
+ * Converge backups are matched in their state at the end of the window (see the
+ * file header). Stopping the iteration early closes the open data file.
  */
 export async function* matchingDocuments(
   opened: OpenedNamespace,
   matcher: DocumentMatcher,
   signal: AbortSignal | undefined,
+  options: MatchOptions = {},
 ): AsyncGenerator<MatchedDocument> {
+  if (hasChangeWindow(opened.manifest)) {
+    const documents = documentsAtWindowEnd(opened, {
+      signal,
+      logger: options.logger,
+      memoryBytes: options.windowMemoryBytes,
+    });
+    for await (const match of documents) {
+      if (matcher(match.document)) yield match;
+    }
+    return;
+  }
   for (const file of opened.entry.files) {
     for await (const raw of openDocumentStream(opened.source, file, { signal })) {
       throwIfAborted(signal);
       const bytes = raw as Buffer;
-      const document = parseDocument(bytes);
+      const document = parseBackedUpDocument(bytes);
       if (matcher(document)) yield { document, bytes: bytes.length };
     }
   }
@@ -186,19 +212,6 @@ function namespaceEntry(manifest: Manifest, namespace: string): NamespaceEntry {
     );
   }
   return entry;
-}
-
-/** Parses one backed-up document losslessly. A document that does not parse means a damaged file. */
-function parseDocument(raw: Buffer): Document {
-  try {
-    return BSON.deserialize(raw, LOSSLESS_DESERIALIZE_OPTIONS);
-  } catch (error) {
-    throw new MongoShieldError(
-      "MS_INTEGRITY_FAILED",
-      `A backed-up document is not valid BSON: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error, hint: "The backup is damaged. Run `mongoshield verify` on it." },
-    );
-  }
 }
 
 /** `limit`: a whole number ≥ 0; 0 and undefined mean "no limit". */

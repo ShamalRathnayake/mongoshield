@@ -1,6 +1,7 @@
-import { Binary, BSONRegExp, Decimal128, Double, Int32, Long, UUID } from "mongodb";
+import { Binary, BSON, BSONRegExp, Decimal128, Double, Int32, Long, UUID } from "mongodb";
 import { describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../errors.ts";
+import { deserializeInStoredOrder, valueInStoredOrder } from "./field-order.ts";
 import {
   type CollectionMetadata,
   formatCollectionUuid,
@@ -147,6 +148,57 @@ describe("parseCollectionMetadata", () => {
       parseCollectionMetadata('{"collectionName":"u","type":"hologram"}'),
     );
     expect(isMongoShieldError(error, "MS_FORMAT_UNSUPPORTED")).toBe(true);
+  });
+});
+
+describe("stored field order", () => {
+  /** A metadata file as mongodump (or MongoShield) writes it for such a collection. */
+  const text =
+    '{"options":{"validator":{"z":{"$exists":true},"2":{"$type":"string"}},' +
+    '"viewOn":"src","pipeline":[{"$sort":{"b":{"$numberInt":"1"},"1":{"$numberInt":"-1"}}}]},' +
+    '"indexes":[{"v":{"$numberInt":"2"},"key":{"b":{"$numberInt":"1"},"1":{"$numberInt":"1"},"a":{"$numberInt":"-1"}},' +
+    '"name":"compound","partialFilterExpression":{"q":{"$gt":{"$numberInt":"0"}},"0":{"$exists":true}}}],' +
+    '"collectionName":"users","type":"collection"}';
+
+  it("reads and writes integer-like field names where they were, byte for byte", () => {
+    // BSON.EJSON.parse + stringify would move "2", "1" and "0" first.
+    expect(serializeCollectionMetadata(parseCollectionMetadata(text))).toBe(text);
+  });
+
+  it("hands index keys, filters and pipelines on in stored order", () => {
+    const metadata = parseCollectionMetadata(text);
+    const keysOf = (value: unknown): string[] => {
+      const ordered = valueInStoredOrder(value);
+      return ordered instanceof Map ? [...ordered.keys()] : Object.keys(ordered as object);
+    };
+    const [index] = metadata.indexes;
+    expect(keysOf(index?.key)).toEqual(["b", "1", "a"]);
+    expect(keysOf(index?.partialFilterExpression)).toEqual(["q", "0"]);
+    expect(keysOf(metadata.options.validator)).toEqual(["z", "2"]);
+    expect(keysOf((metadata.options.pipeline as { $sort: unknown }[])[0]?.$sort)).toEqual([
+      "b",
+      "1",
+    ]);
+  });
+
+  it("writes metadata read from the server in its stored order", () => {
+    // As discovery parses listIndexes: raw BSON, order recorded.
+    const raw = BSON.serialize(
+      new Map<string, unknown>([
+        ["v", 2],
+        [
+          "key",
+          new Map<string, unknown>([
+            ["b", 1],
+            ["1", 1],
+          ]),
+        ],
+        ["name", "b_1_1_1"],
+      ]),
+    );
+    const index = deserializeInStoredOrder(raw, {});
+    const json = serializeCollectionMetadata({ ...USERS, options: {}, indexes: [index] });
+    expect(json).toContain('"key":{"b":{"$numberInt":"1"},"1":{"$numberInt":"1"}}');
   });
 });
 

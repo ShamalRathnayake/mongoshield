@@ -113,4 +113,25 @@ describe("restoreSearchIndexes", () => {
       restoreSearchIndexes(collection, DEFINITIONS, context(recordingLogger())),
     ).rejects.toBe(invalid);
   });
+  it("fails when listing the search indexes fails for another reason than missing support", async () => {
+    const failure = new MongoServerError({ message: "connection reset", code: 6 });
+    const collection: SearchIndexTarget = {
+      listSearchIndexes: () => ({
+        toArray: async () => {
+          throw failure;
+        },
+      }),
+      createSearchIndexes: async () => [],
+    };
+    await expect(
+      restoreSearchIndexes(collection, DEFINITIONS, context(recordingLogger())),
+    ).rejects.toBe(failure);
+  });
+
+  it("creates nothing when every search index exists already", async () => {
+    const { collection, created } = atlasCollection([{ name: "default" }, { name: "vectors" }]);
+    const outcome = await restoreSearchIndexes(collection, DEFINITIONS, context(recordingLogger()));
+    expect(created).toEqual([]);
+    expect(outcome).toEqual({ status: "created", created: [], existing: ["default", "vectors"] });
+  });
 });

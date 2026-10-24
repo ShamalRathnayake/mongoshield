@@ -13,6 +13,10 @@
  * - Only transient errors (connection, storage I/O) are retried, per step, so a
  *   flaky verify never produces a second backup.
  * - A failed step stops the run: nothing is pruned after a bad backup.
+ * - Retention is scoped: the prune only covers backups of the same source
+ *   deployment (`clusterId`) and the same selection (the `mongoshield.shape`
+ *   label, or `scopeLabels`), so jobs that share a storage location never
+ *   delete each other's backups.
  * - `schedule.timeoutMinutes` bounds the whole run, retries included.
  * - `schedule.verify: "drill"` verifies by restoring the new backup into the
  *   scratch deployment of the `drill` section (a restore drill), which also
@@ -24,8 +28,10 @@ import { hostname } from "node:os";
 import type { MongoClient } from "mongodb";
 import type { PruneResult } from "../catalog/prune.ts";
 import { hasAnyCount, type RetentionPolicy } from "../catalog/retention.ts";
+import { describeScope, type PruneScope } from "../catalog/scope.ts";
 import { backupTuningFromConfig } from "../config/backup-tuning.ts";
 import type { MongoShieldConfig } from "../config/schema.ts";
+import { readCheckpoint } from "../engine/backup-checkpoint.ts";
 import {
   type BackupGuardPolicy,
   type BeforeCommitHook,
@@ -34,6 +40,7 @@ import {
   GUARD_SHAPE_LABEL,
   type GuardResult,
   guardFailedError,
+  withShapeLabel,
 } from "../engine/backup-guard.ts";
 import type { DrillReport, ShieldDrillOptions } from "../engine/drill.ts";
 import { loadDrillAssertionsFile } from "../engine/drill-assertions-file.ts";
@@ -105,6 +112,15 @@ export interface ScheduledJobOptions {
   readonly cwd?: string;
   /** Overrides `schedule.prune`. */
   readonly prune?: boolean;
+  /**
+   * Labels that mark this job's backups and select the backups its retention
+   * applies to (together with the source's `clusterId`). They are added to every
+   * backup the job writes. Without them the scope is the backup's
+   * `mongoshield.shape` label, i.e. "backups of this deployment with the same
+   * include/exclude selection". The console passes `{ "mongoshield.plan": <id> }`
+   * so two plans with the same selection still keep separate retention.
+   */
+  readonly scopeLabels?: Readonly<Record<string, string>>;
   /** Wait a random 0–`schedule.jitterSeconds` before starting. `mongoshield run` sets this. */
   readonly applyJitter?: boolean;
   /** Lease length for the lock. Defaults to 5 minutes. */
@@ -240,7 +256,7 @@ export async function runScheduledJob(
       }
     }
     step = "prune";
-    await runPruneStep(context, signal);
+    await runPruneStep(context, backup, signal);
     draft.status = backup.status === "complete" ? "success" : "checkpointed";
   } catch (error) {
     draft.status = "failure";
@@ -295,8 +311,9 @@ async function runBackupStep(context: RunContext, signal: AbortSignal): Promise<
       const backupOptions: BackupOptions = {
         signal,
         // The shape label lets the guard find comparable backups later, even if
-        // the guard is only switched on after a while.
-        labels: { ...section?.labels, [GUARD_SHAPE_LABEL]: backupShapeLabel(section ?? {}) },
+        // the guard is only switched on after a while, and scopes retention to this
+        // selection. The scope labels mark the backup as this job's.
+        labels: withShapeLabel({ ...section?.labels, ...options.scopeLabels }, section ?? {}),
         ...(section?.include ? { include: section.include } : {}),
         ...(section?.exclude ? { exclude: section.exclude } : {}),
         ...(section?.consistency ? { consistency: section.consistency } : {}),
@@ -508,26 +525,80 @@ function missingDrillSectionError(): MongoShieldError {
   );
 }
 
-/** Applies the retention policy, when pruning is on and a policy is configured. */
-async function runPruneStep(context: RunContext, signal: AbortSignal): Promise<void> {
+/**
+ * Applies the retention policy, when pruning is on and a policy is configured,
+ * to the backups of this job's scope only (see {@link pruneScopeOf}).
+ */
+async function runPruneStep(
+  context: RunContext,
+  backup: BackupResult,
+  signal: AbortSignal,
+): Promise<void> {
   const { shield, settings, logger, draft, options } = context;
   if (!settings.prune) return;
   if (settings.retention === undefined) {
     logger.debug("Not pruning: no retention policy is configured");
     return;
   }
+  const scope = await pruneScopeOf(context, backup, signal);
+  if (scope === undefined) {
+    // Without the deployment's id the prune could only be scoped by selection,
+    // and another cluster with the same selection in this storage would lose
+    // backups. Keeping a few too many is the safe side.
+    logger.warn("Not pruning: the backup does not record which deployment it came from", {
+      id: backup.id,
+    });
+    return;
+  }
   const policy = settings.retention;
   const now = options.now ?? (() => new Date());
   const attempted = await withRetries(
-    (): Promise<PruneResult> => shield.prune(policy, { now: now(), signal }),
+    (): Promise<PruneResult> => shield.prune(policy, { now: now(), signal, scope }),
     { policy: settings.retry, step: "prune", signal, logger, ...randomOption(options) },
   );
   const result = attempted.value;
+  if (result.outOfScope.length > 0) {
+    logger.info("Retention left the backups of other sources or selections alone", {
+      scope: describeScope(scope),
+      outOfScope: result.outOfScope.length,
+    });
+  }
   draft.prune = {
     deletedBackups: result.deletedBackups,
     deletedBytes: result.deletedBytes,
     kept: result.plan.keep.length,
+    outOfScope: result.outOfScope.length,
   };
+}
+
+/**
+ * The backups this job's retention covers: same deployment as the backup just
+ * written, and the same `scopeLabels` (or, by default, the same shape label as
+ * that backup carries). `undefined` when the deployment is unknown.
+ *
+ * The cluster id comes from what the run itself recorded (the manifest, or the
+ * checkpoint of a run that used up its time budget) rather than from a second
+ * connection, so it is exactly what the job's backups carry.
+ */
+async function pruneScopeOf(
+  context: RunContext,
+  backup: BackupResult,
+  signal: AbortSignal,
+): Promise<PruneScope | undefined> {
+  const { shield, config, options } = context;
+  const clusterId =
+    backup.status === "complete"
+      ? backup.manifest.source.clusterId
+      : (await readCheckpoint(shield.storage, backup.id, signal))?.source.clusterId;
+  if (clusterId === undefined) return undefined;
+  // Empty scope labels would widen the scope to every backup of the deployment,
+  // so they fall back to the shape label like absent ones.
+  const custom = options.scopeLabels;
+  const labels =
+    custom !== undefined && Object.keys(custom).length > 0
+      ? custom
+      : { [GUARD_SHAPE_LABEL]: backupShapeLabel(config.backup ?? {}) };
+  return { clusterId, labels };
 }
 
 // ---------------------------------------------------------------------------

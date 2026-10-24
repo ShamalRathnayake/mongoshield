@@ -72,6 +72,10 @@ export interface WriteTestBackupOptions {
   readonly scryptWorkFactor?: number;
   /** Start time encoded in the backup id. Defaults to now. */
   readonly startedAt?: Date;
+  /** The manifest's labels. Defaults to none. */
+  readonly labels?: Readonly<Record<string, string>>;
+  /** The manifest's `source.clusterId`. Defaults to none (as old writers left it). */
+  readonly clusterId?: string;
 }
 
 /** The `_id_` index every regular collection has. */
@@ -106,7 +110,11 @@ export async function writeTestBackup(
     status: "complete",
     startedAt: startedAt.toISOString(),
     completedAt: new Date(startedAt.getTime() + 1000).toISOString(),
-    source: { topology: "replicaSet", serverVersion: "7.0.0" },
+    source: {
+      topology: "replicaSet",
+      serverVersion: "7.0.0",
+      ...(options.clusterId === undefined ? {} : { clusterId: options.clusterId }),
+    },
     consistency: { mode: "none" },
     compression,
     encryption: encrypted
@@ -116,7 +124,7 @@ export async function writeTestBackup(
             options.passphrase !== undefined ? ["scrypt"] : [...(options.recipients ?? [])],
         }
       : null,
-    labels: {},
+    labels: { ...options.labels },
     namespaces: entries,
     totals: {
       namespaces: entries.length,

@@ -4,10 +4,11 @@
  * back and leaves a safety snapshot of what it replaced.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ROLLBACK_OF_LABEL,
   rollback,
+  SNAPSHOT_INCLUDE_LABEL,
   SNAPSHOT_LABEL,
   snapshot,
 } from "../../../src/extras/snapshot.ts";
@@ -57,14 +58,58 @@ describe("snapshot and rollback", () => {
     const db = client().db(database);
     expect(await db.collection<Account>("accounts").countDocuments({ plan: "basic" })).toBe(20);
     expect(await db.collection("settings").countDocuments()).toBe(1);
-    // Collections created by the migration are left alone.
-    expect(await db.collection("audit").countDocuments()).toBe(1);
+    // Collections created by the migration are dropped.
+    expect(result.newCollections).toEqual([`${database}.audit`]);
+    expect(result.dropsNew).toBe(true);
+    const names = (await db.listCollections().toArray()).map((info) => info.name).sort();
+    expect(names).toEqual(["accounts", "settings"]);
 
-    // The safety snapshot holds the broken state, and points back at the snapshot.
+    // The safety snapshot holds the broken state, the dropped collection included, and
+    // points back at the snapshot.
     const safety = (await shield.list()).find((entry) => entry.id === result.safetySnapshotId);
     expect(safety?.manifest?.labels[SNAPSHOT_LABEL]).toBe("pre-rollback-v42");
     expect(safety?.manifest?.labels[ROLLBACK_OF_LABEL]).toBe(taken.id);
-    expect(safety?.manifest?.namespaces.map((entry) => entry.ns)).toEqual([`${database}.accounts`]);
+    expect(safety?.manifest?.namespaces.map((entry) => entry.ns).sort()).toEqual([
+      `${database}.accounts`,
+      `${database}.audit`,
+    ]);
+  });
+
+  it("keeps the collections created since the snapshot with keepNew", async () => {
+    await snapshot(shield, { label: "keep", include: [`${database}.*`] });
+    await badMigration();
+    const result = await rollback(shield, { label: "keep", keepNew: true });
+    expect(result).toMatchObject({ newCollections: [`${database}.audit`], dropsNew: false });
+    expect(await client().db(database).collection("audit").countDocuments()).toBe(1);
+  });
+
+  it("drops only new collections the snapshot would have captured, and the rollback selects", async () => {
+    const db = client().db(database);
+    await db.collection("cache").insertOne({ hot: true });
+    // The snapshot leaves `cache` out on purpose: it was not "created after it".
+    await snapshot(shield, {
+      label: "narrow",
+      include: [`${database}.*`],
+      exclude: [`${database}.cache`],
+    });
+    await badMigration();
+    await db.createCollection("audit_view", { viewOn: "audit", pipeline: [] });
+    await db.collection("scratch").insertOne({ temp: true });
+
+    const dry = await rollback(shield, {
+      label: "narrow",
+      exclude: [`${database}.scratch`],
+      dryRun: true,
+    });
+    expect(dry.newCollections).toEqual([`${database}.audit`, `${database}.audit_view`]);
+    expect(await db.collection("audit").countDocuments()).toBe(1);
+
+    await rollback(shield, { label: "narrow", exclude: [`${database}.scratch`] });
+    const names = (await db.listCollections().toArray())
+      .map((info) => info.name)
+      .filter((name) => !name.startsWith("system."))
+      .sort();
+    expect(names).toEqual(["accounts", "cache", "scratch", "settings"]);
   });
 
   it("plans without writing in a dry run, and picks the newest snapshot with the label", async () => {
@@ -104,5 +149,77 @@ describe("snapshot and rollback", () => {
       /not a valid snapshot label/,
     );
     await expect(rollback(shield, {})).rejects.toThrow(/exactly one/);
+  });
+
+  it("treats a plain backup (no recorded patterns) as having captured its databases whole", async () => {
+    const backup = await shield.backup({
+      include: [`${database}.accounts`],
+      consistency: "none",
+      // Not written by snapshot(): unreadable pattern labels are ignored.
+      labels: { [SNAPSHOT_INCLUDE_LABEL]: "not json" },
+    });
+    await badMigration();
+    const dry = await rollback(shield, { backupId: backup.id, dryRun: true });
+    // `settings` is gone, `audit` is new; with whole databases captured, the live
+    // `audit` counts as created after the backup.
+    expect(dry.newCollections).toEqual([`${database}.audit`]);
+    expect(dry.label).toBeUndefined();
+  });
+
+  it("refuses filters that select nothing of the snapshot, and explains when there are no snapshots", async () => {
+    await expect(rollback(shield, { label: "none-yet" })).rejects.toSatisfy(
+      (error) =>
+        isMongoShieldError(error, "MS_BACKUP_NOT_FOUND") && /Take one/.test(error.hint ?? ""),
+    );
+    await snapshot(shield, { label: "only", include: [`${database}.*`] });
+    await expect(
+      rollback(shield, { label: "only", include: [`${database}.nothing_here`] }),
+    ).rejects.toThrow(/No namespace in backup/);
+  });
+
+  it("takes no safety snapshot when there is nothing to lose", async () => {
+    const db = client().db(database);
+    await db.collection("accounts").deleteMany({});
+    await db.collection("settings").deleteMany({});
+    await snapshot(shield, { label: "empty", include: [`${database}.*`], exclude: [] });
+    const result = await rollback(shield, { label: "empty" });
+    expect(result.safetySnapshotId).toBeUndefined();
+    expect(result.newCollections).toEqual([]);
+    expect(result.dropsNew).toBe(false);
+  });
+
+  it("writes snapshots that are retained, with extra labels", async () => {
+    const locked = new MongoShield({
+      source: { uri: mongoUri() },
+      storage: memoryStorage({ objectLock: true }),
+    });
+    // Scoped to this test's database: the test server is shared by every test file
+    // running in parallel, and a snapshot of all of it would read (and race with) their
+    // databases while they are being created and dropped.
+    const taken = await snapshot(locked, {
+      label: "kept",
+      include: [`${database}.*`],
+      retainDays: 1,
+      labels: { ticket: "OPS-1" },
+    });
+    expect(taken.manifest.labels).toMatchObject({
+      ticket: "OPS-1",
+      [SNAPSHOT_LABEL]: "kept",
+      [SNAPSHOT_INCLUDE_LABEL]: JSON.stringify([`${database}.*`]),
+    });
+    expect(taken.manifest.immutableUntil).toBeDefined();
+  });
+
+  it("records no pattern labels for a snapshot of everything", async () => {
+    // Only what snapshot() asks the backup for matters here, so the backup itself is
+    // stubbed rather than run over the whole shared test server.
+    const backup = vi.spyOn(shield, "backup").mockRejectedValue(new Error("not run"));
+    await expect(snapshot(shield, { label: "all", labels: { ticket: "OPS-2" } })).rejects.toThrow(
+      "not run",
+    );
+    expect(backup).toHaveBeenCalledTimes(1);
+    const options = backup.mock.calls[0]?.[0];
+    expect(options?.include).toBeUndefined();
+    expect(options?.labels).toEqual({ ticket: "OPS-2", [SNAPSHOT_LABEL]: "all" });
   });
 });

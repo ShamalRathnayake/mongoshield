@@ -1,5 +1,11 @@
-import { BSON, Int32, Timestamp } from "mongodb";
+import fc from "fast-check";
+import { type AnyBulkWriteOperation, BSON, Int32, Timestamp } from "mongodb";
 import { describe, expect, it } from "vitest";
+import {
+  documentFor,
+  embeddedDocument,
+  knownReorderedDocument,
+} from "../../test/helpers/ordered-documents.ts";
 import { needsFullDocument, parseChangeEvent } from "./converge-events.ts";
 import { BINARY_COLLATION, replayStepFor } from "./converge-operations.ts";
 
@@ -112,10 +118,11 @@ describe("replayStepFor", () => {
     ).toBe("ignore");
   });
 
-  it("maps drop, dropDatabase and rename, and ignores index events", () => {
+  it("maps drop, dropDatabase and rename", () => {
     expect(replayStepFor(event({ operationType: "drop", ns }))).toEqual({
       kind: "drop",
       ns: "app.users",
+      keepsIndexes: false,
     });
     expect(replayStepFor(event({ operationType: "dropDatabase", ns: { db: "app" } }))).toEqual({
       kind: "dropDatabase",
@@ -124,7 +131,91 @@ describe("replayStepFor", () => {
     expect(
       replayStepFor(event({ operationType: "rename", ns, to: { db: "app", coll: "people" } })),
     ).toEqual({ kind: "rename", from: "app.users", to: "app.people" });
-    expect(replayStepFor(event({ operationType: "createIndexes", ns })).kind).toBe("ignore");
+  });
+
+  it("keeps the indexes of a drop the capture synthesized before a rename's destination", () => {
+    expect(replayStepFor(event({ operationType: "drop", ns, synthesized: true }))).toEqual({
+      kind: "drop",
+      ns: "app.users",
+      keepsIndexes: true,
+    });
+  });
+
+  it("maps createIndexes and dropIndexes to index changes, in order", () => {
+    const spec = { v: 2, key: { email: 1 }, name: "email_1", unique: true };
+    expect(
+      replayStepFor(
+        event({ operationType: "createIndexes", ns, operationDescription: { indexes: [spec] } }),
+      ),
+    ).toEqual({
+      kind: "indexes",
+      ns: "app.users",
+      changes: [
+        {
+          kind: "create",
+          spec: { v: new Int32(2), key: { email: new Int32(1) }, name: "email_1", unique: true },
+        },
+      ],
+    });
+    expect(
+      replayStepFor(
+        event({
+          operationType: "dropIndexes",
+          ns,
+          operationDescription: { indexes: [spec, { key: { a: 1 }, name: "a_1" }] },
+        }),
+      ),
+    ).toEqual({
+      kind: "indexes",
+      ns: "app.users",
+      changes: [
+        { kind: "drop", name: "email_1" },
+        { kind: "drop", name: "a_1" },
+      ],
+    });
+  });
+
+  it("ignores index events that name no index, and other DDL", () => {
+    const empty = event({ operationType: "createIndexes", ns, operationDescription: {} });
+    expect(replayStepFor(empty).kind).toBe("ignore");
+    const unnamed = event({
+      operationType: "dropIndexes",
+      ns,
+      operationDescription: { indexes: [{ key: { a: 1 } }, "bogus"] },
+    });
+    expect(replayStepFor(unnamed).kind).toBe("ignore");
+    expect(replayStepFor(event({ operationType: "createIndexes", ns: { db: "app" } })).kind).toBe(
+      "ignore",
+    );
+    expect(replayStepFor(event({ operationType: "modify", ns })).kind).toBe("ignore");
+    expect(replayStepFor(event({ operationType: "shardCollection", ns })).kind).toBe("ignore");
+  });
+
+  it("ignores document and DDL events without the namespace they need", () => {
+    for (const operationType of ["insert", "create", "drop"]) {
+      expect(replayStepFor(event({ operationType })).kind, operationType).toBe("ignore");
+    }
+    expect(replayStepFor(event({ operationType: "dropDatabase" })).kind).toBe("ignore");
+    expect(replayStepFor(event({ operationType: "rename", ns })).kind).toBe("ignore");
+  });
+
+  it("ignores document events without an _id or anything to write", () => {
+    expect(replayStepFor(event({ operationType: "insert", ns, documentKey: {} })).kind).toBe(
+      "ignore",
+    );
+    expect(
+      replayStepFor(event({ operationType: "insert", ns, documentKey: { _id: 1 } })).kind,
+    ).toBe("ignore");
+    expect(
+      replayStepFor(
+        event({
+          operationType: "update",
+          ns,
+          documentKey: { _id: 1 },
+          updateDescription: { updatedFields: {}, removedFields: [] },
+        }),
+      ).kind,
+    ).toBe("ignore");
   });
 });
 
@@ -169,5 +260,75 @@ describe("parseChangeEvent", () => {
   it("rejects bytes that are not a change event", () => {
     expect(() => parseChangeEvent(BSON.serialize({ hello: 1 }))).toThrow(/operationType/);
     expect(() => parseChangeEvent(Buffer.from([1, 2, 3]))).toThrow(/not valid BSON/);
+  });
+});
+
+describe("replayStepFor and stored field order", () => {
+  /** The BSON bytes of a value as the driver would send it, wrapped in `{ v }`. */
+  function bytesOfValue(value: unknown): Buffer {
+    return Buffer.from(BSON.serialize({ v: value }));
+  }
+
+  /** The single operation of a write step. */
+  function onlyOperation(step: ReturnType<typeof replayStepFor>): AnyBulkWriteOperation {
+    if (step.kind !== "write" || step.operations.length !== 1)
+      throw new Error("expected one write");
+    const [operation] = step.operations;
+    if (operation === undefined) throw new Error("expected one write");
+    return operation;
+  }
+
+  it("sends replacements and their _id filter in the order the event stored them", () => {
+    fc.assert(
+      fc.property(documentFor(1), fc.constantFrom("insert", "replace"), (document, type) => {
+        const id = document.get("_id");
+        const operation = onlyOperation(
+          replayStepFor(
+            event({
+              operationType: type,
+              ns,
+              documentKey: new Map([["_id", id]]),
+              fullDocument: document,
+            }),
+          ),
+        );
+        if (!("replaceOne" in operation)) throw new Error("expected a replaceOne");
+        expect(bytesOfValue(operation.replaceOne.replacement)).toEqual(bytesOfValue(document));
+        expect(bytesOfValue(operation.replaceOne.filter._id)).toEqual(bytesOfValue(id));
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("sends $set values in the order the event stored them", () => {
+    fc.assert(
+      fc.property(embeddedDocument, embeddedDocument, (value, other) => {
+        const updatedFields = new Map<string, unknown>([
+          ["sub", value],
+          ["list.1", [other]],
+        ]);
+        const operation = onlyOperation(
+          replayStepFor(
+            event({
+              operationType: "update",
+              ns,
+              documentKey: { _id: 1 },
+              updateDescription: { updatedFields, removedFields: [], truncatedArrays: [] },
+            }),
+          ),
+        );
+        if (!("updateOne" in operation)) throw new Error("expected an updateOne");
+        const update: unknown = operation.updateOne.update;
+        if (typeof update !== "object" || update === null) throw new Error("expected an update");
+        expect(bytesOfValue(Reflect.get(update, "$set"))).toEqual(bytesOfValue(updatedFields));
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("would reorder the known example without the stored order (the bug this guards)", () => {
+    const document = knownReorderedDocument(1);
+    const plain = BSON.deserialize(BSON.serialize(document));
+    expect(bytesOfValue(plain)).not.toEqual(bytesOfValue(document));
   });
 });

@@ -25,7 +25,7 @@ import type { KmsKeyRef } from "../../types.ts";
 import { headerError } from "../failures.ts";
 import type { FileKeyUnwrapper, FileKeyWrapper, Stanza } from "../header.ts";
 import { assertValidKmsKeyRef, isKmsProvider, resolveKmsClient } from "./registry.ts";
-import type { KmsClient } from "./types.ts";
+import type { KmsCallOptions, KmsClient } from "./types.ts";
 
 /** The stanza type (its first argument). */
 export const KMS_STANZA_TYPE = "mongoshield-kms";
@@ -38,14 +38,18 @@ export type KmsClientResolver = (ref: KmsKeyRef) => Promise<KmsClient>;
 
 /**
  * A key wrapper (for `createEncryptStream`'s `keyWrappers`) that wraps the file key
- * with one KMS key and returns its `mongoshield-kms` stanza.
+ * with one KMS key and returns its `mongoshield-kms` stanza. `options.signal`
+ * cancels the KMS call (MS_ABORTED).
  */
 export function createKmsKeyWrapper(
   ref: KmsKeyRef,
   resolve: KmsClientResolver = resolveKmsClient,
+  options: KmsCallOptions = {},
 ): FileKeyWrapper {
   return async (fileKey) => {
-    const wrapped = await withClient(ref, resolve, (client) => client.encryptDataKey(fileKey));
+    const wrapped = await withClient(ref, resolve, (client) =>
+      client.encryptDataKey(fileKey, callOptions(options)),
+    );
     if (!ALGORITHM_PATTERN.test(wrapped.algorithm) || wrapped.ciphertext.length === 0) {
       throw new MongoShieldError(
         "MS_ENCRYPTION_FAILED",
@@ -67,16 +71,20 @@ export function createKmsKeyWrapper(
 /**
  * A key unwrapper (for `createDecryptStream`'s `keyUnwrappers`) that opens
  * `mongoshield-kms` stanzas by asking the KMS named in the stanza. Ignores stanzas
- * of other types.
+ * of other types. `options.signal` cancels the KMS call (MS_ABORTED).
  */
 export function createKmsKeyUnwrapper(
   resolve: KmsClientResolver = resolveKmsClient,
+  options: KmsCallOptions = {},
 ): FileKeyUnwrapper {
   return async (stanza) => {
     if (stanza.args[0] !== KMS_STANZA_TYPE) return undefined;
     const { ref, algorithm } = parseKmsStanza(stanza);
     const fileKey = await withClient(ref, resolve, (client) =>
-      client.decryptDataKey({ key: ref.key, algorithm, ciphertext: stanza.body }),
+      client.decryptDataKey(
+        { key: ref.key, algorithm, ciphertext: stanza.body },
+        callOptions(options),
+      ),
     );
     return Buffer.from(fileKey);
   };
@@ -118,6 +126,14 @@ function parseKmsStanza(stanza: Stanza): { ref: KmsKeyRef; algorithm: string } {
     throw headerError(`the ${KMS_STANZA_TYPE} stanza names an invalid ${provider} key identifier.`);
   }
   return { ref, algorithm };
+}
+
+/**
+ * The options passed on to `KmsClient` calls: only a signal, and none at all
+ * without one, so custom clients written before signals existed see the same call.
+ */
+function callOptions(options: KmsCallOptions): KmsCallOptions {
+  return options.signal === undefined ? {} : { signal: options.signal };
 }
 
 /** Gets a client, runs `use`, and always releases the client. */

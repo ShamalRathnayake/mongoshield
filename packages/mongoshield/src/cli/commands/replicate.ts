@@ -94,13 +94,15 @@ async function runReplicateCommand(context: CommandContext): Promise<number> {
       signal: context.signal,
       ...(retainDays !== undefined ? { retainDays } : {}),
       onProgress: (event) => {
-        if (event.type === "backup:start" && event.files > 0) {
+        // The live line needs a terminal; piped output and --json/--quiet get none.
+        if (out.liveProgress && event.type === "backup:start" && event.files > 0) {
           out.live(
             `${event.backupId}: ${plural(event.files, "file")}, ${formatBytes(event.bytes)}`,
           );
         }
       },
     });
+    out.endLive();
     printResult(out, result, cli.storageLabel, destination.location);
     return 0;
   } finally {

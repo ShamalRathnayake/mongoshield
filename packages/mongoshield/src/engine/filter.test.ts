@@ -3,6 +3,7 @@
 // the error messages.
 
 import {
+  BSON,
   BSONRegExp,
   DBRef,
   Decimal128,
@@ -17,6 +18,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { isMongoShieldError, type MongoShieldError } from "../errors.ts";
 import { compileFilter } from "./filter.ts";
+import { parseBackedUpDocument } from "./find-parse.ts";
 
 function matches(filter: Document, document: Document): boolean {
   return compileFilter(filter)(document);
@@ -139,11 +141,70 @@ describe("compileFilter", () => {
     const error = compileError({
       $where: "1",
       a: { $all: [1], $mod: [2, 0] },
-      b: new BSONRegExp("x", "x"),
+      b: new BSONRegExp("x", "l"),
     });
     expect(error.code).toBe("MS_CONFIG_INVALID");
-    expect(error.details?.unsupported).toEqual(["$all", "$mod", '$options "x"', "$where"]);
+    expect(error.details?.unsupported).toEqual(["$all", "$mod", '$options "l"', "$where"]);
     expect(error.hint).toContain("$elemMatch");
+  });
+
+  it("emulates the x option: whitespace and # comments outside classes are ignored", () => {
+    const extended = { code: { $regex: "^ a b  # the prefix\n c$", $options: "x" } };
+    expect(matches(extended, { code: "abc" })).toBe(true);
+    expect(matches(extended, { code: "a b c" })).toBe(false);
+    // Escaped whitespace, an escaped # and whitespace inside a class stay literal.
+    expect(matches({ s: new BSONRegExp("^a\\ b\\#[ ]c$", "x") }, { s: "a b# c" })).toBe(true);
+    expect(matches({ s: { $regex: "^[#]x", $options: "x" } }, { s: "#x" })).toBe(true);
+    // Without x, the same pattern is taken literally.
+    expect(matches({ code: { $regex: "^a b" } }, { code: "a b" })).toBe(true);
+  });
+
+  it("supports the s option and options at the start of the pattern", () => {
+    expect(matches({ s: { $regex: "^a.b$", $options: "s" } }, { s: "a\nb" })).toBe(true);
+    expect(matches({ s: { $regex: "^a.b$" } }, { s: "a\nb" })).toBe(false);
+    expect(matches({ s: { $regex: "(?i)^ada$" } }, { s: "ADA" })).toBe(true);
+    expect(matches({ s: { $regex: "(?sx)^a . b$" } }, { s: "a\nb" })).toBe(true);
+  });
+
+  it("translates the PCRE anchors \\A, \\z and \\Z", () => {
+    expect(matches({ s: { $regex: "\\Aab" } }, { s: "abc" })).toBe(true);
+    expect(matches({ s: { $regex: "\\Ab" } }, { s: "ab" })).toBe(false);
+    expect(matches({ s: { $regex: "b\\z" } }, { s: "ab" })).toBe(true);
+    expect(matches({ s: { $regex: "b\\z" } }, { s: "ab\n" })).toBe(false);
+    expect(matches({ s: { $regex: "b\\Z" } }, { s: "ab\n" })).toBe(true);
+    expect(matches({ s: { $regex: "[\\A]" } }, { s: "A" })).toBe(true);
+    expect(compileError({ s: { $regex: "a\\" } }).message).toContain("invalid regular expression");
+  });
+
+  it("compares embedded documents in stored field order, also with integer-like names", () => {
+    const raw = BSON.serialize(
+      new Map<string, unknown>([
+        [
+          "a",
+          new Map([
+            ["b", 1],
+            ["0", 2],
+          ]),
+        ],
+      ]),
+    );
+    const stored = parseBackedUpDocument(raw);
+    // JavaScript lists "0" first; the stored order is b, 0.
+    expect(Object.keys(stored.a as Document)).toEqual(["0", "b"]);
+    expect(matches({ a: { b: 1, "0": 2 } }, stored)).toBe(false);
+    const reordered = BSON.serialize(
+      new Map<string, unknown>([
+        [
+          "a",
+          new Map([
+            ["0", 2],
+            ["b", 1],
+          ]),
+        ],
+      ]),
+    );
+    expect(matches({ a: { b: 1, "0": 2 } }, parseBackedUpDocument(reordered))).toBe(true);
+    expect(matches({ a: { $gt: { "0": 2, b: 0 } } }, stored)).toBe(true);
   });
 
   it("explains malformed operator arguments", () => {

@@ -3,6 +3,7 @@
 // reading collections as raw BSON, optionally as of a cluster time, to compare them
 // byte for byte.
 
+import { Readable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BSON, type Document, type MongoClient, Timestamp } from "mongodb";
 import type { ClusterTime } from "../../src/format/manifest.ts";
@@ -97,4 +98,55 @@ export function firstDifference(expected: Buffer[], actual: Buffer[]): string | 
 
 function parse(raw: Buffer): Document {
   return BSON.deserialize(raw, { promoteValues: false, promoteLongs: false, bsonRegExp: true });
+}
+
+/**
+ * A collection's index definitions as comparable strings, sorted by name: everything
+ * `listIndexes` reports except the format version `v` (a restore lets the server pick
+ * it) and `ns` (old servers).
+ */
+export async function indexDefinitions(
+  client: MongoClient,
+  database: string,
+  collection: string,
+): Promise<string[]> {
+  const indexes = await client.db(database).collection(collection).listIndexes().toArray();
+  return indexes
+    .map(({ v: _version, ns: _ns, ...definition }) => BSON.EJSON.stringify(definition))
+    .sort();
+}
+
+/** A loosely typed test document: a number or string `_id`, any fields (the driver would assume ObjectId). */
+export interface AnyDocument {
+  _id?: number | string;
+  [field: string]: unknown;
+}
+
+/**
+ * A memory storage that, for keys `matches` selects, stores the first chunk of the
+ * body and then awaits `change()` before taking the rest: the dump's cursor is open
+ * and part-way through the collection while `change()` runs.
+ */
+export function midWriteStorage(
+  base: MemoryStorage,
+  matches: (key: string) => boolean,
+  change: () => Promise<void>,
+): MemoryStorage {
+  return {
+    ...base,
+    async put(key, body, options) {
+      if (!matches(key) || !(body instanceof Readable)) return base.put(key, body, options);
+      async function* firstChunkThenChange(source: Readable): AsyncGenerator<Buffer> {
+        let first = true;
+        for await (const chunk of source) {
+          yield Buffer.from(chunk);
+          if (first) {
+            first = false;
+            await change();
+          }
+        }
+      }
+      return base.put(key, Readable.from(firstChunkThenChange(body)), options);
+    },
+  };
 }

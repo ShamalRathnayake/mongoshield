@@ -17,7 +17,7 @@ import {
   MongoServerError,
   MongoServerSelectionError,
 } from "mongodb";
-import { MongoShieldError } from "../errors.ts";
+import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { type Logger, silentLogger } from "../logger.ts";
 import { redactMongoUri, redactSecrets } from "../redact.ts";
 import type { SourceOptions } from "../types.ts";
@@ -39,6 +39,11 @@ export interface OpenConnectionOptions {
   readonly logger?: Logger;
   /** How long the driver waits for a usable server. The driver default is 30 000 ms. */
   readonly serverSelectionTimeoutMS?: number;
+  /**
+   * Cancels connecting (Ctrl-C, timeouts). Without it, an unreachable server keeps the
+   * caller waiting for the whole server selection timeout.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** Server error code for a rejected SASL/SCRAM/X.509 handshake. */
@@ -63,9 +68,14 @@ export async function openConnection(
 ): Promise<MongoConnection> {
   const logger = options.logger ?? silentLogger;
   const { uri, client } = validateSource(source);
+  throwIfAborted(options.signal);
 
   if (client !== undefined) {
-    await verifyConnection(client, { location: "the provided MongoClient", secrets: [] });
+    await verifyConnection(
+      client,
+      { location: "the provided MongoClient", secrets: [] },
+      options.signal,
+    );
     logger.debug("Using the MongoClient supplied by the caller");
     return borrowedConnection(client);
   }
@@ -74,7 +84,7 @@ export async function openConnection(
   const secrets = passwordsInUri(uri);
   const created = createClient(uri, options, { location, secrets });
   try {
-    await verifyConnection(created, { location, secrets });
+    await verifyConnection(created, { location, secrets }, options.signal);
   } catch (error) {
     // The client may hold sockets or monitors even though the ping failed.
     await created.close().catch(() => undefined);
@@ -141,12 +151,41 @@ function createClient(
 }
 
 /** Runs `ping` on `admin`, which needs no privileges and forces server selection + auth. */
-async function verifyConnection(client: MongoClient, context: ErrorContext): Promise<void> {
+async function verifyConnection(
+  client: MongoClient,
+  context: ErrorContext,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const ping = client.db("admin").command({ ping: 1 });
   try {
-    await client.db("admin").command({ ping: 1 });
+    await (signal === undefined ? ping : raceWithAbort(ping, signal));
   } catch (error) {
+    if (signal?.aborted) {
+      // The abandoned ping fails once the caller closes the client; don't let it surface.
+      ping.catch(() => undefined);
+      throw abortError(signal);
+    }
     throw toConnectionError(error, context);
   }
+}
+
+/** Resolves like `promise`, or rejects as soon as `signal` aborts, whichever is first. */
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortError(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function ownedConnection(client: MongoClient): MongoConnection {
@@ -204,7 +243,7 @@ export function toConnectionError(
 
   // Parse errors and bad option values are configuration mistakes, not network problems.
   if (
-    error instanceof MongoParseError ||
+    isParseError(error) ||
     error instanceof MongoInvalidArgumentError ||
     error instanceof MongoMissingCredentialsError
   ) {
@@ -259,6 +298,17 @@ function isAuthenticationFailure(error: unknown): boolean {
     current = current.cause;
   }
   return false;
+}
+
+/**
+ * A malformed connection string. The driver checks the scheme and URI syntax with the
+ * `mongodb-connection-string-url` package, which throws its OWN `MongoParseError` class
+ * (not the driver's), so `instanceof` alone misses "not-a-uri" or "mongo://…".
+ */
+function isParseError(error: unknown): boolean {
+  return (
+    error instanceof MongoParseError || (error instanceof Error && error.name === "MongoParseError")
+  );
 }
 
 /** Node's TLS failures use codes such as `CERT_HAS_EXPIRED` or `ERR_TLS_CERT_ALTNAME_INVALID`. */

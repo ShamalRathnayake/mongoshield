@@ -6,6 +6,10 @@
  * All decisions live in `retention.ts`; this file only gathers the inputs and
  * deletes carefully.
  *
+ * Scopes: with `scope` (see scope.ts) only the backups of one source/selection
+ * are planned over; every other backup in the location is left untouched and
+ * reported in `outOfScope`. Without a scope the policy covers the whole location.
+ *
  * Immutable backups: the planner keeps a backup until its manifest's
  * `immutableUntil`, so prune never asks the storage to delete a locked backup.
  * The storage can still refuse (a clock that runs ahead of the provider's, or an
@@ -14,19 +18,27 @@
  * instead of failing the whole prune; any other error still stops it.
  */
 
-import { throwIfAborted } from "../errors.ts";
+import { readCheckpoint } from "../engine/backup-checkpoint.ts";
+import { isMongoShieldError, throwIfAborted } from "../errors.ts";
 import { backupDir, checkpointKey, manifestKey } from "../format/layout.ts";
 import { type Logger, silentLogger } from "../logger.ts";
 import { isObjectLockedError } from "../storage/retention.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import { deleteAnnotations } from "./annotations.ts";
-import { type CatalogEntry, completedAtOf, immutableUntilOf, listBackups } from "./catalog.ts";
+import {
+  type CatalogEntry,
+  type CatalogStatus,
+  completedAtOf,
+  immutableUntilOf,
+  listBackups,
+} from "./catalog.ts";
 import {
   planRetention,
   type RetentionBackup,
   type RetentionPlan,
   type RetentionPolicy,
 } from "./retention.ts";
+import { type BackupOrigin, isInScope, type PruneScope, validateScope } from "./scope.ts";
 
 /** Options for {@link pruneBackups}. */
 export interface PruneOptions {
@@ -34,8 +46,31 @@ export interface PruneOptions {
   readonly now?: Date;
   /** Plan and report, but delete nothing. */
   readonly dryRun?: boolean;
+  /**
+   * Apply the policy only to the backups of one source/selection (see scope.ts).
+   * Every other backup is left alone and listed in `outOfScope`. Omit it to apply
+   * the policy to every backup in the storage location.
+   */
+  readonly scope?: PruneScope;
   readonly signal?: AbortSignal;
   readonly logger?: Logger;
+}
+
+/**
+ * Why a scoped prune left a backup alone:
+ *
+ *   other-scope   it belongs to another source or selection
+ *   unattributed  an incomplete run without a (readable) checkpoint: nothing says
+ *                 whose it is, so only an unscoped prune may remove it
+ *   invalid       its manifest is unusable; never removed automatically anyway
+ */
+export type OutOfScopeReason = "other-scope" | "unattributed" | "invalid";
+
+/** A backup a scoped prune did not plan over (and never touched). */
+export interface OutOfScopeBackup {
+  readonly id: string;
+  readonly status: CatalogStatus;
+  readonly reason: OutOfScopeReason;
 }
 
 /** What a prune run decided and did. */
@@ -54,6 +89,11 @@ export interface PruneResult {
    * Deleted counts include any objects of a skipped backup removed before the refusal.
    */
   readonly skipped: string[];
+  /**
+   * Backups outside `scope`, newest first. They were not planned over, so they
+   * appear in neither `plan.keep` nor `plan.remove`. Always empty without a scope.
+   */
+  readonly outOfScope: OutOfScopeBackup[];
 }
 
 /**
@@ -63,7 +103,7 @@ export interface PruneResult {
 const DELETE_BATCH_SIZE = 1000;
 
 /**
- * Applies `policy` to the backups in `storage`.
+ * Applies `policy` to the backups in `storage` (only those in `options.scope`, when given).
  *
  * Verification results and holds come from the backup's annotations (see
  * annotations.ts): a backup whose latest verification passed counts as verified,
@@ -78,20 +118,41 @@ export async function pruneBackups(
   const signal = options.signal;
   const dryRun = options.dryRun ?? false;
 
+  const scope = options.scope;
+  if (scope !== undefined) validateScope(scope);
+
   const entries = await listBackups(storage, {
     logger,
     ...(signal ? { signal } : {}),
   });
+  const { inScope, outOfScope } = await splitByScope(storage, entries, scope, signal);
   const backups: RetentionBackup[] = [];
-  for (const entry of entries) {
+  for (const entry of inScope) {
     backups.push(await toRetentionBackup(storage, entry, signal));
   }
 
-  const plan = planRetention({ backups, policy, now: options.now ?? new Date() });
+  const planned = planRetention({ backups, policy, now: options.now ?? new Date() });
+  const plan: RetentionPlan = {
+    ...planned,
+    warnings: [...planned.warnings, ...outOfScopeWarnings(outOfScope)],
+  };
   for (const warning of plan.warnings) logger.warn(warning);
+  if (outOfScope.length > 0) {
+    logger.info("Left backups of other sources or selections alone", {
+      outOfScope: outOfScope.length,
+    });
+  }
 
   const skipped: string[] = [];
-  const result = { plan, dryRun, deletedBackups: 0, deletedObjects: 0, deletedBytes: 0, skipped };
+  const result = {
+    plan,
+    dryRun,
+    deletedBackups: 0,
+    deletedObjects: 0,
+    deletedBytes: 0,
+    skipped,
+    outOfScope,
+  };
   if (dryRun) {
     for (const removed of plan.remove) {
       logger.info("Would delete backup (dry run)", { id: removed.id, reason: removed.reason });
@@ -136,6 +197,85 @@ export async function pruneBackups(
   }
 
   return result;
+}
+
+/** The catalog entries a prune plans over, and the ones it leaves alone. */
+interface ScopeSplit {
+  readonly inScope: CatalogEntry[];
+  readonly outOfScope: OutOfScopeBackup[];
+}
+
+/**
+ * Splits the catalog by `scope`. Without a scope everything is in scope. With one,
+ * a backup is in scope only when its origin is known and matches; anything that
+ * cannot be attributed stays out (the safe side: it is kept).
+ */
+async function splitByScope(
+  storage: StorageAdapter,
+  entries: readonly CatalogEntry[],
+  scope: PruneScope | undefined,
+  signal: AbortSignal | undefined,
+): Promise<ScopeSplit> {
+  if (scope === undefined) return { inScope: [...entries], outOfScope: [] };
+
+  const inScope: CatalogEntry[] = [];
+  const outOfScope: OutOfScopeBackup[] = [];
+  for (const entry of entries) {
+    if (entry.status === "invalid") {
+      outOfScope.push({ id: entry.id, status: entry.status, reason: "invalid" });
+      continue;
+    }
+    const origin = await originOf(storage, entry, signal);
+    if (origin === undefined) {
+      outOfScope.push({ id: entry.id, status: entry.status, reason: "unattributed" });
+    } else if (isInScope(origin, scope)) {
+      inScope.push(entry);
+    } else {
+      outOfScope.push({ id: entry.id, status: entry.status, reason: "other-scope" });
+    }
+  }
+  return { inScope, outOfScope };
+}
+
+/**
+ * Where a backup came from: its manifest's source and labels, or for an
+ * incomplete run those recorded in its checkpoint (written with the same labels
+ * and source the manifest will have). `undefined` when nothing records it.
+ */
+async function originOf(
+  storage: StorageAdapter,
+  entry: CatalogEntry,
+  signal: AbortSignal | undefined,
+): Promise<BackupOrigin | undefined> {
+  if (entry.manifest !== undefined) {
+    return { clusterId: entry.manifest.source.clusterId, labels: entry.manifest.labels };
+  }
+  try {
+    const checkpoint = await readCheckpoint(storage, entry.id, signal);
+    if (checkpoint === undefined) return undefined;
+    return { clusterId: checkpoint.source.clusterId, labels: checkpoint.labels };
+  } catch (error) {
+    // A damaged checkpoint says nothing reliable about the run: leave it alone.
+    if (isMongoShieldError(error, "MS_MANIFEST_INVALID")) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * The warnings a scoped prune adds about what it left alone. Invalid backups were
+ * warned about by the planner before scopes existed; they are out of every scope
+ * now, but the user still needs to hear about them.
+ */
+function outOfScopeWarnings(outOfScope: readonly OutOfScopeBackup[]): string[] {
+  const warnings: string[] = [];
+  for (const backup of outOfScope) {
+    if (backup.reason !== "invalid") continue;
+    warnings.push(
+      `Backup ${backup.id} has an invalid manifest and is never removed automatically. ` +
+        "Inspect it and delete it by hand if it is not needed.",
+    );
+  }
+  return warnings;
 }
 
 /** Objects and bytes removed for one backup. */

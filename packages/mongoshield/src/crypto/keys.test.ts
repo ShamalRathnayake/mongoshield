@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../errors.ts";
+import { encodeBech32 } from "./bech32.ts";
 import {
   assertValidIdentity,
   assertValidRecipient,
@@ -62,6 +63,8 @@ describe("assertValidRecipient", () => {
     ["age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwk", "bad checksum"],
     ["age1qyqszqgpqyqszqgpqyqszqgpqyqszqgp", "wrong length"],
     ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA", "SSH key"],
+    [encodeBech32("agex", Buffer.alloc(32, 1)), "another Bech32 type"],
+    [encodeBech32("age", Buffer.alloc(31, 1)), "a 31-byte key"],
   ])("rejects %j (%s) with MS_CONFIG_INVALID and a hint", (value) => {
     const error = catchError(() => assertValidRecipient(value));
     expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
@@ -101,6 +104,16 @@ describe("assertValidIdentity", () => {
       ),
     );
     expect(error.message).toContain("Unsupported");
+  });
+});
+
+describe("assertValidIdentity with well-formed Bech32 of the wrong size", () => {
+  it("rejects an identity that does not encode 32 bytes", () => {
+    const short = encodeBech32("AGE-SECRET-KEY-", Buffer.alloc(31, 7));
+    const error = catchError(() => assertValidIdentity(short));
+    expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
+    expect(error.message).toContain("32-byte");
+    expect(error.message).not.toContain(short);
   });
 });
 

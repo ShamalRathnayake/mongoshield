@@ -35,6 +35,7 @@ export function toBackupError(error: unknown, context: BackupErrorContext = {}):
   if (error instanceof MongoShieldError) return error;
   const where = context.ns === undefined ? "" : ` while reading ${context.ns}`;
 
+  if (isCatalogChangedUnderSnapshot(error)) return catalogChangedError(error, where);
   if (isSnapshotExpired(error)) return snapshotExpiredError(error, where);
 
   if (error instanceof MongoServerError && error.code === SERVER_ERROR_CODES.Unauthorized) {
@@ -44,6 +45,18 @@ export function toBackupError(error: unknown, context: BackupErrorContext = {}):
       {
         cause: error,
         hint: 'Grant the built-in `backup` role (db: "admin"), or `read` on the databases being backed up.',
+      },
+    );
+  }
+
+  if (isReplicaSetStateChange(error)) {
+    return new MongoShieldError(
+      "MS_CONNECTION_FAILED",
+      `A replica set member changed state (an election or step-down)${where}: ${error.message}`,
+      {
+        cause: error,
+        hint: "This is transient: run the backup again once the replica set has a primary (scheduled runs retry it automatically).",
+        details: { serverCode: error.code },
       },
     );
   }
@@ -62,12 +75,70 @@ export function toBackupError(error: unknown, context: BackupErrorContext = {}):
   });
 }
 
+/**
+ * Server error codes a read gets when the member it runs on steps down, shuts down or
+ * is not (or no longer) in a state to serve it: the codes the driver treats as
+ * retryable for reads. The driver retries a failed `find` once by itself, but a
+ * `getMore` is never retried (the cursor lived on the old member), and an election
+ * can outlast that single retry. These errors are transient: the same backup succeeds
+ * once the replica set has settled, so they become `MS_CONNECTION_FAILED`, which the
+ * scheduler retries (see schedule/retry.ts).
+ */
+const REPLICA_SET_STATE_CHANGE_CODES: ReadonlySet<number> = new Set([
+  91, // ShutdownInProgress
+  189, // PrimarySteppedDown
+  10107, // NotWritablePrimary
+  10058, // LegacyNotPrimary
+  11600, // InterruptedAtShutdown
+  11602, // InterruptedDueToReplStateChange
+  13435, // NotPrimaryNoSecondaryOk
+  13436, // NotPrimaryOrSecondary
+]);
+
+/** True for a server error caused by an election, step-down or shutdown (see above). */
+function isReplicaSetStateChange(error: unknown): error is MongoServerError {
+  return (
+    error instanceof MongoServerError &&
+    typeof error.code === "number" &&
+    REPLICA_SET_STATE_CHANGE_CODES.has(error.code)
+  );
+}
+
 /** True for the server errors that mean "your snapshot is no longer available". */
 export function isSnapshotExpired(error: unknown): error is MongoServerError {
   return (
     error instanceof MongoServerError &&
     (error.code === SERVER_ERROR_CODES.SnapshotTooOld ||
       error.code === SERVER_ERROR_CODES.SnapshotUnavailable)
+  );
+}
+
+/**
+ * SnapshotUnavailable has a second meaning: the collection's catalog entry changed at
+ * or after the requested time (a rename, a drop, the rename `$out` ends with), so the
+ * server cannot read it as of then. Replica sets answer such reads from their
+ * point-in-time catalog; a shard refuses them, and the rename `$out` performs there
+ * commits its catalog change after the change event's cluster time, so the converge
+ * capture's read of a renamed collection "as of the rename" fails on sharded
+ * clusters. That is about timing and topology, not about the snapshot window.
+ */
+export function isCatalogChangedUnderSnapshot(error: unknown): error is MongoServerError {
+  return (
+    error instanceof MongoServerError &&
+    error.code === SERVER_ERROR_CODES.SnapshotUnavailable &&
+    /catalog change/i.test(error.message)
+  );
+}
+
+function catalogChangedError(error: MongoServerError, where: string): MongoShieldError {
+  return new MongoShieldError(
+    "MS_UNSUPPORTED_TOPOLOGY",
+    `A collection was renamed or replaced (e.g. by $out) at a moment the backup had to read it as of, and the server cannot read it at that time${where}: ${error.message}`,
+    {
+      cause: error,
+      hint: 'This depends on timing: run the backup again. On sharded clusters, avoid $out and renameCollection into backed-up collections during converge backups, or use consistency "none".',
+      details: { serverCode: error.code },
+    },
   );
 }
 

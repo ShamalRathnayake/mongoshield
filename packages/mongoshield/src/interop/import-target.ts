@@ -19,16 +19,25 @@ import { createCoalescer } from "../engine/backup-coalesce.ts";
 import type { FileEncryption } from "../engine/backup-key.ts";
 import { buildManifest } from "../engine/backup-manifest.ts";
 import { writeStoredFile } from "../engine/backup-write.ts";
+import type { CapturedWindow } from "../engine/converge-capture.ts";
 import type { ProgressTracker } from "../engine/progress.ts";
 import { createCountingStream } from "../format/hashing.ts";
 import {
   caseCollisionSuffixes,
+  changesFileKey,
   dataFileKey,
   manifestKey,
   metadataFileKey,
+  reservedNameSuffix,
   resolveBackupKey,
 } from "../format/layout.ts";
-import type { Compression, Manifest, NamespaceEntry, StoredFile } from "../format/manifest.ts";
+import type {
+  ChangesFile,
+  Compression,
+  Manifest,
+  NamespaceEntry,
+  StoredFile,
+} from "../format/manifest.ts";
 import { type CollectionMetadata, serializeCollectionMetadata } from "../format/metadata.ts";
 import type { Logger } from "../logger.ts";
 import type { DeploymentInfo } from "../mongo/index.ts";
@@ -165,6 +174,47 @@ export async function writeImportedData(
   };
 }
 
+/**
+ * Streams converted oplog events into the changes file (`_changes/window.bson…`),
+ * compressed and encrypted like a data file, exactly where a converge backup keeps it.
+ *
+ * @param events an object-mode stream of raw BSON change events (after `before`)
+ */
+export async function writeImportedChanges(
+  target: ImportTarget,
+  events: Readable,
+  before: readonly Transform[],
+  signal: AbortSignal,
+): Promise<ChangesFile> {
+  const relativeKey = changesFileKey({
+    compression: target.compression,
+    encrypted: target.encryption !== undefined,
+  });
+  const key = resolveBackupKey(target.backupId, relativeKey);
+  const counter = createCountingStream();
+  target.writtenKeys.add(key);
+  const digest = await writeStoredFile({
+    storage: target.storage,
+    key,
+    source: events,
+    transforms: [
+      ...before,
+      counter.stream,
+      createCoalescer(),
+      createCompressor(target.compression),
+      ...encryptionTransforms(target),
+    ],
+    contentType: BINARY_CONTENT_TYPE,
+    signal,
+  });
+  return {
+    key: relativeKey,
+    size: digest.size,
+    sha256: digest.sha256,
+    events: counter.counts().items,
+  };
+}
+
 /** The manifest entry of an imported namespace. Views have no data file. */
 export function namespaceEntry(
   namespace: ImportNamespace,
@@ -185,7 +235,9 @@ export function namespaceEntry(
 
 /**
  * The unique-suffix of every namespace whose name clashes with another by case
- * within its database (see `caseCollisionSuffixes`), keyed by `db.collection`.
+ * within its database (see `caseCollisionSuffixes`), or with the changes file
+ * (`_changes.window`, see `reservedNameSuffix`), keyed by `db.collection`. The
+ * same rules as `runBackup`, so imported backups lay out files like native ones.
  */
 export function caseSuffixesByNamespace(
   namespaces: readonly Pick<ImportNamespace, "db" | "collection">[],
@@ -201,6 +253,11 @@ export function caseSuffixesByNamespace(
     for (const [name, suffix] of caseCollisionSuffixes(names))
       suffixes.set(`${db}.${name}`, suffix);
   }
+  for (const namespace of namespaces) {
+    const reserved = reservedNameSuffix(namespace.db, namespace.collection);
+    const ns = namespaceOf(namespace);
+    if (reserved !== undefined && !suffixes.has(ns)) suffixes.set(ns, reserved);
+  }
   return suffixes;
 }
 
@@ -214,13 +271,19 @@ export interface ImportManifestInput {
   readonly compression: Compression;
   readonly encryption: FileEncryption | undefined;
   readonly labels: Readonly<Record<string, string>>;
+  /** Collections, views and time-series collections, in any order. */
   readonly entries: readonly NamespaceEntry[];
+  /** The users and roles entries (roles first), stored after the collections. */
+  readonly authzEntries?: readonly NamespaceEntry[];
+  /** The converted oplog of `mongodump --oplog`, for consistency `converge`. */
+  readonly window?: CapturedWindow | undefined;
 }
 
 /**
  * Builds the manifest with the backup engine's `buildManifest`. A dump says nothing
  * about the deployment's topology or identity, so `source` is reduced to what is
- * known, and mongodump without `--oplog` gives no consistency guarantee (`none`).
+ * known. mongodump without `--oplog` gives no consistency guarantee (`none`); with
+ * `--oplog`, the converted oplog makes it a `converge` backup (see oplog-events.ts).
  */
 export function buildImportManifest(input: ImportManifestInput): Manifest {
   const serverVersion = input.serverVersion ?? "unknown";
@@ -234,14 +297,20 @@ export function buildImportManifest(input: ImportManifestInput): Manifest {
     supportsSnapshotReads: false,
     maxBsonObjectSize: MAX_BSON_OBJECT_SIZE,
   };
-  // Manifests list namespaces sorted by name, like native backups.
-  const sorted = [...input.entries].sort((a, b) => compareNamespaces(a.ns, b.ns));
+  // Manifests list namespaces sorted by name, then users and roles, like native backups.
+  const sorted = [
+    ...[...input.entries].sort((a, b) => compareNamespaces(a.ns, b.ns)),
+    ...(input.authzEntries ?? []),
+  ];
   const manifest = buildManifest({
     id: input.backupId,
     startedAt: input.dumpedAt,
     completedAt: input.dumpedAt,
     deployment,
-    consistency: { mode: "none", clusterTime: undefined },
+    consistency:
+      input.window === undefined
+        ? { mode: "none", clusterTime: undefined }
+        : { mode: "converge", clusterTime: undefined, window: input.window },
     compression: input.compression,
     encryption: input.encryption,
     labels: input.labels,

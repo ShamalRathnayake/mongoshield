@@ -3,17 +3,20 @@
 // namespaces alone, and `useMongoSnapshot` snapshots on the first reset. Also
 // measures how long a reset of 10 collections × 1000 documents takes.
 
-import { type Document, MongoClient } from "mongodb";
+import { type CommandStartedEvent, type Document, MongoClient } from "mongodb";
 import { MongoMemoryServer } from "mongodb-memory-server";
 import { describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../../src/errors.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
 import { createDatabaseSnapshot, useMongoSnapshot } from "../../src/testing/index.ts";
-import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
+import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 
 const client = useMongoClient();
 
 /** Test documents use numbers as _id (the driver assumes ObjectId otherwise). */
+/** Commands that change collections, counted by the reset timing test. */
+const WRITE_COMMANDS = new Set(["insert", "update", "delete", "drop", "create", "createIndexes"]);
+
 interface Item {
   _id: number;
   [field: string]: unknown;
@@ -199,72 +202,125 @@ describe("useMongoSnapshot", () => {
     await db.dispose();
   });
 
-  it("resets 10 collections × 1000 documents quickly", async ({ annotate }) => {
+  // The workload is fixed (a snapshot and 20 resets of 10 × 1000 documents), so its
+  // own timeout is generous: under coverage, and with every other test file sharing
+  // the server, it can take longer than the default minute without anything being
+  // wrong. What "quickly" means is asserted below, in two ways that hold under load.
+  it("resets 10 collections × 1000 documents quickly", { timeout: 240_000 }, async ({
+    annotate,
+  }) => {
     const database = uniqueDb("bench");
     const names = Array.from({ length: 10 }, (_, index) => `c${index}`);
+    const documents = Array.from({ length: 1000 }, (_, index) => ({
+      _id: index,
+      name: `item ${index}`,
+      price: index * 1.5,
+      tags: ["a", "b"],
+      createdAt: new Date(1_700_000_000_000 + index),
+    }));
     for (const name of names) {
-      const documents = Array.from({ length: 1000 }, (_, index) => ({
-        _id: index,
-        name: `item ${index}`,
-        price: index * 1.5,
-        tags: ["a", "b"],
-        createdAt: new Date(1_700_000_000_000 + index),
-      }));
       await client().db(database).collection<Item>(name).insertMany(documents);
       await client().db(database).collection(name).createIndex({ name: 1 });
     }
-    const db = useMongoSnapshot(client(), { databases: [database] });
+    // The snapshot gets a client of its own whose write commands are counted, to see
+    // which collections each reset actually touched.
+    const resetting = new MongoClient(mongoUri(), { monitorCommands: true });
+    const writes: string[] = [];
+    resetting.on("commandStarted", (event: CommandStartedEvent) => {
+      const target: unknown = event.command[event.commandName];
+      if (!WRITE_COMMANDS.has(event.commandName) || event.databaseName !== database) return;
+      writes.push(`${event.commandName} ${String(target)}`);
+    });
+    const db = useMongoSnapshot(resetting, { databases: [database] });
+    const collection = (name: string) => client().db(database).collection<Item>(name);
 
-    /** Median time of 5 resets, each after `change` modified the database. */
-    async function medianReset(change: () => Promise<unknown>): Promise<number> {
+    /** Median time of 5 resets, each after `change`; and the writes of the last one. */
+    async function medianReset(
+      change: () => Promise<unknown>,
+    ): Promise<{ ms: number; writes: string[] }> {
       const timings: number[] = [];
       for (let round = 0; round < 5; round++) {
         await change();
+        writes.length = 0;
         const start = performance.now();
         await db.reset();
         timings.push(performance.now() - start);
       }
+      const ms = [...timings].sort((left, right) => left - right)[2] ?? 0;
+      return { ms, writes: [...new Set(writes)].sort() };
+    }
+
+    /**
+     * The un-instrumented baseline: the same server and load, no MongoShield code. The
+     * least a reset of one collection's documents can cost is putting them back.
+     */
+    async function baselineReloadMs(): Promise<number> {
+      const scratch = client().db(database).collection<Item>("baseline");
+      const timings: number[] = [];
+      for (let round = 0; round < 5; round++) {
+        const start = performance.now();
+        await scratch.deleteMany({});
+        await scratch.insertMany(documents.map((document) => ({ ...document })));
+        timings.push(performance.now() - start);
+      }
+      await scratch.drop();
       return [...timings].sort((left, right) => left - right)[2] ?? 0;
     }
-    const collection = (name: string) => client().db(database).collection<Item>(name);
 
-    const snapshotStart = performance.now();
-    await db.reset();
-    const snapshotMs = performance.now() - snapshotStart;
-    const unchanged = await medianReset(async () => undefined);
-    const oneCollection = await medianReset(() =>
-      collection("c0").deleteMany({ _id: { $lt: 500 } }),
-    );
-    const everyCollection = await medianReset(() =>
-      Promise.all(
-        names.map((name) =>
-          client()
-            .db(database)
-            .collection(name)
-            .updateMany({}, { $inc: { price: 1 } }),
+    try {
+      const baseline = await baselineReloadMs();
+      const snapshotStart = performance.now();
+      await db.reset();
+      const snapshotMs = performance.now() - snapshotStart;
+      const unchanged = await medianReset(async () => undefined);
+      const oneCollection = await medianReset(() =>
+        collection("c0").deleteMany({ _id: { $lt: 500 } }),
+      );
+      const everyCollection = await medianReset(() =>
+        Promise.all(
+          names.map((name) =>
+            client()
+              .db(database)
+              .collection(name)
+              .updateMany({}, { $inc: { price: 1 } }),
+          ),
         ),
-      ),
-    );
-    const newIndexes = await medianReset(() =>
-      Promise.all(names.map((name) => collection(name).createIndex({ price: 1 }))),
-    );
+      );
+      const newIndexes = await medianReset(() =>
+        Promise.all(names.map((name) => collection(name).createIndex({ price: 1 }))),
+      );
 
-    for (const name of names) {
-      expect(await collection(name).countDocuments({ price: { $gte: 1498.5 } })).toBe(1);
-      expect(await collection(name).listIndexes().toArray()).toHaveLength(2);
+      for (const name of names) {
+        expect(await collection(name).countDocuments({ price: { $gte: 1498.5 } })).toBe(1);
+        expect(await collection(name).listIndexes().toArray()).toHaveLength(2);
+      }
+      await annotate(
+        [
+          `baseline reload of 1 collection ${baseline.toFixed(0)} ms`,
+          `snapshot ${snapshotMs.toFixed(0)} ms`,
+          `reset, nothing changed ${unchanged.ms.toFixed(0)} ms`,
+          `1 collection's documents changed ${oneCollection.ms.toFixed(0)} ms`,
+          `all 10 collections' documents changed ${everyCollection.ms.toFixed(0)} ms`,
+          `an index added to all 10 ${newIndexes.ms.toFixed(0)} ms`,
+        ].join("; "),
+      );
+
+      // 1. Only what changed is put back, and the cheapest way (exact, whatever the load).
+      expect(unchanged.writes).toEqual([]);
+      expect(oneCollection.writes).toEqual(["delete c0", "insert c0"]);
+      expect(everyCollection.writes.some((write) => write.startsWith("drop"))).toBe(false);
+      expect(everyCollection.writes.filter((write) => write.startsWith("insert"))).toHaveLength(10);
+      expect(newIndexes.writes.filter((write) => write.startsWith("drop"))).toHaveLength(10);
+
+      // 2. Fast enough for beforeEach: the absolute bounds of an idle machine, or, when
+      // the machine is slower (coverage, a busy server), the same bounds scaled by how
+      // much slower the baseline is than on an idle machine (about 20 ms, rounded up).
+      const slowdown = Math.max(1, baseline / 25);
+      expect(oneCollection.ms).toBeLessThan(2000 * slowdown);
+      expect(newIndexes.ms).toBeLessThan(5000 * slowdown);
+    } finally {
+      await db.dispose();
+      await resetting.close();
     }
-    await annotate(
-      [
-        `snapshot ${snapshotMs.toFixed(0)} ms`,
-        `reset, nothing changed ${unchanged.toFixed(0)} ms`,
-        `1 collection's documents changed ${oneCollection.toFixed(0)} ms`,
-        `all 10 collections' documents changed ${everyCollection.toFixed(0)} ms`,
-        `an index added to all 10 ${newIndexes.toFixed(0)} ms`,
-      ].join("; "),
-    );
-    // Generous bounds: the point is "fast enough for beforeEach", not a benchmark.
-    expect(oneCollection).toBeLessThan(2000);
-    expect(newIndexes).toBeLessThan(5000);
-    await db.dispose();
   });
 });

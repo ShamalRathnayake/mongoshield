@@ -104,16 +104,25 @@ describe("mongoshield snapshot / rollback", () => {
       expect(taken.code, taken.stderr).toBe(0);
       expect(taken.stdout.trim()).toMatch(/^\d{4}-/);
       await accounts.updateMany({}, { $set: { plan: "BROKEN" } });
+      await client().db(database).collection("migration_temp").insertOne({ step: 1 });
 
       const base = ["rollback", "v7", "--uri", mongoUri(), "--from", storage];
       const refused = await cli(base);
       expect(refused.code).toBe(3);
       expect(refused.stderr).toContain("Rollback plan");
+      expect(refused.stderr).toContain(`${database}.migration_temp`);
+      expect(refused.stderr).toContain("drop (created after the snapshot)");
+
+      const kept = await cli([...base, "--keep-new", "--dry-run"]);
+      expect(kept.stderr).toContain("keep (--keep-new)");
 
       const done = await cli([...base, "--yes"]);
       expect(done.code, done.stderr).toBe(0);
       expect(done.stdout).toContain("Rolled back 1 namespace");
+      expect(done.stdout).toContain("dropped 1 collection created since");
       expect(await accounts.countDocuments({ plan: "basic" })).toBe(2);
+      const names = await client().db(database).listCollections().toArray();
+      expect(names.map((info) => info.name)).toEqual(["accounts"]);
     } finally {
       await client().db(database).dropDatabase();
     }

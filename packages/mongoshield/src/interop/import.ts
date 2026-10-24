@@ -12,11 +12,20 @@
  * Exactly as with `runBackup`, nothing counts as a backup until the manifest is
  * written, and a failed or aborted import deletes the files it wrote. Documents are
  * copied byte for byte (never parsed), so the backup restores exactly what
- * mongodump dumped.
+ * mongodump dumped. Two things are converted into what a native backup holds
+ * (see import-rules.ts):
  *
- * Not imported (reported in `skipped`): system collections, users and roles,
- * time-series collections (see `import-rules.ts`) and the oplog of `--oplog` dumps.
- * The backup's consistency is `none`, the same guarantee as mongodump without --oplog.
+ * - time-series bucket documents become plain measurements (timeseries-buckets.ts);
+ * - users and roles (`admin.system.users`, `$admin.system.users`, …) become the
+ *   backup's users and roles entries (import-authz.ts).
+ *
+ * - the oplog of a `mongodump --oplog` dump becomes the change events of a
+ *   `converge` backup (import-oplog.ts), so restore replays them to the end of the
+ *   dump like `mongorestore --oplogReplay`; without an oplog the consistency is
+ *   `none`, the same guarantee as mongodump without --oplog.
+ *
+ * Not imported (reported in `skipped`): system collections other than `system.js`,
+ * and the auth schema version.
  */
 
 import type { Readable } from "node:stream";
@@ -84,6 +93,14 @@ export interface ImportMongodumpOptions {
   readonly dumpedAt?: Date;
   /** Collections imported at the same time from a directory. Defaults to 4. */
   readonly parallelism?: number;
+  /**
+   * Leave out the oplog of a `mongodump --oplog` dump. By default it is converted into
+   * the backup's change events, which restore replays to reach the state at the end of
+   * the dump (consistency `converge`); some oplogs cannot be replayed (an update of a
+   * field whose name contains a dot, for example), and importing fails with a message
+   * that suggests this option. Without the oplog, the consistency is `none`.
+   */
+  readonly ignoreOplog?: boolean;
   readonly logger?: Logger;
   readonly signal?: AbortSignal;
   readonly onProgress?: (event: ProgressEvent) => void;
@@ -151,16 +168,25 @@ export async function importMongodump(
       writtenKeys,
     };
 
+    const ignoreOplog = options.ignoreOplog ?? false;
     const outcome =
       opened.kind === "directory"
         ? {
-            ...(await importDumpDirectory(opened.scan, target, filter, { parallelism, signal })),
+            ...(await importDumpDirectory(opened.scan, target, filter, {
+              parallelism,
+              ignoreOplog,
+              signal,
+            })),
             serverVersion: opened.scan.serverVersion,
             toolVersion: opened.scan.toolVersion,
           }
-        : await importArchive(opened.archive, target, filter, signal);
+        : await importArchive(opened.archive, target, filter, { ignoreOplog, signal });
     throwIfAborted(signal);
-    assertSomethingImported(outcome.entries.length, outcome.skipped, options);
+    assertSomethingImported(
+      outcome.entries.length + outcome.authzEntries.length,
+      outcome.skipped,
+      options,
+    );
 
     const manifest = buildImportManifest({
       backupId,
@@ -170,6 +196,8 @@ export async function importMongodump(
       encryption,
       labels: importLabels(options.labels, outcome.toolVersion),
       entries: outcome.entries,
+      authzEntries: outcome.authzEntries,
+      window: outcome.window,
     });
     manifestAttempted = true;
     await writeManifest(storage, manifest, { signal });

@@ -17,17 +17,34 @@
  * indexes, failed assertions) are collected as problems in the report. Errors about
  * the drill's setup (no connection, no privileges, missing keys, abort) are thrown.
  *
- * How the same-deployment guard works: every manifest records the source's
- * `clusterId`, a hash of the replica set name (or sharded cluster id, or host list
- * for standalones) from `describeDeployment`. The drill computes the same id for
- * the target and refuses when they are equal. Backups without a recorded id cannot
- * be checked; the drill then logs a warning and proceeds (it only ever writes to
- * fresh temporary databases). A standalone reached under a different host name is
- * not recognised, because its id is derived from the host list.
+ * How the same-deployment guard works, in two steps:
+ *
+ *   1. deployment id   every manifest records the source's `clusterId`, a hash of the
+ *                      replica set name (or sharded cluster id, or host list for
+ *                      standalones). The drill computes the same id for the target and
+ *                      refuses when they are equal.
+ *   2. collection ids  the backed-up metadata records each collection's UUID, which
+ *                      the server assigns randomly when the collection is created. If
+ *                      the target holds a collection of the same name with the same
+ *                      UUID, it IS the backed-up deployment (or a byte-level clone of
+ *                      it), whatever host name it was reached by. This catches what
+ *                      step 1 cannot: a standalone reached under another host name or
+ *                      IP (its id is derived from the host list), and backups that do
+ *                      not record a deployment id. Up to MAX_UUID_PROBES collections are
+ *                      compared, one small metadata read and one listCollections per
+ *                      database.
+ *
+ * Why not compare `hostInfo` / `serverStatus` (host, port, start time) instead: those
+ * would have to be recorded at backup time, which changes the manifest format, and
+ * they still differ between members of a replica set. UUIDs are already in every
+ * backup, need no extra privileges beyond `listCollections`, and identify the data
+ * itself. Collections dropped and recreated since the backup get new UUIDs, so a
+ * long-lived deployment whose collections were all recreated is not recognised; step
+ * 1 still covers replica sets and sharded clusters.
  */
 
 import { randomBytes } from "node:crypto";
-import type { Db, MongoClient } from "mongodb";
+import { Binary, type Db, type Document, type MongoClient } from "mongodb";
 import { listBackups, selectBackup } from "../catalog/index.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
 import { collectionEntries, type Manifest, type NamespaceEntry } from "../format/manifest.ts";
@@ -49,7 +66,7 @@ import {
   isBackupDefect,
   messageOf,
 } from "./drill-checks.ts";
-import { openBackupSource, type StoredBackupSource } from "./read-pipeline.ts";
+import { openBackupSource, readMetadataFile, type StoredBackupSource } from "./read-pipeline.ts";
 import { runRestore } from "./restore.ts";
 
 export type { DrillNamespaceReport } from "./drill-checks.ts";
@@ -196,7 +213,12 @@ export async function drillBackup(
   throwIfAborted(options.signal);
 
   const manifest = await loadManifest(context, options);
-  await assertScratchTarget(context, manifest, options);
+  // Opened first: the guard reads collection UUIDs from the (encrypted) metadata, and
+  // missing keys should fail before anything else happens.
+  const source = await openBackupSource(context.storage, manifest, options.decryption, {
+    signal: options.signal,
+  });
+  await assertScratchTarget(context, manifest, source, options);
   const databases = temporaryDatabaseNames(manifest, prefix, randomBytes(4).toString("hex"));
   await assertDatabasesUnused(context.client, databases);
 
@@ -215,9 +237,6 @@ export async function drillBackup(
     if (outcome.result === undefined) {
       problems.push({ subject: "restore", problem: outcome.failure });
     } else {
-      const source = await openBackupSource(context.storage, manifest, options.decryption, {
-        signal: options.signal,
-      });
       namespaces = await checkNamespaces(
         context,
         options,
@@ -350,30 +369,121 @@ async function loadManifest(context: DrillContext, options: DrillOptions): Promi
   return selected.manifest;
 }
 
+/** Most collections whose UUID the same-deployment guard compares (see the file header). */
+export const MAX_UUID_PROBES = 32;
+
 /** Refuses a target that is the backup's own source deployment (see the file header). */
 async function assertScratchTarget(
   context: DrillContext,
   manifest: Manifest,
+  source: StoredBackupSource,
   options: DrillOptions,
 ): Promise<void> {
   if (options.allowSameDeployment === true) return;
   const sourceId = manifest.source.clusterId;
+  if (sourceId !== undefined) {
+    const identify = context.identifyDeployment ?? defaultIdentifyDeployment;
+    if ((await identify(context.client)) === sourceId) {
+      throw sameDeploymentError(manifest, "it has the same deployment id");
+    }
+  }
+  const shared = await findBackedUpCollection(context, manifest, source, options.signal);
+  if (shared !== undefined) {
+    throw sameDeploymentError(
+      manifest,
+      `it holds ${shared} with the very collection UUID the backup recorded`,
+    );
+  }
   if (sourceId === undefined) {
     context.logger.warn(
-      "Drill: the backup does not record its source deployment, so the target cannot be checked",
+      "Drill: the backup does not record its source deployment; only collection UUIDs were compared",
       { backupId: manifest.id },
     );
-    return;
   }
-  const identify = context.identifyDeployment ?? defaultIdentifyDeployment;
-  if ((await identify(context.client)) !== sourceId) return;
-  throw new MongoShieldError(
+}
+
+function sameDeploymentError(manifest: Manifest, reason: string): MongoShieldError {
+  return new MongoShieldError(
     "MS_CONFIG_INVALID",
-    `The drill target is the deployment backup ${manifest.id} was taken from.`,
+    `The drill target is the deployment backup ${manifest.id} was taken from (${reason}).`,
     {
       hint: "Drill into a scratch deployment (--target-uri). To drill into the source anyway, pass --allow-same-deployment (allowSameDeployment: true); only temporary databases are written.",
     },
   );
+}
+
+/**
+ * The first backed-up collection (`db.name`) that exists on the target with the UUID
+ * the backup recorded, or undefined. Metadata that cannot be read is skipped here (the
+ * restore reports it as a finding), and so is a database the user may not list.
+ */
+async function findBackedUpCollection(
+  context: DrillContext,
+  manifest: Manifest,
+  source: StoredBackupSource,
+  signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+  const recorded = await recordedUuids(manifest, source, signal);
+  for (const [database, uuids] of recorded) {
+    throwIfAborted(signal);
+    const existing = await collectionUuids(context.client.db(database));
+    for (const [name, uuid] of uuids) {
+      if (existing.get(name) === uuid) return `${database}.${name}`;
+    }
+  }
+  return undefined;
+}
+
+/** database → collection name → UUID, from the metadata of up to MAX_UUID_PROBES collections. */
+async function recordedUuids(
+  manifest: Manifest,
+  source: StoredBackupSource,
+  signal: AbortSignal | undefined,
+): Promise<Map<string, Map<string, string>>> {
+  const recorded = new Map<string, Map<string, string>>();
+  const probes = collectionEntries(manifest.namespaces)
+    .filter((entry) => entry.type !== "view")
+    .slice(0, MAX_UUID_PROBES);
+  for (const entry of probes) {
+    let uuid: string | undefined;
+    try {
+      uuid = (await readMetadataFile(source, entry.metadata, { signal })).uuid;
+    } catch (error) {
+      if (!isBackupDefect(error)) throw error;
+    }
+    if (uuid === undefined) continue;
+    const names = recorded.get(entry.db) ?? new Map<string, string>();
+    names.set(entry.collection, uuid);
+    recorded.set(entry.db, names);
+  }
+  return recorded;
+}
+
+/**
+ * The UUIDs of a database's collections, by name. Time series report theirs on the
+ * backing `system.buckets.<name>` collection, which is what backups record for them.
+ */
+async function collectionUuids(db: Db): Promise<Map<string, string>> {
+  const uuids = new Map<string, string>();
+  let infos: Document[];
+  try {
+    infos = await db
+      .listCollections({}, { nameOnly: false, authorizedCollections: true })
+      .toArray();
+  } catch {
+    // Without listCollections nothing can be compared; step 1 of the guard still ran.
+    return uuids;
+  }
+  const bucketsPrefix = "system.buckets.";
+  for (const info of infos) {
+    const uuid: unknown = info.info?.uuid;
+    if (typeof info.name !== "string" || !(uuid instanceof Binary)) continue;
+    const name = info.name.startsWith(bucketsPrefix)
+      ? info.name.slice(bucketsPrefix.length)
+      : info.name;
+    uuids.set(name, uuid.toString("hex").toLowerCase());
+  }
+  return uuids;
 }
 
 async function defaultIdentifyDeployment(client: MongoClient): Promise<string> {

@@ -3,7 +3,7 @@
  *
  *   <dir>/
  *     prelude.json[.gz]                    server and tool version (mongodump 100.12+)
- *     oplog.bson                           only with --oplog (not imported)
+ *     oplog.bson[.gz]                      only with --oplog (converted by oplog-events.ts)
  *     <db>/
  *       <stem>.bson[.gz]                   documents (legacy dumps: <stem>.bin)
  *       <stem>.metadata.json[.gz]          options, indexes, uuid, type
@@ -57,6 +57,8 @@ export interface DumpDirectoryScan {
   readonly toolVersion: string | undefined;
   /** Grouped per collection, sorted by database and stem. */
   readonly collections: readonly DumpCollectionFiles[];
+  /** `oplog.bson[.gz]` of `mongodump --oplog`, when present. */
+  readonly oplog: DumpFile | undefined;
   readonly ignored: readonly IgnoredDumpFile[];
   /** The newest modification time of any collection file: when the dump finished. */
   readonly newestFileTime: Date | undefined;
@@ -90,6 +92,9 @@ const MAX_METADATA_BYTES = 64 * 1024 * 1024;
 /** Files mongodump writes at the top level that are not database directories. */
 const PRELUDE_FILE_NAMES = ["prelude.json", "prelude.json.gz"];
 
+/** The oplog of `mongodump --oplog [--gzip]`, also at the top level. */
+const OPLOG_FILE_NAMES = ["oplog.bson", "oplog.bson.gz"];
+
 /**
  * Lists the collections of a mongodump directory.
  *
@@ -102,10 +107,14 @@ export async function scanDumpDirectory(
   const entries = await listDirectory(root);
   const ignored: IgnoredDumpFile[] = [];
   const collections: DumpCollectionFiles[] = [];
+  let oplog: DumpFile | undefined;
   let prelude = await readPrelude(root, entries);
 
   const holdsCollectionFiles = entries.some(
-    (entry) => entry.isFile() && classify(entry.name) !== undefined && entry.name !== "oplog.bson",
+    (entry) =>
+      entry.isFile() &&
+      classify(entry.name) !== undefined &&
+      !OPLOG_FILE_NAMES.includes(entry.name),
   );
   if (holdsCollectionFiles) {
     // `root` is one database's directory.
@@ -118,11 +127,8 @@ export async function scanDumpDirectory(
         const dbEntries = await listDirectory(path);
         prelude ??= await readPrelude(path, dbEntries);
         collections.push(...groupCollectionFiles(path, entry.name, dbEntries, ignored));
-      } else if (entry.name === "oplog.bson" || entry.name === "oplog.bson.gz") {
-        ignored.push({
-          path,
-          reason: "oplog from `mongodump --oplog`; replaying it is not supported",
-        });
+      } else if (OPLOG_FILE_NAMES.includes(entry.name)) {
+        oplog = { path, gzip: entry.name.endsWith(".gz") };
       } else if (!PRELUDE_FILE_NAMES.includes(entry.name)) {
         ignored.push({ path, reason: "not part of a mongodump directory" });
       }
@@ -144,6 +150,7 @@ export async function scanDumpDirectory(
     serverVersion: prelude?.serverVersion,
     toolVersion: prelude?.toolVersion,
     collections,
+    oplog,
     ignored,
     newestFileTime: await newestModificationTime(collections),
   };

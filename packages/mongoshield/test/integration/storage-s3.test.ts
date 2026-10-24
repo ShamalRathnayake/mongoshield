@@ -12,6 +12,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import {
   GenericContainer,
@@ -19,8 +20,11 @@ import {
   type StartedTestContainer,
   Wait,
 } from "testcontainers";
-import { afterAll, beforeAll, describe } from "vitest";
-import { s3Storage } from "../../src/storage/s3.ts";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { isMongoShieldError } from "../../src/errors.ts";
+import { resolveStorage } from "../../src/storage/resolve.ts";
+import { type S3StorageOptions, s3Storage } from "../../src/storage/s3.ts";
+import type { ObjectInfo, StorageAdapter } from "../../src/storage/types.ts";
 import { describeStorageConformance } from "../helpers/storage-conformance.ts";
 
 /** Pinned so emulator upgrades never change test results unnoticed. */
@@ -63,8 +67,8 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
       // With the SDK's default ("WHEN_SUPPORTED"), multipart uploads are created with a
       // CRC32 checksum and lib-storage completes them with the per-part checksums from
       // the UploadPart responses. S3Mock doesn't return those, so it rejects the
-      // completion; real S3 does. This is the setting the adapter's docs recommend for
-      // S3-compatible services that differ in checksum handling.
+      // completion; real S3 does. "checksum modes" below pins that behaviour down. This
+      // is the setting the adapter's docs recommend for such S3-compatible services.
       requestChecksumCalculation: "WHEN_REQUIRED",
     });
     await client.send(new CreateBucketCommand({ Bucket: BUCKET }));
@@ -73,6 +77,103 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
   afterAll(async () => {
     client?.destroy();
     await container?.stop();
+  });
+
+  /** An adapter that builds its own client, like `s3://` URLs and most users do. */
+  function ownClientStorage(options: Partial<S3StorageOptions> = {}): StorageAdapter {
+    return s3Storage({
+      bucket: BUCKET,
+      prefix: `run-${randomUUID()}`,
+      endpoint: `http://${container.getHost()}:${container.getMappedPort(S3MOCK_PORT)}`,
+      forcePathStyle: true,
+      credentials: { accessKeyId: "test", secretAccessKey: "test" },
+      partSize: 5 * 1024 * 1024,
+      ...options,
+    });
+  }
+
+  /** 11 MiB: three 5 MiB parts, so the upload is multipart. */
+  const multipartBody = () => Readable.from([Buffer.alloc(11 * 1024 * 1024, 7)]);
+
+  describe("checksum modes", () => {
+    it("with the SDK default, S3Mock refuses multipart completions and the error says what to set", async () => {
+      const storage = ownClientStorage();
+      try {
+        // Single-part uploads carry their checksum in the request and work.
+        await storage.put("small", Buffer.from("x"));
+        const error = await storage.put("big", multipartBody()).catch((reason: unknown) => reason);
+        expect(isMongoShieldError(error, "MS_STORAGE_IO")).toBe(true);
+        expect(String(error)).toMatch(/checksum for each part/);
+        expect(isMongoShieldError(error) && error.hint).toContain("WHEN_REQUIRED");
+        // The failed upload is aborted, so nothing is visible.
+        expect(await storage.head("big")).toBeUndefined();
+      } finally {
+        await storage.close?.();
+      }
+    });
+
+    it("with requestChecksumCalculation WHEN_REQUIRED, multipart uploads work without a custom client", async () => {
+      const storage = ownClientStorage({ requestChecksumCalculation: "WHEN_REQUIRED" });
+      try {
+        const info = await storage.put("big", multipartBody());
+        expect(info.size).toBe(11 * 1024 * 1024);
+        expect(info.etag).toMatch(/-3$/);
+        expect((await storage.head("big"))?.size).toBe(11 * 1024 * 1024);
+      } finally {
+        await storage.close?.();
+      }
+    });
+  });
+
+  describe("lastModified", () => {
+    it("is the server's value in head() and list()", async () => {
+      const storage = ownClientStorage();
+      try {
+        await storage.put("a", Buffer.from("x"));
+        const headed = await storage.head("a");
+        let listed: ObjectInfo | undefined;
+        for await (const info of storage.list("")) listed = info;
+        // HEAD carries an HTTP date (whole seconds). S3Mock's listing has milliseconds
+        // (real S3 lists whole seconds too), so compare at the precision both share.
+        expect(headed?.lastModified.getMilliseconds()).toBe(0);
+        const listedSeconds = Math.floor((listed?.lastModified.getTime() ?? 0) / 1000);
+        expect(listedSeconds * 1000).toBe(headed?.lastModified.getTime());
+      } finally {
+        await storage.close?.();
+      }
+    });
+
+    it("comes from the server after put with exactLastModified, for single and multipart uploads", async () => {
+      const storage = ownClientStorage({
+        exactLastModified: true,
+        requestChecksumCalculation: "WHEN_REQUIRED",
+      });
+      try {
+        const small = await storage.put("small", Buffer.from("x"));
+        expect(small.lastModified).toEqual((await storage.head("small"))?.lastModified);
+        const big = await storage.put("big", multipartBody());
+        expect(big.lastModified).toEqual((await storage.head("big"))?.lastModified);
+      } finally {
+        await storage.close?.();
+      }
+    });
+  });
+
+  it("takes requestChecksumCalculation and exactLastModified from s3:// URLs", async () => {
+    vi.stubEnv("AWS_ACCESS_KEY_ID", "test");
+    vi.stubEnv("AWS_SECRET_ACCESS_KEY", "test");
+    const endpoint = `http://${container.getHost()}:${container.getMappedPort(S3MOCK_PORT)}`;
+    const storage = await resolveStorage(
+      `s3://${BUCKET}/url-${randomUUID()}?endpoint=${encodeURIComponent(endpoint)}&forcePathStyle=true` +
+        "&requestChecksumCalculation=WHEN_REQUIRED&exactLastModified=true",
+    );
+    try {
+      const info = await storage.put("big", multipartBody(), { sizeHint: 11 * 1024 * 1024 });
+      expect(info.lastModified).toEqual((await storage.head("big"))?.lastModified);
+    } finally {
+      await storage.close?.();
+      vi.unstubAllEnvs();
+    }
   });
 
   describeStorageConformance("s3 (S3Mock)", async () => ({

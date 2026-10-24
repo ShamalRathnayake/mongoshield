@@ -24,6 +24,10 @@
  * - Values are canonical Extended JSON, so BSON types survive: an int64 index
  *   option stays `{"$numberLong":…}`, a date in a partial filter stays a date,
  *   a regex in a validator stays a regex, and int32 `1` never turns into double `1.0`.
+ * - Field order inside values is the stored one, also for integer-like field names
+ *   that JavaScript objects would move first (src/format/ordered-json.ts): the order
+ *   of a compound index key is the index, and a view's `$sort` or an embedded document
+ *   in a validator means something else in another order.
  *
  * MongoShield extension: `searchIndexes`, written after `type` and only when the
  * collection has Atlas Search or Vector Search indexes (mongodump does not capture
@@ -32,9 +36,13 @@
  * create search indexes. See docs/specs/FORMAT.md.
  */
 
-import { type Binary, BSON, type Document } from "mongodb";
+import type { Binary, Document } from "mongodb";
 import { z } from "zod";
 import { MongoShieldError } from "../errors.ts";
+import {
+  parseExtendedJson as parseOrderedExtendedJson,
+  stringifyExtendedJson,
+} from "./ordered-json.ts";
 
 /** The kinds of namespace mongodump distinguishes (the `type` field of `listCollections`). */
 export const COLLECTION_TYPES = ["collection", "view", "timeseries"] as const;
@@ -132,7 +140,8 @@ export function serializeCollectionMetadata(metadata: CollectionMetadata): strin
       ? {}
       : { searchIndexes: metadata.searchIndexes.map(orderedSearchIndex) }),
   };
-  return BSON.EJSON.stringify(ordered, { relaxed: false });
+  // Not BSON.EJSON.stringify: it would write integer-like field names first.
+  return stringifyExtendedJson(ordered, { relaxed: false });
 }
 
 /** A search index with its fields in a fixed order (`name, type, definition`). */
@@ -186,7 +195,11 @@ const MetadataFileSchema = z.object({
  * @param where a human-readable location used in error messages
  */
 export function parseCollectionMetadata(text: string, where = "metadata.json"): CollectionMetadata {
-  const file = validateShape(parseExtendedJson(text, where), where);
+  const parsed = parseExtendedJson(text, where);
+  const file = validateShape(parsed, where);
+  // The validated copy (zod rebuilds the objects it checks) has lost the recorded
+  // field order of options and index definitions; the parsed values still have it.
+  const original = parsed as OrderedMetadataValues;
 
   const type = file.type ?? "collection";
   if (!isCollectionType(type)) {
@@ -197,12 +210,12 @@ export function parseCollectionMetadata(text: string, where = "metadata.json"): 
     );
   }
 
-  const searchIndexes = parseSearchIndexes(file.searchIndexes ?? [], where);
+  const searchIndexes = parseSearchIndexes(original.searchIndexes ?? [], where);
   return {
     collectionName: file.collectionName,
     type,
-    options: file.options ?? {},
-    indexes: file.indexes ?? [],
+    options: original.options ?? {},
+    indexes: original.indexes ?? [],
     ...(file.uuid === undefined ? {} : { uuid: file.uuid.toLowerCase() }),
     ...(searchIndexes.length === 0 ? {} : { searchIndexes }),
   };
@@ -238,12 +251,25 @@ export function isSearchIndexType(value: unknown): value is SearchIndexType {
   return (SEARCH_INDEX_TYPES as readonly unknown[]).includes(value);
 }
 
-/** Parses canonical Extended JSON, keeping BSON wrapper types (Int32, Long, …). */
+/**
+ * The fields of a parsed file that are handed on as parsed (not as zod's copies), so
+ * their recorded field order survives; only read after `validateShape` passed.
+ */
+interface OrderedMetadataValues {
+  readonly options?: Document;
+  readonly indexes?: Document[];
+  readonly searchIndexes?: { name: string; type: string; definition: Document }[];
+}
+
+/**
+ * Parses canonical Extended JSON, keeping BSON wrapper types (Int32, Long, …) and the
+ * stored field order (see the file header).
+ */
 function parseExtendedJson(text: string, where: string): unknown {
   try {
     // relaxed: false keeps {"$numberInt":"1"} as Int32 and {"$numberDouble":"1.0"}
     // as Double, so writing the metadata back produces the same types.
-    return BSON.EJSON.parse(text, { relaxed: false });
+    return parseOrderedExtendedJson(text, { relaxed: false });
   } catch (error) {
     throw new MongoShieldError("MS_INTEGRITY_FAILED", `${where} is not valid Extended JSON.`, {
       cause: error,

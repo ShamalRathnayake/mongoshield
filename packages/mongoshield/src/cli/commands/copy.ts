@@ -11,11 +11,17 @@
  *   3. Dropping, upserting, or inserting into non-empty collections needs a "yes":
  *      interactively, or with --yes. Without a terminal and without --yes it refuses.
  *   4. --dry-run stops after the plan and writes nothing.
+ *   5. Progress is checkpointed in a local file (`.mongoshield/copy-<id>.json` in the
+ *      working directory, or --checkpoint <file>), so an interrupted copy continues
+ *      with the same command plus --resume. The file is deleted when the copy completes.
  *
  * Copying needs no backup storage, so unlike most commands it works without one
  * configured.
  */
 
+import { createHash } from "node:crypto";
+import { access } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type { MongoShieldConfigInput } from "../../config/schema.ts";
 import { assertNoCopyConflicts, planCopy, runCopy } from "../../copy/index.ts";
 import { loadMaskFile, loadSubsetFile } from "../../copy/load-file.ts";
@@ -97,7 +103,24 @@ export const COPY_OPTIONS: Readonly<Record<string, OptionSpec>> = {
     type: "boolean",
     description: "Do not create indexes (faster, for throwaway targets)",
   },
+  "skip-search-indexes": {
+    type: "boolean",
+    description: "Do not recreate Atlas Search / Vector Search indexes on the target",
+  },
+  resume: {
+    type: "boolean",
+    description: "Continue an interrupted copy from its checkpoint (same options as before)",
+  },
+  checkpoint: {
+    type: "string",
+    valueName: "<file>",
+    defaultText: ".mongoshield/copy-<id>.json",
+    description: "Where the copy records its progress for --resume",
+  },
 };
+
+/** Directory (under the working directory) of the default checkpoint files. */
+export const CHECKPOINT_DIRECTORY = ".mongoshield";
 
 /** `mongoshield copy`: see the file header. */
 export const copyCommand: CommandSpec = {
@@ -178,6 +201,7 @@ export async function runCopyFlow(
     const target = await openConnection({ uri: settings.targetUri }, { logger });
     try {
       const copyContext = { source: source.client, target: target.client, logger };
+      await mentionInterruptedCopy(context, options);
       // Show the plan before anything else, even when it is going to be refused:
       // the table is what tells the user which collections are in the way.
       const plan = await planCopy(copyContext, options);
@@ -252,6 +276,9 @@ function copyOptions(context: CommandContext, settings: CopyFlowSettings): Omit<
     mode: copyMode(context, settings.name),
     dryRun: flags.boolean("dry-run"),
     skipIndexes: flags.boolean("skip-indexes"),
+    skipSearchIndexes: flags.boolean("skip-search-indexes"),
+    checkpoint: checkpointPath(context, settings),
+    resume: flags.boolean("resume"),
     signal: context.signal,
     ...(include ? { include } : {}),
     ...(exclude ? { exclude } : {}),
@@ -260,6 +287,47 @@ function copyOptions(context: CommandContext, settings: CopyFlowSettings): Omit<
     ...(settings.mask ? { mask: settings.mask } : {}),
     ...(settings.subset ? { subset: settings.subset } : {}),
   };
+}
+
+/**
+ * The checkpoint file: --checkpoint, or one per copy under `.mongoshield/`, named by a
+ * hash of what identifies the copy: both connection strings without their passwords
+ * (rotating a password does not lose the checkpoint, and the name reveals no host
+ * names) and the namespaces it copies (--include, --exclude, --rename), so two
+ * different copies between the same deployments never share a file.
+ */
+export function checkpointPath(context: CommandContext, settings: CopyFlowSettings): string {
+  const explicit = context.flags.string("checkpoint");
+  if (explicit !== undefined) return resolve(context.io.cwd, explicit);
+  const identity = JSON.stringify([
+    displayUri(settings.sourceUri),
+    displayUri(settings.targetUri),
+    [...(listOrUndefined(context, "include") ?? [])].sort(),
+    [...(listOrUndefined(context, "exclude") ?? [])].sort(),
+    parseKeyValues(context, settings.name, "rename") ?? {},
+  ]);
+  const id = createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 16);
+  return join(context.io.cwd, CHECKPOINT_DIRECTORY, `copy-${id}.json`);
+}
+
+/**
+ * Before a fresh copy over an interrupted one, says that it could be resumed instead:
+ * the targets the interrupted copy filled usually show up as conflicts next.
+ */
+async function mentionInterruptedCopy(
+  context: CommandContext,
+  options: Omit<CopyOptions, "to">,
+): Promise<void> {
+  if (options.resume === true || options.checkpoint === undefined) return;
+  const found = await access(options.checkpoint).then(
+    () => true,
+    () => false,
+  );
+  if (found) {
+    context.out.warn(
+      `An interrupted copy left a checkpoint (${options.checkpoint}); add --resume to continue it. Copying from the start replaces it.`,
+    );
+  }
 }
 
 /** `--drop` is shorthand for `--mode drop`; giving both with different modes is a mistake. */
@@ -295,7 +363,7 @@ function printPlan(out: Output, plan: CopyPlan, settings: CopyFlowSettings): voi
     entry.masked.length === 0
       ? out.style("dim", "-")
       : out.style("green", plural(entry.masked.length, "rule")),
-    styledAction(out, entry),
+    entry.resume === undefined ? styledAction(out, entry) : styledResume(out, entry),
   ]);
   const table = renderTable(
     [
@@ -332,6 +400,20 @@ function printPlan(out: Output, plan: CopyPlan, settings: CopyFlowSettings): voi
   out.info(
     `${plural(plan.entries.length, "namespace")}, about ${plural(documents, "document")} at the source.`,
   );
+}
+
+/** In a resumed copy: what is left to do, after the first run's action. */
+function styledResume(out: Output, entry: CopyPlanEntry): string {
+  switch (entry.resume) {
+    case "done":
+      return out.style("dim", "done");
+    case "partial":
+      return out.style("cyan", "resume");
+    case "restart":
+      return out.style("yellow", `${styledAction(out, entry)} (again from the start)`);
+    default:
+      return styledAction(out, entry);
+  }
 }
 
 /** Destructive actions stand out in red/yellow. */
@@ -373,15 +455,21 @@ async function confirmIfDestructive(
   plan: CopyPlan,
   settings: CopyFlowSettings,
 ): Promise<void> {
+  // A resumed copy only touches anew what the interrupted run had not reached: the
+  // targets it filled were already agreed to (and hold its own documents).
+  const entries = plan.entries.filter(
+    (entry) => entry.resume === undefined || entry.resume === "not-started",
+  );
+  if (entries.length === 0) return;
   // An uncountable target (undefined) might hold data, so it counts as non-empty.
-  const nonEmpty = plan.entries.filter((entry) => entry.existingDocuments !== 0).length;
+  const nonEmpty = entries.filter((entry) => entry.existingDocuments !== 0).length;
   const target = displayUri(settings.targetUri);
 
   let question: string | undefined;
   if (plan.mode === "drop") {
-    question = `Drop and replace ${plural(plan.entries.length, "collection")} in ${target}?`;
+    question = `Drop and replace ${plural(entries.length, "collection")} in ${target}?`;
   } else if (plan.mode === "upsert") {
-    question = `Upsert into ${plural(plan.entries.length, "collection")} in ${target}, replacing documents with the same _id?`;
+    question = `Upsert into ${plural(entries.length, "collection")} in ${target}, replacing documents with the same _id?`;
   } else if (nonEmpty > 0) {
     question = `Insert into ${plural(nonEmpty, "collection")} in ${target} that already have documents?`;
   }
@@ -396,9 +484,15 @@ function printResult(context: CommandContext, result: CopyResult): void {
     return;
   }
   const masked = result.mask?.rules.reduce((sum, rule) => sum + rule.values, 0);
+  const notCreated = result.searchIndexes?.notCreated ?? [];
+  if (notCreated.length > 0) {
+    out.warn(
+      `The target has no Atlas Search; ${plural(notCreated.length, "search index", "search indexes")} not created: ${notCreated.map((index) => `${index.ns}/${index.name}`).join(", ")}.`,
+    );
+  }
   // The summary is the command's result, so it goes to stdout.
   out.result(
-    `${out.style("green", "✔")} Copied ${plural(result.documentsCopied, "document")} into ${plural(result.plan.entries.length, "namespace")} in ${formatDuration(result.durationMs)}` +
+    `${out.style("green", "✔")} ${result.resumed === true ? "Resumed the copy: copied" : "Copied"} ${plural(result.documentsCopied, "document")} into ${plural(result.plan.entries.length, "namespace")} in ${formatDuration(result.durationMs)}` +
       (masked === undefined ? "." : `, masking ${plural(masked, "value")}.`),
   );
 }

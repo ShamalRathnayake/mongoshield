@@ -2,8 +2,8 @@
 // with renames, modes and conflicts, dry runs, masking that keeps joins working, and
 // subsets that follow references.
 
-import { Decimal128, type Document, Int32, Long, MongoClient, ObjectId } from "mongodb";
-import { describe, expect, it } from "vitest";
+import { Collection, Decimal128, type Document, Int32, Long, MongoClient, ObjectId } from "mongodb";
+import { describe, expect, it, vi } from "vitest";
 import { runCopy } from "../../src/copy/copy.ts";
 import type { CopyEngineOptions } from "../../src/copy/copy-plan.ts";
 import { isMongoShieldError } from "../../src/errors.ts";
@@ -16,6 +16,9 @@ import type { ProgressEvent } from "../../src/types.ts";
 import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 
 const client = useMongoClient();
+
+/** The driver's own `listSearchIndexes`, for collections a test does not stand in for. */
+const realListSearchIndexes = Collection.prototype.listSearchIndexes;
 
 const SECRET = "integration-test-secret-0123456789";
 
@@ -483,5 +486,147 @@ describe("MongoShield.copy", () => {
     });
     expect(result.documentsCopied).toBe(3);
     expect(await documentsOf(target, "orders")).toHaveLength(3);
+  });
+});
+
+describe("copy with a subset of a time series", () => {
+  /** Hosts, and a time series of their measurements (`meta.host` holds the host's name). */
+  async function seedMetrics(database: string): Promise<void> {
+    const db = client().db(database);
+    await db.collection("hosts").insertMany([
+      { _id: new ObjectId(), name: "a" },
+      { _id: new ObjectId(), name: "b" },
+    ]);
+    await db.createCollection("metrics", { timeseries: { timeField: "at", metaField: "meta" } });
+    await db.collection("metrics").insertMany([
+      { at: new Date("2026-10-01"), meta: { host: "a" }, cpu: 1 },
+      { at: new Date("2026-10-02"), meta: { host: "a" }, cpu: 2 },
+      { at: new Date("2026-10-03"), meta: { host: "b" }, cpu: 3 },
+    ]);
+  }
+
+  it("refuses a time series that is both filtered and referenced (it would duplicate measurements)", async () => {
+    const source = uniqueDb("src");
+    const target = uniqueDb("dst");
+    await seedMetrics(source);
+    const error = await copy({
+      include: [`${source}.*`],
+      rename: { [`${source}.*`]: `${target}.*` },
+      subset: {
+        filters: { [`${source}.metrics`]: { cpu: { $gte: 2 } } },
+        follow: [{ from: `${source}.hosts.name`, to: `${source}.metrics.meta.host` }],
+      },
+    }).catch((caught: unknown) => caught);
+    expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
+    expect(String(error)).toContain("has a filter AND is followed into");
+    expect(await collectionNames(target)).toEqual([]);
+  });
+
+  it("copies each referenced measurement exactly once", async () => {
+    const source = uniqueDb("src");
+    const target = uniqueDb("dst");
+    await seedMetrics(source);
+    await copy({
+      include: [`${source}.*`],
+      rename: { [`${source}.*`]: `${target}.*` },
+      subset: {
+        filters: { [`${source}.hosts`]: { name: "a" } },
+        follow: [{ from: `${source}.hosts.name`, to: `${source}.metrics.meta.host` }],
+        batchSize: 1,
+      },
+    });
+    const cpus = (await client().db(target).collection("metrics").find().toArray()).map(
+      (measurement) => measurement.cpu,
+    );
+    expect(cpus.sort()).toEqual([1, 2]);
+  });
+
+  it("stops instead of duplicating a measurement that holds several referenced values", async () => {
+    const source = uniqueDb("src");
+    const target = uniqueDb("dst");
+    const db = client().db(source);
+    await db.collection("hosts").insertMany([{ name: "a" }, { name: "b" }]);
+    await db.createCollection("metrics", { timeseries: { timeField: "at", metaField: "meta" } });
+    await db.collection("metrics").insertOne({ at: new Date(), meta: { hosts: ["a", "b"] } });
+    const error = await copy({
+      include: [`${source}.*`],
+      rename: { [`${source}.*`]: `${target}.*` },
+      subset: {
+        follow: [{ from: `${source}.hosts.name`, to: `${source}.metrics.meta.hosts` }],
+        batchSize: 1,
+      },
+    }).catch((caught: unknown) => caught);
+    expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
+    expect(String(error)).toContain("holds 2 values at the followed field meta.hosts");
+  });
+});
+
+describe("copy and Atlas Search indexes", () => {
+  it("carries the source's search index definitions to the target, reporting those the target cannot have", async () => {
+    const source = uniqueDb("src");
+    const target = uniqueDb("dst");
+    await seedShop(source);
+    // The local test server has no Atlas Search, so the SOURCE side's listing is
+    // stood in for; the target is the real server, which refuses search indexes.
+    const definitions = [
+      {
+        name: "default",
+        type: "search",
+        latestDefinition: { mappings: { dynamic: true } },
+      },
+    ];
+    const listing = vi
+      .spyOn(Collection.prototype, "listSearchIndexes")
+      .mockImplementation(function (this: Collection) {
+        const fromSource = this.dbName === source && this.collectionName === "users";
+        if (!fromSource) return Reflect.apply(realListSearchIndexes, this, []);
+        return { toArray: async () => definitions } as never;
+      });
+    try {
+      const result = await copy({
+        include: [`${source}.users`],
+        rename: { [`${source}.*`]: `${target}.*` },
+      });
+      expect(result.searchIndexes).toEqual({
+        created: [],
+        notCreated: [{ ns: `${target}.users`, name: "default" }],
+      });
+      const skipped = await copy({
+        include: [`${source}.users`],
+        rename: { [`${source}.*`]: `${uniqueDb("dst")}.*` },
+        skipSearchIndexes: true,
+      });
+      expect(skipped.searchIndexes).toBeUndefined();
+
+      // A target with Atlas Search (stood in for too) gets the definitions.
+      const atlas = uniqueDb("dst");
+      listing.mockImplementation(function (this: Collection) {
+        if (this.dbName === atlas) return { toArray: async () => [] } as never;
+        const fromSource = this.dbName === source && this.collectionName === "users";
+        if (!fromSource) return Reflect.apply(realListSearchIndexes, this, []);
+        return { toArray: async () => definitions } as never;
+      });
+      const created: unknown[] = [];
+      const creating = vi
+        .spyOn(Collection.prototype, "createSearchIndexes")
+        .mockImplementation(async (descriptions) => {
+          created.push(...descriptions);
+          return descriptions.map((description) => String(description.name));
+        });
+      try {
+        const onAtlas = await copy({
+          include: [`${source}.users`],
+          rename: { [`${source}.*`]: `${atlas}.*` },
+        });
+        expect(onAtlas.searchIndexes?.created).toEqual([{ ns: `${atlas}.users`, name: "default" }]);
+        expect(created).toEqual([
+          { name: "default", type: "search", definition: { mappings: { dynamic: true } } },
+        ]);
+      } finally {
+        creating.mockRestore();
+      }
+    } finally {
+      listing.mockRestore();
+    }
   });
 });

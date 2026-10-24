@@ -169,6 +169,70 @@ describe("BackupScheduler", () => {
   });
 });
 
+describe("BackupScheduler edge cases", () => {
+  it("waits in chunks for a slot further away than one timer can wait", async () => {
+    // From 20 October, 1 January 03:00 is about 73 days away: more than 2^31 ms.
+    const job = vi.fn(async () => {});
+    const scheduler = new BackupScheduler({ cron: "0 3 1 1 *", job });
+    scheduler.start();
+    expect(scheduler.nextRun()?.toISOString()).toBe("2027-01-01T03:00:00.000Z");
+    await vi.advanceTimersByTimeAsync(Date.parse("2027-01-01T03:00:00Z") - START.getTime() - 1);
+    expect(job).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(job).toHaveBeenCalledTimes(1);
+    await scheduler.stop();
+  });
+
+  it("idles with a warning when the expression has no future slot", async () => {
+    // 30 February never comes.
+    const logger = spyLogger();
+    const scheduler = new BackupScheduler({ cron: "0 3 30 2 *", job: async () => {}, logger });
+    expect(scheduler.nextRun()).toBeUndefined();
+    scheduler.start();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("no future runs"));
+    expect(scheduler.nextRun()).toBeUndefined();
+    await scheduler.stop();
+  });
+
+  it("ignores a second start, and a stop of a stopping or stopped scheduler", async () => {
+    const job = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    );
+    const scheduler = new BackupScheduler({ cron: "* * * * *", job });
+    scheduler.start();
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(MINUTE);
+    expect(job).toHaveBeenCalledTimes(1);
+
+    const first = scheduler.stop({ graceMs: 1000 });
+    const second = scheduler.stop();
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.all([first, second]);
+    await scheduler.stop();
+    expect(scheduler.nextRun()).toBeUndefined();
+    // A stopped scheduler does not start again.
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(5 * MINUTE);
+    expect(job).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs a job that throws something other than an Error", async () => {
+    const logger = spyLogger();
+    const scheduler = new BackupScheduler({
+      cron: "* * * * *",
+      job: () => Promise.reject("plain text"),
+      logger,
+    });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(MINUTE);
+    expect(logger.error).toHaveBeenCalledWith("The scheduled job threw", { error: "plain text" });
+    await scheduler.stop();
+  });
+});
+
 describe("parseCron", () => {
   it("rejects invalid expressions and time zones with a config error", () => {
     for (const [expression, timezone] of [

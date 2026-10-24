@@ -10,13 +10,19 @@
  * Symmetric keys (`SYMMETRIC_DEFAULT`, the usual choice) bind every data key to the
  * encryption context `{"mongoshield:purpose": "backup-key"}`. Asymmetric RSA keys
  * (`RSAES_OAEP_SHA_256`) are supported too; they cannot take an encryption context.
+ * A call's `signal` is passed to the SDK as `abortSignal`, which cancels the request.
  */
 
 import type * as KmsSdk from "@aws-sdk/client-kms";
 import type { KMSClient } from "@aws-sdk/client-kms";
 import { MongoShieldError } from "../../errors.ts";
-import { type KmsFailureKind, kmsCallError, loadSdk, propertyOf } from "./errors.ts";
-import { KMS_DATA_KEY_CONTEXT, type KmsCiphertext, type KmsClient } from "./types.ts";
+import { callKms, type KmsFailureKind, kmsCallError, loadSdk, propertyOf } from "./errors.ts";
+import {
+  KMS_DATA_KEY_CONTEXT,
+  type KmsCallOptions,
+  type KmsCiphertext,
+  type KmsClient,
+} from "./types.ts";
 
 /** Wrapping algorithms MongoShield uses with AWS KMS. */
 export type AwsKmsAlgorithm = "SYMMETRIC_DEFAULT" | "RSAES_OAEP_SHA_256";
@@ -82,9 +88,10 @@ export function createAwsKmsClient(key: string, options: AwsKmsClientOptions = {
   return {
     provider: "aws",
     key,
-    async encryptDataKey(dataKey: Uint8Array): Promise<KmsCiphertext> {
+    async encryptDataKey(dataKey: Uint8Array, call: KmsCallOptions = {}): Promise<KmsCiphertext> {
       const { sdk, client } = await connect();
-      const output = await callAws("encrypt", key, () =>
+      const target = { provider: "aws", operation: "encrypt", key, signal: call.signal } as const;
+      const output = await callKms(target, classifyAwsError, () =>
         client.send(
           new sdk.EncryptCommand({
             KeyId: key,
@@ -92,6 +99,7 @@ export function createAwsKmsClient(key: string, options: AwsKmsClientOptions = {
             EncryptionAlgorithm: defaultAlgorithm,
             ...encryptionContextFor(defaultAlgorithm),
           }),
+          sendOptions(call.signal),
         ),
       );
       if (output.CiphertextBlob === undefined) {
@@ -103,10 +111,11 @@ export function createAwsKmsClient(key: string, options: AwsKmsClientOptions = {
         output.KeyId !== undefined && AWS_KEY_PATTERN.test(output.KeyId) ? output.KeyId : key;
       return { key: keyArn, algorithm: defaultAlgorithm, ciphertext: output.CiphertextBlob };
     },
-    async decryptDataKey(wrapped: KmsCiphertext): Promise<Uint8Array> {
+    async decryptDataKey(wrapped: KmsCiphertext, call: KmsCallOptions = {}): Promise<Uint8Array> {
       const algorithm = parseAlgorithm(wrapped.algorithm, key);
       const { sdk, client } = await connect();
-      const output = await callAws("decrypt", key, () =>
+      const target = { provider: "aws", operation: "decrypt", key, signal: call.signal } as const;
+      const output = await callKms(target, classifyAwsError, () =>
         client.send(
           new sdk.DecryptCommand({
             // Naming the key makes KMS refuse ciphertexts of any other key, instead
@@ -116,6 +125,7 @@ export function createAwsKmsClient(key: string, options: AwsKmsClientOptions = {
             EncryptionAlgorithm: algorithm,
             ...encryptionContextFor(algorithm),
           }),
+          sendOptions(call.signal),
         ),
       );
       if (output.Plaintext === undefined) {
@@ -147,17 +157,9 @@ function parseAlgorithm(value: string, key: string): AwsKmsAlgorithm {
   throw kmsCallError("aws", "decrypt", key, "key-unusable", `unsupported algorithm ${value}`);
 }
 
-/** Runs one SDK call and turns its failure into a MongoShieldError. */
-async function callAws<Output>(
-  operation: "encrypt" | "decrypt",
-  key: string,
-  call: () => Promise<Output>,
-): Promise<Output> {
-  try {
-    return await call();
-  } catch (error) {
-    throw kmsCallError("aws", operation, key, classifyAwsError(error), error);
-  }
+/** Per-request options for `client.send`; the SDK cancels the HTTP request on abort. */
+function sendOptions(signal: AbortSignal | undefined): { abortSignal?: AbortSignal } {
+  return signal ? { abortSignal: signal } : {};
 }
 
 /** Maps AWS SDK v3 error names (the service exception type) to a failure kind. */

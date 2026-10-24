@@ -12,32 +12,37 @@
  */
 
 import type { Document } from "mongodb";
-import { Binary, Long, ObjectId } from "mongodb";
+import { Binary, BSONSymbol, Decimal128, Long, ObjectId } from "mongodb";
+import { decimalIdentity, numberIdentity } from "./numbers.ts";
 
 /**
  * The bytes that identify a value for seeding, or `undefined` for values that have
  * no meaningful identity to mask (embedded documents, arrays, regexes, …).
  *
- * Numbers are identified by their numeric VALUE, whatever their BSON type, because
- * MongoDB compares them that way: a join between an Int32 `userId` and a Double `_id`
- * of 5 matches, so both must mask identically. A type tag keeps `"5"` (a string) and
- * `5` (a number) apart.
+ * Numbers are identified by their EXACT numeric value, whatever their BSON type,
+ * because MongoDB compares them that way: a join between an Int32 `userId` and a
+ * Double `_id` of 5 matches, so both must mask identically. Values that only look
+ * equal (`Double(2^53)` and `Long(2^53 + 1)`, `Double(0.1)` and `Decimal128("0.1")`)
+ * stay apart; `numbers.ts` explains how. A type tag keeps `"5"` (a string) and `5`
+ * (a number) apart; a BSON symbol is a string, as MongoDB compares it.
  */
 export function canonicalBytes(value: unknown): Buffer | undefined {
   if (typeof value === "string") return tagged("s", value);
   if (typeof value === "boolean") return tagged("b", String(value));
-  if (typeof value === "number") return tagged("n", numberText(value));
+  if (typeof value === "number") return tagged("n", numberIdentity(value));
   if (value instanceof Date) return tagged("d", String(value.getTime()));
   if (typeof value === "bigint") return tagged("n", value.toString());
 
   switch (bsonTag(value)) {
     case "Int32":
     case "Double":
-      return tagged("n", numberText(Number(value)));
+      return tagged("n", numberIdentity(Number(value)));
     case "Long":
       return value instanceof Long ? tagged("n", value.toString()) : undefined;
     case "Decimal128":
-      return tagged("m", String(value));
+      return value instanceof Decimal128 ? decimalBytes(value) : undefined;
+    case "BSONSymbol":
+      return value instanceof BSONSymbol ? tagged("s", value.valueOf()) : undefined;
     case "ObjectId":
       return value instanceof ObjectId ? tagged("o", value.toHexString()) : undefined;
     case "Binary":
@@ -101,9 +106,10 @@ export function bsonTag(value: unknown): string | undefined {
   return typeof tag === "string" ? tag : undefined;
 }
 
-/** `-0` and `0` are the same number to MongoDB; everything else uses JavaScript's shortest form. */
-function numberText(value: number): string {
-  return Object.is(value, -0) ? "0" : String(value);
+/** A Decimal128's identity: shared with equal Int32/Long/Double values (see numbers.ts). */
+function decimalBytes(value: Decimal128): Buffer {
+  const identity = decimalIdentity(value);
+  return tagged(identity.tag, identity.text);
 }
 
 function tagged(tag: string, text: string): Buffer {

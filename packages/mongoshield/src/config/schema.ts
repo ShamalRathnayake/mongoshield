@@ -229,6 +229,22 @@ export const ConfigSchema = z
     /** Running backups on a schedule (`mongoshield schedule`). */
     schedule: ScheduleConfigSchema.optional(),
 
+    /**
+     * The change journal for point-in-time recovery (`mongoshield journal start`; its
+     * flags override these). See docs/guides/point-in-time-recovery.md.
+     */
+    journal: z
+      .object({
+        /** Close a segment after this many seconds: the normal worst-case RPO. Default 300. */
+        segmentSeconds: z.number().int().min(1).max(86_400).optional(),
+        /** …or once it holds this many bytes of change data (at least 1 KiB). Default 64 MiB. */
+        segmentBytes: z.number().int().min(1024).optional(),
+        /** When change history is lost: take a new base backup (default), or stop the writer. */
+        onGap: z.enum(["backup", "fail"]).optional(),
+      })
+      .strict()
+      .optional(),
+
     /** Where to send success and failure notifications. */
     notify: z.array(NotifyTargetSchema).optional(),
 

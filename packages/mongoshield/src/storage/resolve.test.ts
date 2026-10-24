@@ -3,12 +3,15 @@
  * bad URLs fail with MS_CONFIG_INVALID and a helpful hint.
  */
 
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { startSftpServer, type TestSftpServer } from "../../test/helpers/sftp-server.ts";
 import { isMongoShieldError } from "../errors.ts";
 import { resolveStorage } from "./resolve.ts";
+import type { StorageAdapter } from "./types.ts";
 
 async function configError(url: string) {
   const error = await resolveStorage(url).catch((reason: unknown) => reason);
@@ -197,9 +200,8 @@ describe("resolveStorage for sftp://", () => {
     );
   });
 
-  it("refuses unknown hosts unless allowUnknownHostKey=true", async () => {
-    const error = await configError("sftp://backup@example.com/data");
-    expect(error?.hint).toContain("ssh-keyscan");
+  it("accepts allowUnknownHostKey=true without any host key source", async () => {
+    vi.stubEnv("MONGOSHIELD_SFTP_KNOWN_HOSTS", "/does/not/exist");
     const storage = await resolveStorage("sftp://backup@example.com/data?allowUnknownHostKey=true");
     expect(storage.kind).toBe("sftp");
   });
@@ -225,6 +227,73 @@ describe("resolveStorage for sftp://", () => {
     );
     expect(error?.message).not.toContain("hunter2");
     expect(error?.hint).toContain("key authentication");
+  });
+
+  describe("without a fingerprint, against a real server", () => {
+    let server: TestSftpServer;
+    let directory: string;
+    let opened: StorageAdapter[];
+
+    beforeEach(async () => {
+      server = await startSftpServer();
+      directory = await mkdtemp(join(tmpdir(), "ms-resolve-sftp-"));
+      opened = [];
+      const keyFile = join(directory, "id_ed25519");
+      await writeFile(keyFile, server.privateKey, { mode: 0o600 });
+      vi.stubEnv("MONGOSHIELD_SFTP_KEY_FILE", keyFile);
+    });
+
+    afterEach(async () => {
+      for (const storage of opened) await storage.close?.();
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    });
+
+    async function open(url: string): Promise<StorageAdapter> {
+      const storage = await resolveStorage(url);
+      opened.push(storage);
+      return storage;
+    }
+
+    const url = () => `sftp://tester@127.0.0.1:${server.port}${directory}/store`;
+    const knownHostsLine = () => `[127.0.0.1]:${server.port} ${server.hostPublicKeys[0]}\n`;
+
+    it("trusts hosts listed in MONGOSHIELD_SFTP_KNOWN_HOSTS", async () => {
+      const file = join(directory, "known_hosts");
+      await writeFile(file, knownHostsLine());
+      vi.stubEnv("MONGOSHIELD_SFTP_KNOWN_HOSTS", file);
+      const storage = await open(url());
+      await storage.put("a.txt", Buffer.from("a"));
+      expect(await storage.head("a.txt")).toBeDefined();
+    });
+
+    it("refuses hosts that known_hosts does not list", async () => {
+      const file = join(directory, "known_hosts");
+      await writeFile(file, `[127.0.0.1]:1 ${server.hostPublicKeys[0]}\n`);
+      vi.stubEnv("MONGOSHIELD_SFTP_KNOWN_HOSTS", file);
+      const error = await (await open(url())).head("a.txt").catch((reason: unknown) => reason);
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
+      expect(String(error)).toContain(file);
+    });
+
+    it("defaults to ~/.ssh/known_hosts", async () => {
+      vi.stubEnv("MONGOSHIELD_SFTP_KNOWN_HOSTS", "");
+      vi.stubEnv("HOME", directory);
+      vi.stubEnv("USERPROFILE", directory);
+      const missing = await (await open(url())).head("a.txt").catch((reason: unknown) => reason);
+      expect(isMongoShieldError(missing, "MS_CONFIG_INVALID")).toBe(true);
+      expect(String(missing)).toContain(join(directory, ".ssh", "known_hosts"));
+
+      await mkdir(join(directory, ".ssh"));
+      await writeFile(join(directory, ".ssh", "known_hosts"), knownHostsLine());
+      expect(await (await open(url())).head("a.txt")).toBeUndefined();
+    });
+
+    it("prefers a fingerprint over known_hosts", async () => {
+      vi.stubEnv("MONGOSHIELD_SFTP_KNOWN_HOSTS", join(directory, "does-not-exist"));
+      const storage = await open(`${url()}?fingerprint=${server.hostFingerprint}`);
+      expect(await storage.head("a.txt")).toBeUndefined();
+    });
   });
 
   it.each([

@@ -122,3 +122,84 @@ describe("rewrapHeader + createHeaderReplacer", () => {
     await expect(readAgeHeader(Readable.from([Buffer.from("plain text")]))).rejects.toThrow();
   });
 });
+
+describe("rewrapHeader refuses stanzas it cannot keep", () => {
+  const plaintext = randomBytes(1000);
+
+  it("refuses a passphrase next to kept stanzas", async () => {
+    const own = generateIdentity();
+    const file = await encryptTo([own.recipient], plaintext);
+    await expect(
+      rewrapHeader(headerOf(file), {
+        unwrap: { identities: [own.identity] },
+        wrap: { passphrase: "new secret", scryptWorkFactor: 10 },
+        keepStanzas: [0],
+      }),
+    ).rejects.toSatisfy((error) => isMongoShieldError(error, "MS_CONFIG_INVALID"));
+  });
+
+  it("refuses to keep a stanza the header does not have", async () => {
+    const own = generateIdentity();
+    const file = await encryptTo([own.recipient], plaintext);
+    await expect(
+      rewrapHeader(headerOf(file), {
+        unwrap: { identities: [own.identity] },
+        wrap: {},
+        keepStanzas: [3],
+      }),
+    ).rejects.toThrow(/no stanza #4/);
+  });
+
+  it("refuses to keep a passphrase stanza", async () => {
+    const file = await run(
+      plaintext,
+      [createEncryptStream({ passphrase: "old secret", scryptWorkFactor: 10 })],
+      64 * 1024,
+    );
+    await expect(
+      rewrapHeader(headerOf(file), {
+        unwrap: { passphrase: "old secret" },
+        wrap: { recipients: [generateIdentity().recipient] },
+        keepStanzas: [0],
+      }),
+    ).rejects.toThrow(/scrypt/);
+  });
+});
+
+describe("header size limits and truncation", () => {
+  /**
+   * The start of a plausible age header that never ends: the version line, then
+   * stanza lines well past the 1 MiB header limit, in 64 KiB pieces.
+   */
+  function endlessHeader(): Buffer[] {
+    const line = Buffer.from(`-> X25519 ${"A".repeat(43)}\n${"B".repeat(43)}\n`);
+    const piece = Buffer.concat(
+      Array.from({ length: Math.ceil(65_536 / line.length) }, () => line),
+    );
+    return [Buffer.from("age-encryption.org/v1\n"), ...Array.from({ length: 20 }, () => piece)];
+  }
+
+  it("readAgeHeader gives up on a header larger than 1 MiB", async () => {
+    await expect(readAgeHeader(Readable.from(endlessHeader()))).rejects.toThrow(/larger than/);
+  });
+
+  it("readAgeHeader reports a stream that ends inside the header", async () => {
+    await expect(
+      readAgeHeader(Readable.from([Buffer.from("age-encryption.org/v1\n")])),
+    ).rejects.toThrow(/incomplete/);
+  });
+
+  it("createHeaderReplacer gives up on a header larger than 1 MiB", async () => {
+    const replacer = createHeaderReplacer(Buffer.from("new header"));
+    await expect(run(Buffer.concat(endlessHeader()), [replacer], 64 * 1024)).rejects.toThrow(
+      /larger than/,
+    );
+  });
+
+  it("createHeaderReplacer reports input that ends inside the header", async () => {
+    const replacer = createHeaderReplacer(Buffer.from("new header"));
+    await expect(
+      run(Buffer.from("age-encryption.org/v1\n-> X25519 abc\n"), [replacer]),
+    ).rejects.toThrow(/incomplete/);
+  });
+});

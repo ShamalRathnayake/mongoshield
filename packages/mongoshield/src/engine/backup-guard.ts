@@ -110,6 +110,20 @@ export function backupShapeLabel(selection: BackupShapeInput): string {
 }
 
 /**
+ * `labels` plus the `mongoshield.shape` label of `selection`. Every backup the
+ * scheduler and `mongoshield backup` write carries it: the guard uses it to find a
+ * comparable baseline, and retention uses it to prune each selection on its own
+ * (see catalog/scope.ts). The computed shape wins over a hand-written label of the
+ * same name, so the label always describes what was really selected.
+ */
+export function withShapeLabel(
+  labels: Readonly<Record<string, string>> | undefined,
+  selection: BackupShapeInput,
+): Record<string, string> {
+  return { ...labels, [GUARD_SHAPE_LABEL]: backupShapeLabel(selection) };
+}
+
+/**
  * Compares the backup about to be committed (`current`) with the previous one.
  * Pure: no I/O, no clock. With no previous backup there is nothing to compare,
  * so the result is always ok.

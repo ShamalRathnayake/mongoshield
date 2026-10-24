@@ -6,7 +6,9 @@
  *   indexes   every index in the backed-up metadata exists on the restored collection
  *   views     a backed-up view exists as a view
  *   sample    N documents picked at random from the backup are found in the restored
- *             collection by `_id`, byte for byte identical (optional)
+ *             collection by `_id`, byte for byte identical (optional). Time series
+ *             measurements are looked up by `_id` and time and compared field by
+ *             field, ignoring field order: the server rebuilds them from buckets
  *
  * The sample check catches what counts and checksums cannot: a backup whose files
  * are intact and whose counts add up, but whose documents do not survive a restore
@@ -22,7 +24,9 @@ import { randomInt } from "node:crypto";
 import { BSON, type Collection, type Document, type MongoClient } from "mongodb";
 import { isMongoShieldError } from "../errors.ts";
 import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
+import { deserializeInStoredOrder, valueInStoredOrder } from "../format/field-order.ts";
 import type { NamespaceEntry } from "../format/manifest.ts";
+import type { CollectionMetadata } from "../format/metadata.ts";
 import { splitNamespace } from "../mongo/index.ts";
 import type { RestorePlanEntry } from "../types.ts";
 import { openDocumentStream, readMetadataFile, type StoredBackupSource } from "./read-pipeline.ts";
@@ -125,8 +129,11 @@ export async function checkRestoredNamespace(
   let indexes = { expected: 0, found: 0 };
   let sampled = 0;
   try {
-    indexes = await checkIndexes(input, collection, problems);
-    sampled = await compareSample(input, collection, problems, notes);
+    const metadata = await readMetadataFile(input.source, input.entry.metadata, {
+      signal: input.signal,
+    });
+    indexes = await checkIndexes(metadata, collection, problems);
+    sampled = await compareSample(input, metadata, collection, problems, notes);
   } catch (error) {
     if (!isBackupDefect(error)) throw error;
     problems.push(`reading the backup failed: ${messageOf(error)}`);
@@ -206,13 +213,10 @@ async function checkView(input: NamespaceCheckInput, problems: string[]): Promis
  * may legitimately normalise an index's other fields (version, collation).
  */
 async function checkIndexes(
-  input: NamespaceCheckInput,
+  metadata: CollectionMetadata,
   collection: Collection,
   problems: string[],
 ): Promise<{ expected: number; found: number }> {
-  const metadata = await readMetadataFile(input.source, input.entry.metadata, {
-    signal: input.signal,
-  });
   const expectedNames: string[] = [];
   for (const index of metadata.indexes) {
     if (typeof index.name === "string") expectedNames.push(index.name);
@@ -243,26 +247,29 @@ async function checkIndexes(
  */
 async function compareSample(
   input: NamespaceCheckInput,
+  metadata: CollectionMetadata,
   collection: Collection,
   problems: string[],
   notes: string[],
 ): Promise<number> {
   if (input.sampleSize === 0) return 0;
-  if (input.planned.type === "timeseries") {
-    // Time-series collections store measurements in buckets and do not keep the
-    // field order of the inserted documents, so byte comparison would always fail.
-    notes.push("time-series collection: documents were not sampled");
-    return 0;
-  }
   if (input.replayedChanges) {
     notes.push("converge backup: documents were not sampled (the change replay modifies them)");
+    return 0;
+  }
+  const timeSeries = input.planned.type === "timeseries" ? timeSeriesFieldsOf(metadata) : undefined;
+  if (input.planned.type === "timeseries" && timeSeries === undefined) {
+    notes.push("time-series collection without a timeField in its metadata: not sampled");
     return 0;
   }
 
   const sample = await sampleBackupDocuments(input);
   const sampleProblems: string[] = [];
   for (const document of sample) {
-    const problem = await compareDocument(collection, document);
+    const problem =
+      timeSeries === undefined
+        ? await compareDocument(collection, document)
+        : await compareMeasurement(collection, document, timeSeries);
     if (problem !== undefined) sampleProblems.push(problem);
   }
   problems.push(...sampleProblems.slice(0, MAX_SAMPLE_PROBLEMS));
@@ -307,13 +314,14 @@ async function compareDocument(
   backupDocument: Buffer,
 ): Promise<string | undefined> {
   // Lossless parsing keeps the exact BSON type of the `_id` (Int32 vs Double vs Long),
-  // so the lookup matches the stored value exactly.
-  const parsed = BSON.deserialize(backupDocument, LOSSLESS_DESERIALIZE_OPTIONS);
+  // and the stored field order of an embedded `_id` with integer-like field names, so
+  // the lookup matches the stored value exactly.
+  const parsed = deserializeInStoredOrder(backupDocument);
   if (!Object.hasOwn(parsed, "_id")) {
     return "a sampled backup document has no _id (MongoDB stores an _id in every document, so the backup was altered)";
   }
   const id: unknown = parsed._id;
-  const filter: Document = { _id: id };
+  const filter: Document = { _id: valueInStoredOrder(id) };
   const cursor = collection.find(filter, { raw: true, limit: 1 });
   let restored: Uint8Array | undefined;
   for await (const document of cursor) restored = rawBytes(document);
@@ -323,6 +331,104 @@ async function compareDocument(
     return `sampled document ${describeId(id)} differs from the backup (values or field order)`;
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Time series: measurements, not documents
+// ---------------------------------------------------------------------------
+
+/** Restored measurements compared per sampled one (time series `_id`s are not unique). */
+const MAX_MEASUREMENT_CANDIDATES = 16;
+
+/** The time and meta field names of a time series collection's backed-up options. */
+interface TimeSeriesFields {
+  readonly timeField: string;
+  readonly metaField: string | undefined;
+}
+
+function timeSeriesFieldsOf(metadata: CollectionMetadata): TimeSeriesFields | undefined {
+  const timeseries: unknown = metadata.options.timeseries;
+  if (typeof timeseries !== "object" || timeseries === null) return undefined;
+  const timeField: unknown = Reflect.get(timeseries, "timeField");
+  const metaField: unknown = Reflect.get(timeseries, "metaField");
+  if (typeof timeField !== "string") return undefined;
+  return { timeField, metaField: typeof metaField === "string" ? metaField : undefined };
+}
+
+/**
+ * Looks one backed-up measurement up in the restored time series and compares it.
+ *
+ * A time series stores measurements in buckets and rebuilds them on read, so the
+ * restored copy lists its fields in another order (time and meta first, the rest
+ * sorted), the server normalizes the meta field (sorts the fields of its documents),
+ * and `_id`s are not unique. The lookup uses `_id` and the time (which also lets the
+ * server use the bucket bounds); the comparison takes the measurement as a set of
+ * fields, each compared byte for byte, with the meta field normalized on both sides.
+ * Any one equal candidate passes.
+ */
+async function compareMeasurement(
+  collection: Collection,
+  backupMeasurement: Buffer,
+  fields: TimeSeriesFields,
+): Promise<string | undefined> {
+  const { timeField, metaField } = fields;
+  const parsed = BSON.deserialize(backupMeasurement, LOSSLESS_DESERIALIZE_OPTIONS);
+  const filter: Document = {};
+  if (Object.hasOwn(parsed, "_id")) filter._id = parsed._id;
+  if (Object.hasOwn(parsed, timeField)) filter[timeField] = parsed[timeField];
+  const describe =
+    parsed._id === undefined
+      ? "a sampled measurement"
+      : `sampled measurement ${describeId(parsed._id)}`;
+  if (Object.keys(filter).length === 0) {
+    return `${describe} has neither an _id nor a time field "${timeField}"`;
+  }
+
+  const expected = fieldFingerprint(parsed, metaField);
+  const cursor = collection.find(filter, { raw: true, limit: MAX_MEASUREMENT_CANDIDATES });
+  let candidates = 0;
+  for await (const document of cursor) {
+    const bytes = rawBytes(document);
+    if (bytes === undefined) continue;
+    candidates += 1;
+    const restored = BSON.deserialize(bytes, LOSSLESS_DESERIALIZE_OPTIONS);
+    if (fieldFingerprint(restored, metaField) === expected) return undefined;
+  }
+  if (candidates === 0) return `${describe} is missing`;
+  return `${describe} differs from the backup (field values)`;
+}
+
+/**
+ * A measurement's fields as a canonical string: field names sorted, each value as its
+ * BSON bytes (in hex), the meta field with the fields of its documents sorted. Equal
+ * fingerprints mean the same fields with identical values, whatever their order.
+ */
+export function fieldFingerprint(document: Document, metaField?: string): string {
+  const names = Object.keys(document).sort();
+  return names
+    .map((name) => {
+      const value: unknown = name === metaField ? sortedFields(document[name]) : document[name];
+      const bytes = Buffer.from(BSON.serialize({ value })).toString("hex");
+      return `${JSON.stringify(name)}:${bytes}`;
+    })
+    .join(",");
+}
+
+/** Embedded documents with their fields sorted by name, at every depth (arrays keep order). */
+function sortedFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((element: unknown) => sortedFields(element));
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Reflect.get(value, "_bsontype") !== undefined
+  ) {
+    return value;
+  }
+  if (value instanceof Date || value instanceof RegExp) return value;
+  const sorted: Document = {};
+  for (const name of Object.keys(value).sort())
+    sorted[name] = sortedFields(Reflect.get(value, name));
+  return sorted;
 }
 
 /**

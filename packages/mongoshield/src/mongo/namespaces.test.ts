@@ -2,11 +2,13 @@
 // Discovery against a real server is covered in test/integration/mongo-discovery.test.ts.
 
 import fc from "fast-check";
+import { BSON, type Document, type MongoClient, MongoServerError } from "mongodb";
 import { describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../errors.ts";
 import {
   type CollectionSpec,
   compileNamespaceFilter,
+  discoverNamespaces,
   orderForRestore,
   splitNamespace,
 } from "./namespaces.ts";
@@ -256,5 +258,130 @@ describe("orderForRestore", () => {
         }
       }),
     );
+  });
+});
+
+describe("discoverNamespaces with unusual catalog replies", () => {
+  /** A collection of the fake server: what listCollections reports, and how it behaves. */
+  interface FakeCollection {
+    readonly info: Document;
+    /** Thrown by listIndexes (e.g. dropped meanwhile). */
+    readonly listIndexesError?: Error;
+  }
+
+  /**
+   * Just enough of a MongoClient for discovery: listDatabases, listCollections and, per
+   * collection, listIndexes, estimatedDocumentCount and listSearchIndexes (none).
+   */
+  function fakeClient(databases: Record<string, readonly FakeCollection[]>): MongoClient {
+    const cursor = (items: readonly Document[]) => ({ toArray: async () => [...items] });
+    // Discovery reads catalog entries raw (`raw: true`): BSON documents, one by one.
+    const rawCursor = (items: () => readonly Document[]) =>
+      (async function* () {
+        for (const item of items()) yield BSON.serialize(item);
+      })();
+    const fake = {
+      db: (name: string) => ({
+        databaseName: name,
+        admin: () => ({
+          listDatabases: async () => ({
+            databases: Object.keys(databases).map((database) => ({ name: database })),
+          }),
+        }),
+        listCollections: () => rawCursor(() => (databases[name] ?? []).map((entry) => entry.info)),
+        collection: (collection: string) => {
+          const entry = (databases[name] ?? []).find((item) => item.info.name === collection);
+          return {
+            listIndexes: () =>
+              rawCursor(() => {
+                if (entry?.listIndexesError !== undefined) throw entry.listIndexesError;
+                return [{ v: 2, key: { _id: 1 }, name: "_id_" }];
+              }),
+            estimatedDocumentCount: async () => 7,
+            listSearchIndexes: () => cursor([]),
+          };
+        },
+      }),
+    };
+    return fake as unknown as MongoClient;
+  }
+
+  function recordingLogger() {
+    const warnings: { message: string; fields: unknown }[] = [];
+    const noop = (): void => {};
+    return {
+      warnings,
+      logger: {
+        debug: noop,
+        info: noop,
+        error: noop,
+        warn: (message: string, fields?: unknown) => warnings.push({ message, fields }),
+      },
+    };
+  }
+
+  it("skips nameless entries and unsupported types (with a warning), and defaults options", async () => {
+    const { logger, warnings } = recordingLogger();
+    const specs = await discoverNamespaces(
+      fakeClient({
+        app: [
+          { info: { type: "collection" } },
+          { info: { name: "odd", type: "someFutureType" } },
+          // Servers before 3.4 report no type, and options may be missing.
+          { info: { name: "legacy" } },
+        ],
+      }),
+      { logger },
+    );
+    expect(specs.map((found) => [found.ns, found.type, found.options])).toEqual([
+      ["app.legacy", "collection", {}],
+    ]);
+    expect(specs[0]?.estimatedDocuments).toBe(7);
+    expect(warnings).toEqual([
+      {
+        message: expect.stringMatching(/unsupported type/),
+        fields: { ns: "app.odd", type: "someFutureType" },
+      },
+    ]);
+  });
+
+  it("skips a collection dropped meanwhile, but passes other errors on", async () => {
+    const notFound = new MongoServerError({ message: "ns does not exist", code: 26 });
+    const { logger, warnings } = recordingLogger();
+    const specs = await discoverNamespaces(
+      fakeClient({
+        app: [{ info: { name: "gone" }, listIndexesError: notFound }, { info: { name: "kept" } }],
+      }),
+      { logger },
+    );
+    expect(specs.map((found) => found.ns)).toEqual(["app.kept"]);
+    expect(warnings).toHaveLength(1);
+
+    const denied = new MongoServerError({ message: "not authorized", code: 13 });
+    await expect(
+      discoverNamespaces(fakeClient({ app: [{ info: { name: "x" }, listIndexesError: denied }] })),
+    ).rejects.toThrow(/not authorized/);
+  });
+
+  it("sorts namespaces by code unit, whatever order the server lists them in", async () => {
+    const specs = await discoverNamespaces(
+      fakeClient({
+        b: [{ info: { name: "z" } }, { info: { name: "Z" } }],
+        a: [{ info: { name: "m" } }],
+      }),
+    );
+    expect(specs.map((found) => found.ns)).toEqual(["a.m", "b.Z", "b.z"]);
+  });
+});
+
+describe("orderForRestore edge cases", () => {
+  it("keeps views without a viewOn, or reading a collection, in input order", () => {
+    const broken: CollectionSpec = { ...spec("app.broken", "view"), options: { viewOn: 42 } };
+    const ordered = orderForRestore([
+      spec("app.b", "view", "plain"),
+      broken,
+      spec("app.plain", "collection"),
+    ]);
+    expect(ordered.map((found) => found.ns)).toEqual(["app.plain", "app.b", "app.broken"]);
   });
 });

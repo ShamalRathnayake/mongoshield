@@ -5,6 +5,10 @@
  * MongoDB 7.0 database `app` (see archive.test.ts for what it contains). The
  * directory fixtures leave out the collection with a 100-character name, whose
  * 238-byte file names some filesystems cannot hold; dump-names.test.ts covers them.
+ *
+ * test/fixtures/mongodump/timeseries/mongodb-{7.0,8.0}/ hold time-series bucket
+ * documents as mongodump dumps them from MongoDB 7.0.32 and 8.0.13, with the
+ * measurements `find` returned for them (see timeseries-buckets.test.ts).
  */
 
 import { mkdtemp, rm } from "node:fs/promises";

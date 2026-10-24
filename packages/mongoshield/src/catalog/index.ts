@@ -4,7 +4,7 @@
  *   listBackups    what is in storage (complete / incomplete / invalid), newest first
  *   selectBackup   resolve "latest", an id, or { before } to one complete backup
  *   planRetention  pure keep/remove decision for a retention policy
- *   pruneBackups   list + plan + delete
+ *   pruneBackups   list + plan + delete (optionally within one scope, see scope.ts)
  */
 
 export {
@@ -22,7 +22,7 @@ export {
 } from "./annotations.ts";
 export type { CatalogEntry, CatalogStatus, ListBackupsOptions } from "./catalog.ts";
 export { completedAtOf, immutableUntilOf, listBackups } from "./catalog.ts";
-export type { PruneOptions, PruneResult } from "./prune.ts";
+export type { OutOfScopeBackup, OutOfScopeReason, PruneOptions, PruneResult } from "./prune.ts";
 export { pruneBackups } from "./prune.ts";
 export type {
   KeptBackup,
@@ -41,4 +41,12 @@ export {
   planRetention,
   selectByPeriod,
 } from "./retention.ts";
+export {
+  type BackupOrigin,
+  describeScope,
+  isInScope,
+  PLAN_LABEL,
+  type PruneScope,
+  validateScope,
+} from "./scope.ts";
 export { selectBackup } from "./select.ts";

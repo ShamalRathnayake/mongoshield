@@ -15,7 +15,7 @@
  *                      matches), embedded documents (exact, field order matters)
  *   comparison         $eq $ne $gt $gte $lt $lte $in $nin
  *   element            $exists $type (names, numeric codes, arrays of them, "number")
- *   evaluation         $regex (+ $options i, m, s, u), regex literals
+ *   evaluation         $regex (+ $options i, m, s, u, x), regex literals
  *   arrays             $elemMatch (both forms) $size
  *   logical            $and $or $nor $not
  *   ignored            $comment
@@ -28,12 +28,22 @@
  * with MS_CONFIG_INVALID naming every unsupported operator, rather than silently
  * matching the wrong documents.
  *
+ * Regexes run on JavaScript's engine, not PCRE. Translated so they behave the same:
+ * the `x` option (whitespace and `#` comments removed), options at the start of the
+ * pattern (`(?i)…`), and the anchors `\A`, `\z`, `\Z`.
+ *
+ * Embedded documents compare in stored field order, also when their field names look
+ * like integers ("0", "1"), which JavaScript objects would list first: documents read
+ * from a backup carry their stored order (find-parse.ts). Filters written in
+ * JavaScript have JavaScript's order, which is also what the driver sends the server.
+ *
  * Known differences from the server, all edge cases:
- * - regexes run on JavaScript's engine, not PCRE: most patterns behave the same, but
- *   PCRE-only syntax (possessive quantifiers, `\Z`, inline `(?x)`) does not; the `x`
- *   and `l` options are rejected;
- * - embedded documents with integer-like field names ("0", "1") compare in
- *   JavaScript property order, which puts those names first;
+ * - PCRE-only regex syntax still behaves differently or fails to compile: possessive
+ *   quantifiers (`a++`), atomic groups (`(?>…)`), inline options anywhere but at the
+ *   start, recursion, conditionals, `\h` / `\R`, and `$` without `m` (PCRE also
+ *   matches before a final newline); the `l` option is rejected;
+ * - documents changed by a converge backup's window (find-window.ts) lose the stored
+ *   order of fields a change added, which only matters for integer-like names;
  * - collations are not supported: string comparison is always binary.
  *
  * The test suite checks results against `collection.find(filter)` on a real server
@@ -487,8 +497,14 @@ function compileSize(compiler: Compiler, operand: unknown): FieldCondition {
 // Regular expressions
 // ---------------------------------------------------------------------------
 
-/** Options MongoDB regexes accept that JavaScript has no equivalent for. */
-const UNSUPPORTED_REGEX_OPTIONS = new Set(["x", "l"]);
+/**
+ * Options MongoDB regexes accept that JavaScript has no equivalent for: `l` (locale
+ * dependent `\w`, `\b`). `x` (extended syntax) is emulated by rewriting the pattern.
+ */
+const UNSUPPORTED_REGEX_OPTIONS = new Set(["l"]);
+
+/** Options a pattern may switch on at its very start, PCRE style: `(?i)`, `(?sx)`. */
+const LEADING_INLINE_OPTIONS = /^\(\?([imsx]+)\)/;
 
 /** A compiled regex together with its BSON form, for matching stored regex values. */
 interface CompiledRegex {
@@ -539,12 +555,83 @@ function buildRegExp(
       compiler?.unsupported.add(`$options "${flag}"`);
     }
   }
-  const jsFlags = flags.filter((flag) => ["i", "m", "s"].includes(flag)).join("");
+  const translated = translatePcre(parts.pattern, new Set(flags));
+  const jsFlags = [...translated.flags].filter((flag) => ["i", "m", "s"].includes(flag)).join("");
   return {
-    regExp: compileRegExp(parts.pattern, jsFlags, compiler),
+    regExp: compileRegExp(translated.pattern, jsFlags, compiler),
     pattern: parts.pattern,
     options: flags.join(""),
   };
+}
+
+/**
+ * Rewrites the PCRE features JavaScript lacks but can express:
+ * - leading inline options, `(?i)^abc` → flag `i`;
+ * - the `x` option (extended syntax): whitespace and `#` comments outside character
+ *   classes are removed, escaped whitespace and `\#` stay as literal characters;
+ * - the anchors `\A` (start of the subject), `\z` (end) and `\Z` (end, or before a
+ *   final newline), as lookarounds.
+ */
+function translatePcre(
+  pattern: string,
+  options: ReadonlySet<string>,
+): { pattern: string; flags: ReadonlySet<string> } {
+  const flags = new Set(options);
+  let rest = pattern;
+  const leading = LEADING_INLINE_OPTIONS.exec(rest);
+  if (leading !== null) {
+    for (const flag of leading[1] ?? "") flags.add(flag);
+    rest = rest.slice(leading[0].length);
+  }
+  return { pattern: rewritePattern(rest, flags.has("x")), flags };
+}
+
+/** Whitespace the PCRE `x` option ignores. */
+const PCRE_EXTENDED_SPACE = new Set([" ", "\t", "\n", "\v", "\f", "\r"]);
+
+/** JavaScript forms of PCRE-only anchors. */
+const PCRE_ANCHORS: Readonly<Record<string, string>> = {
+  A: "(?<![\\s\\S])",
+  z: "(?![\\s\\S])",
+  Z: "(?=\\n?(?![\\s\\S]))",
+};
+
+/** One pass over the pattern, tracking escapes and character classes (see translatePcre). */
+function rewritePattern(pattern: string, extended: boolean): string {
+  let output = "";
+  let inClass = false;
+  for (let index = 0; index < pattern.length; index++) {
+    const character = pattern[index] ?? "";
+    if (character === "\\") {
+      const next = pattern[index + 1];
+      index += 1;
+      if (next === undefined) output += character;
+      else if (!inClass && extended && (PCRE_EXTENDED_SPACE.has(next) || next === "#")) {
+        output += next; // `\ ` is a literal space; JavaScript's Unicode mode rejects `\ `.
+      } else if (!inClass && Object.hasOwn(PCRE_ANCHORS, next)) {
+        output += PCRE_ANCHORS[next];
+      } else output += `${character}${next}`;
+      continue;
+    }
+    if (inClass) {
+      if (character === "]") inClass = false;
+      output += character;
+      continue;
+    }
+    if (character === "[") {
+      inClass = true;
+      output += character;
+      continue;
+    }
+    if (extended && PCRE_EXTENDED_SPACE.has(character)) continue;
+    if (extended && character === "#") {
+      // A comment runs to the end of the line.
+      while (index + 1 < pattern.length && pattern[index + 1] !== "\n") index += 1;
+      continue;
+    }
+    output += character;
+  }
+  return output;
 }
 
 /** `new RegExp`, trying Unicode mode first and reporting invalid patterns. */

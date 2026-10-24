@@ -2,14 +2,16 @@
  * `mongoshield rollback <label>`: put the data back as it was at a snapshot.
  *
  * Like `restore`, it shows the plan first and asks before replacing anything (or needs
- * --yes). By default it replaces every collection of the snapshot (mode drop) after
- * taking a `pre-rollback-<label>` safety snapshot of what it is about to replace, so
- * the rollback itself can be undone. See src/extras/snapshot.ts.
+ * --yes). By default it replaces every collection of the snapshot (mode drop) and drops
+ * the collections created since in the snapshot's databases (listed in the plan;
+ * --keep-new keeps them), after taking a `pre-rollback-<label>` safety snapshot of what
+ * it is about to replace or drop, so the rollback itself can be undone. See
+ * src/extras/snapshot.ts.
  */
 
 import { MongoShieldError } from "../../errors.ts";
-import { rollback } from "../../extras/snapshot.ts";
-import type { RestoreMode, RestorePlan } from "../../types.ts";
+import { type RollbackResult, rollback } from "../../extras/snapshot.ts";
+import type { RestoreMode } from "../../types.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
 import { confirmOrThrow } from "../confirm.ts";
 import { formatCount, formatDuration, plural } from "../format.ts";
@@ -42,9 +44,10 @@ export const rollbackCommand: CommandSpec = {
   summary: "Roll the database back to a snapshot",
   description: [
     "Restores the newest snapshot with <label> over the live data, replacing each",
-    "collection it contains. A safety snapshot (pre-rollback-<label>) of the",
-    "collections about to be replaced is taken first. Collections created after the",
-    "snapshot are left alone. Asks for confirmation unless --yes.",
+    "collection it contains, and drops the collections created after the snapshot in",
+    "its databases (--keep-new keeps them). A safety snapshot (pre-rollback-<label>)",
+    "of everything about to be replaced or dropped is taken first. Asks for",
+    "confirmation unless --yes.",
   ].join("\n"),
   positionals: [{ name: "label", optional: true, description: "Snapshot label (or use --id)" }],
   options: {
@@ -68,6 +71,10 @@ export const rollbackCommand: CommandSpec = {
       description: "How to put collections back",
     },
     "dry-run": { type: "boolean", description: "Show the plan and stop; write nothing" },
+    "keep-new": {
+      type: "boolean",
+      description: "Keep the collections created after the snapshot instead of dropping them",
+    },
     "no-safety-snapshot": {
       type: "boolean",
       description: "Do not snapshot the live collections before replacing them",
@@ -127,6 +134,7 @@ async function runRollbackCommand(context: CommandContext): Promise<number> {
       ...(label !== undefined ? { label } : {}),
       ...(backupId !== undefined ? { backupId } : {}),
       mode,
+      keepNew: context.flags.boolean("keep-new"),
       signal: context.signal,
       ...(include ? { include } : {}),
       ...(exclude ? { exclude } : {}),
@@ -134,7 +142,7 @@ async function runRollbackCommand(context: CommandContext): Promise<number> {
     };
 
     const preview = await rollback(cli.shield, { ...base, dryRun: true });
-    printPlan(context.out, preview.plan, preview.label, target, cli);
+    printPlan(context.out, preview, target, cli);
     if (context.flags.boolean("dry-run")) {
       if (context.out.settings.json) context.out.json(preview);
       else context.out.success("Dry run: nothing was written.");
@@ -142,8 +150,11 @@ async function runRollbackCommand(context: CommandContext): Promise<number> {
     }
 
     const safety = !context.flags.boolean("no-safety-snapshot");
+    const dropping = preview.dropsNew
+      ? ` and drop ${plural(preview.newCollections.length, "collection")} created since`
+      : "";
     await confirmOrThrow(context, {
-      question: `Replace ${plural(preview.plan.entries.length, "collection")} in ${displayUri(target)} with snapshot ${preview.snapshotId}${safety ? " (a safety snapshot is taken first)" : ""}?`,
+      question: `Replace ${plural(preview.plan.entries.length, "collection")} in ${displayUri(target)} with snapshot ${preview.snapshotId}${dropping}${safety ? " (a safety snapshot is taken first)" : ""}?`,
       action: "roll back",
     });
     const progress = new ProgressDisplay(context.out, "Rolling back");
@@ -164,8 +175,11 @@ async function runRollbackCommand(context: CommandContext): Promise<number> {
           `Safety snapshot ${result.safetySnapshotId} holds the data as it was before the rollback.`,
         );
       }
+      const dropped = result.dropsNew
+        ? `, dropped ${plural(result.newCollections.length, "collection")} created since`
+        : "";
       context.out.result(
-        `${context.out.style("green", "✔")} Rolled back ${plural(result.plan.entries.length, "namespace")} to ${result.snapshotId} (${plural(result.restore?.documentsRestored ?? 0, "document")}, ${formatDuration(result.restore?.durationMs ?? 0)}).`,
+        `${context.out.style("green", "✔")} Rolled back ${plural(result.plan.entries.length, "namespace")} to ${result.snapshotId} (${plural(result.restore?.documentsRestored ?? 0, "document")}, ${formatDuration(result.restore?.durationMs ?? 0)})${dropped}.`,
       );
       return 0;
     } finally {
@@ -176,15 +190,13 @@ async function runRollbackCommand(context: CommandContext): Promise<number> {
   }
 }
 
-/** The plan, on stderr: what will be replaced, and with how much. */
-function printPlan(
-  out: Output,
-  plan: RestorePlan,
-  label: string | undefined,
-  target: string,
-  cli: CliShield,
-): void {
+/**
+ * The plan, on stderr: what will be replaced, and with how much, then the collections
+ * created since the snapshot and what happens to them.
+ */
+function printPlan(out: Output, preview: RollbackResult, target: string, cli: CliShield): void {
   if (out.settings.json) return;
+  const { plan, label } = preview;
   const name = label === undefined ? plan.backupId : `"${label}" (${plan.backupId})`;
   out.info(
     `Rollback plan: snapshot ${out.style("bold", name)} from ${cli.storageLabel} → ${displayUri(target)} (mode: ${plan.mode})`,
@@ -196,6 +208,17 @@ function printPlan(
     entry.existingDocuments === undefined ? "?" : formatCount(entry.existingDocuments),
     entry.action,
   ]);
+  for (const ns of preview.newCollections) {
+    rows.push([
+      ns,
+      "new",
+      "-",
+      "?",
+      preview.dropsNew
+        ? out.style("red", "drop (created after the snapshot)")
+        : out.style("dim", "keep (--keep-new)"),
+    ]);
+  }
   const table = renderTable(
     [
       { header: "NAMESPACE" },

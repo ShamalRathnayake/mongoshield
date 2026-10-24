@@ -4,7 +4,11 @@
  *   copy.ts             the engine: plan → pre-flight → targets → documents → references
  *                       → indexes → views
  *   copy-plan.ts        read-only planning, conflicts, same-deployment protection
+ *   copy-preflight.ts   checks before the first write: resume, privileges, reference sets
+ *   copy-roots.ts       root documents in `_id` parts, and what a resume does with them
+ *   copy-run.ts         the run's state; copying one selection (note, mask, write)
  *   copy-namespace.ts   streaming one selection; creating targets and views
+ *   copy-checkpoint.ts  the local checkpoint file of resumable copies
  *   local-target.ts     "is this URI on this machine?" (for `pull`)
  *   load-file.ts        loading mask and subset files with jiti
  */

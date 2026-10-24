@@ -25,18 +25,32 @@
  *   operator) is stored as written, as canonical Extended JSON, and applied with an
  *   ordinary `deleteMany` (using indexes). Prefer exact matches on ids or emails.
  *
- * Equality follows MongoDB where it matters for ids: numbers compare by value whatever
- * their BSON type (int, long, double), a field holding an array matches when any element
- * matches, and dotted paths descend into sub-documents and arrays of them. Decimal128
- * values compare by their decimal text, so `5` and `5.0` differ (rare in ids).
+ * Equality follows MongoDB where it matters for ids: numbers compare by their exact
+ * value whatever their BSON type (int, long, double, Decimal128: `Long(5)`, `Double(5)`
+ * and `Decimal128("5.0")` match each other), a field holding an array matches when any
+ * element matches, and dotted paths descend into sub-documents and arrays of them.
+ * "Exact" matters for large numbers: `Double(2^62)` and `Long(2^62)` are equal, and
+ * `Long(2^62 + 1)`, which no double can hold, is not. The numeric identity is the one
+ * masking uses (src/mask/numbers.ts).
+ *
+ * Hashed matches carry `matchVersion` (currently 1, which a record without the field
+ * also means), so a later change of the canonical forms can keep applying old records
+ * the way they were hashed.
  */
 
 import { createHmac } from "node:crypto";
 import { Decimal128, type Document, Double, Int32, Long, ObjectId } from "mongodb";
 import { MongoShieldError } from "../errors.ts";
+import { decimalIdentity, numberIdentity } from "../mask/numbers.ts";
 
 /** Shortest erasure secret accepted (same bar as masking secrets, src/mask/keyed.ts). */
 export const MIN_ERASURE_SECRET_LENGTH = 16;
+
+/**
+ * The canonical forms of `canonicalScalar` that new hashed matches use (see the file
+ * header). Records without a `matchVersion` were written with this version.
+ */
+export const MATCH_VERSION = 1;
 
 /** Domain-separation label; versioned so a change of scheme can never collide. */
 const DIGEST_LABEL = "mongoshield/erasure/v1";
@@ -63,6 +77,8 @@ export type StoredMatch =
   | {
       /** Applied by scanning and hashing (see the file header). */
       readonly kind: "hashed";
+      /** How values were made canonical before hashing ({@link MATCH_VERSION}). */
+      readonly matchVersion: typeof MATCH_VERSION;
       /** True when the HMAC key comes from the erasure secret. */
       readonly keyed: boolean;
       /** Keyed records: 16 hex characters identifying the secret (not the secret). */
@@ -125,6 +141,7 @@ export function storeFilter(filter: Document, key: ErasureKey): StoredMatch {
   if (!hasString) return { kind: "filter", filter };
   return {
     kind: "hashed",
+    matchVersion: MATCH_VERSION,
     keyed: key.keyed,
     ...(key.keyId !== undefined ? { keyId: key.keyId } : {}),
     fields: canonical.map(({ path, text }) => ({ path, digest: digestOf(key, path, text) })),
@@ -155,23 +172,27 @@ function digestOf(key: ErasureKey, path: string, canonical: string): string {
 /**
  * The canonical text of a scalar, or `undefined` for documents, arrays and BSON types
  * without a stable equality (regular expressions, binaries, …). Numbers of every BSON
- * numeric type that are equal as numbers get the same text.
+ * numeric type that are EXACTLY equal get the same text (`number:<exact digits>` for
+ * whole numbers and the fractions a double holds, `decimal:<coefficient>E<exponent>`
+ * for the Decimal128 fractions no double holds), and numbers that differ never do.
  */
 export function canonicalScalar(value: unknown): string | undefined {
   if (typeof value === "string") return `string:${value}`;
   if (typeof value === "boolean") return `bool:${value}`;
-  if (typeof value === "number") return `number:${numberText(value)}`;
+  if (typeof value === "number") return `number:${numberIdentity(value)}`;
+  // A bigint, like a Long, is a whole number: its digits are exact.
   if (typeof value === "bigint") return `number:${value.toString()}`;
   if (value instanceof Date) return `date:${value.getTime()}`;
   if (value instanceof ObjectId) return `objectId:${value.toHexString()}`;
-  if (value instanceof Int32 || value instanceof Double) return `number:${numberText(value.value)}`;
-  if (value instanceof Long || value instanceof Decimal128) return `number:${value.toString()}`;
+  if (value instanceof Int32 || value instanceof Double) {
+    return `number:${numberIdentity(value.value)}`;
+  }
+  if (value instanceof Long) return `number:${value.toString()}`;
+  if (value instanceof Decimal128) {
+    const identity = decimalIdentity(value);
+    return identity.tag === "n" ? `number:${identity.text}` : `decimal:${identity.text}`;
+  }
   return undefined;
-}
-
-/** `String(n)`, except that -0 and 0 are the same number. */
-function numberText(value: number): string {
-  return Object.is(value, -0) ? "0" : String(value);
 }
 
 /**

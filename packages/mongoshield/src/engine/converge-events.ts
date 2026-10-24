@@ -11,11 +11,16 @@
  * BSON types (an Int32 stays an Int32), so replaying an event writes back exactly the
  * values the source had. The flip side is that numbers in the event itself (such as
  * `truncatedArrays[].newSize`) arrive as BSON wrappers and are unwrapped here.
+ *
+ * Parsing also records the stored field order of events with integer-like field names
+ * anywhere (src/format/field-order.ts), which JavaScript objects would reorder: replay
+ * writes `fullDocument`, `documentKey._id` and `$set` values in that order, and
+ * `serializeChangeEvent` writes an enriched copy of an event in it.
  */
 
 import { BSON, type Document, Double, Int32, Long, Timestamp } from "mongodb";
 import { MongoShieldError } from "../errors.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
+import { deserializeInStoredOrder, inStoredOrderAnywhere } from "../format/field-order.ts";
 import type { ClusterTime, StoredFile } from "../format/manifest.ts";
 import { openDocumentStream, type StoredBackupSource } from "./read-pipeline.ts";
 
@@ -81,13 +86,30 @@ export interface StoredChangeEvent {
  *   fields every change event has (`operationType`, `clusterTime`).
  */
 export function parseChangeEvent(raw: Uint8Array): ChangeEvent {
-  let document: Document;
+  return changeEventFromDocument(readChangeEventDocument(raw));
+}
+
+/**
+ * Deserializes one raw change event (or a fragment of a split one) losslessly and with
+ * its stored field order recorded (see the file header), without checking its fields.
+ *
+ * @throws MongoShieldError `MS_INTEGRITY_FAILED` when the bytes are not BSON.
+ */
+export function readChangeEventDocument(raw: Uint8Array): Document {
   try {
-    document = BSON.deserialize(raw, LOSSLESS_DESERIALIZE_OPTIONS);
+    return deserializeInStoredOrder(raw);
   } catch (error) {
     throw malformedEvent(`it is not valid BSON (${describe(error)})`, error);
   }
+}
 
+/**
+ * The fields MongoShield uses of a deserialized change event.
+ *
+ * @throws MongoShieldError `MS_INTEGRITY_FAILED` when it lacks `operationType` or
+ *   `clusterTime`.
+ */
+export function changeEventFromDocument(document: Document): ChangeEvent {
   const { operationType, clusterTime } = document;
   if (typeof operationType !== "string") throw malformedEvent("it has no operationType");
   if (!(clusterTime instanceof Timestamp)) throw malformedEvent("it has no clusterTime");
@@ -104,6 +126,29 @@ export function parseChangeEvent(raw: Uint8Array): ChangeEvent {
     document,
   };
 }
+
+/**
+ * Serializes an event MongoShield built or changed (an enriched update, a reassembled
+ * split event, a synthesized record), exactly as it was parsed: no key checks, and
+ * `undefined` kept. Such events may be larger than 16 MiB (a 16 MiB `fullDocument`
+ * plus the update description), and js-bson serializes into a shared 17 MiB buffer
+ * that silently produces a broken document for anything larger, so the buffer is
+ * grown to fit first.
+ *
+ * Parts of the event parsed with a recorded field order (a `fullDocument` read with
+ * `deserializeInStoredOrder`, the fragments of a split event) are written in that
+ * order. The whole event is searched because its root is usually a fresh object
+ * (`{ ...event.document, fullDocument }`).
+ */
+export function serializeChangeEvent(event: Document): Buffer {
+  const document = inStoredOrderAnywhere(event);
+  // Grows js-bson's shared buffer (never shrinks it); a no-op for ordinary events.
+  BSON.setInternalBufferSize(BSON.calculateObjectSize(document, SERIALIZE_OPTIONS));
+  return Buffer.from(BSON.serialize(document, SERIALIZE_OPTIONS));
+}
+
+/** Serialization options that reproduce a lossless parse (see `serializeChangeEvent`). */
+const SERIALIZE_OPTIONS = { checkKeys: false, ignoreUndefined: false } as const;
 
 /** `db.coll` (or just `db` for database events), as used everywhere else in MongoShield. */
 export function namespaceString(ns: ChangeNamespace): string {
@@ -196,7 +241,7 @@ function parseUpdateDescription(value: unknown): UpdateDescription | undefined {
   if (Array.isArray(document.truncatedArrays)) {
     for (const entry of document.truncatedArrays) {
       const truncated = asDocument(entry);
-      const newSize = numberOf(truncated?.newSize);
+      const newSize = plainNumber(truncated?.newSize);
       if (typeof truncated?.field === "string" && newSize !== undefined) {
         truncatedArrays.push({ field: truncated.field, newSize });
       }
@@ -222,7 +267,7 @@ function parseDisambiguatedPaths(value: unknown): Map<string, (string | number)[
     for (const component of components) {
       if (typeof component === "string") parsed.push(component);
       else {
-        const index = numberOf(component);
+        const index = plainNumber(component);
         if (index !== undefined) parsed.push(index);
       }
     }
@@ -235,7 +280,7 @@ function parseDisambiguatedPaths(value: unknown): Map<string, (string | number)[
  * A plain number from a lossless-parsed BSON number (Int32, Long and Double arrive
  * as wrapper objects), or `undefined` for anything else.
  */
-function numberOf(value: unknown): number | undefined {
+export function plainNumber(value: unknown): number | undefined {
   if (typeof value === "number") return value;
   if (value instanceof Int32 || value instanceof Double) return value.valueOf();
   if (value instanceof Long) return value.toNumber();

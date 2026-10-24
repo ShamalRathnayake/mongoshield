@@ -238,6 +238,15 @@ export interface RestoreOptions {
    * throwaway targets: erased personal data comes back otherwise.
    */
   readonly skipErasures?: boolean;
+  /**
+   * Check the size and SHA-256 of every data file to be restored (and of the changes
+   * file) before writing anything. Without it, a file damaged late in a large
+   * collection is only found after the earlier batches were inserted. Costs one
+   * extra read of the selected data. On damage the restore fails with
+   * `MS_INTEGRITY_FAILED` and writes nothing. Defaults to false (the CLI turns it on
+   * when a target already holds data).
+   */
+  readonly verifyFirst?: boolean;
 }
 
 /**
@@ -443,8 +452,23 @@ export interface CopyOptions {
   readonly writeConcern?: WriteConcernSettings;
   /** Skip index creation (faster, for throwaway targets). */
   readonly skipIndexes?: boolean;
+  /** Do not recreate the source's Atlas Search / Vector Search indexes on the target. */
+  readonly skipSearchIndexes?: boolean;
   /** Plan and check everything (namespaces, conflicts, privileges, mask, subset), write nothing. */
   readonly dryRun?: boolean;
+  /**
+   * A local file where the copy records its progress: created when the copy starts,
+   * rewritten as it goes, deleted when it completes. With it, an interrupted copy can
+   * be continued with `resume`. Documents are then read in `_id` ranges, like a backup's
+   * parts. See `copy/copy-checkpoint.ts` for what is recorded and why it is local.
+   */
+  readonly checkpoint?: string;
+  /**
+   * Continue the interrupted copy recorded in `checkpoint` instead of starting over.
+   * The options that shape the copy (patterns, renames, mode, mask, follow rules)
+   * must be the same; the subset filters of the first run are reused.
+   */
+  readonly resume?: boolean;
   readonly signal?: AbortSignal;
   readonly onProgress?: (event: ProgressEvent) => void;
   /**
@@ -454,6 +478,14 @@ export interface CopyOptions {
   readonly skipErasures?: boolean;
 }
 
+/**
+ * What a resumed copy does with a namespace: copy it from the start (`not-started`),
+ * continue after the last checkpointed `_id` (`partial`), nothing (`done`), or clear
+ * the target and copy it again because it cannot be continued (`restart`: time series
+ * and other collections without an `_id` index).
+ */
+export type CopyResumeState = "not-started" | "partial" | "done" | "restart";
+
 /** One namespace of a copy plan: the restore plan entry plus how it is selected and masked. */
 export interface CopyPlanEntry extends RestorePlanEntry {
   /** Estimated documents in the SOURCE namespace (the subset may copy fewer). */
@@ -462,6 +494,8 @@ export interface CopyPlanEntry extends RestorePlanEntry {
   readonly subset: SubsetSelection;
   /** Mask rules that apply, as `path: operation`; empty when nothing is masked. */
   readonly masked: readonly string[];
+  /** Only in resumed copies: what happens to this namespace (see `CopyResumeState`). */
+  readonly resume?: CopyResumeState;
 }
 
 /** What a copy will do (or did). A plan with a `conflict` entry is refused. */
@@ -479,6 +513,10 @@ export interface CopyResult {
   readonly durationMs: number;
   /** What each mask rule did. Absent when no mask was given. */
   readonly mask?: MaskReport;
+  /** Present when copied collections had Atlas Search indexes (and they were not skipped). */
+  readonly searchIndexes?: SearchIndexReport;
+  /** True when this run continued an interrupted copy (`resume`). */
+  readonly resumed?: boolean;
   /** Documents deleted afterwards because the erasure ledger lists them. */
   readonly erasures?: ApplyErasuresResult;
 }

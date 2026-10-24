@@ -4,6 +4,11 @@
  * Not exported from the package.
  */
 
+import {
+  CHECKPOINT_FORMAT_VERSION,
+  type Checkpoint,
+  writeCheckpoint,
+} from "../engine/backup-checkpoint.ts";
 import { backupIdToDate, manifestKey, resolveBackupKey } from "../format/layout.ts";
 import type { Manifest } from "../format/manifest.ts";
 import { writeManifest } from "../format/manifest-io.ts";
@@ -59,4 +64,42 @@ export async function putInvalidBackup(
 ): Promise<void> {
   await storage.put(resolveBackupKey(id, "app/users.bson"), Buffer.from("data"));
   await storage.put(manifestKey(id), Buffer.from(manifestText));
+}
+
+/**
+ * Writes the checkpoint of a resumable run (no parts finished), recording where the
+ * run comes from as a real checkpoint does: its labels and source `clusterId`.
+ * Pair it with `putIncompleteBackup` for a checkpointed run between two invocations.
+ */
+export async function putCheckpoint(
+  storage: StorageAdapter,
+  id: string,
+  origin: { readonly clusterId?: string; readonly labels?: Record<string, string> } = {},
+): Promise<void> {
+  const startedAt = backupIdToDate(id).toISOString();
+  const checkpoint: Checkpoint = {
+    formatVersion: CHECKPOINT_FORMAT_VERSION,
+    id,
+    tool: "mongoshield@test",
+    startedAt,
+    updatedAt: startedAt,
+    invocations: 1,
+    fingerprint: {
+      include: [],
+      exclude: [],
+      query: null,
+      compression: "none",
+      encryption: { kind: "none", recipients: [], kms: [] },
+      retainDays: null,
+    },
+    labels: { ...origin.labels },
+    source: {
+      topology: "replicaSet",
+      serverVersion: "8.0.0",
+      ...(origin.clusterId === undefined ? {} : { clusterId: origin.clusterId }),
+    },
+    encryption: null,
+    namespaces: [],
+  };
+  await writeCheckpoint(storage, checkpoint, new AbortController().signal);
 }

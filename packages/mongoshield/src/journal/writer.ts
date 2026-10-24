@@ -487,7 +487,11 @@ class JournalWriter {
       while (!this.#stopRequested) {
         let stream: JournalChangeStream | undefined;
         try {
-          stream = await JournalChangeStream.open(client, this.#position, logger);
+          stream = await JournalChangeStream.open(client, this.#position, {
+            match: this.#settings.scope.serverFilter,
+            logger,
+            signal: this.#signal,
+          });
           for (;;) {
             const outcome = await this.#writeSegment(stream);
             retryDelay = this.#settings.retryDelayMs;
@@ -517,7 +521,7 @@ class JournalWriter {
           await sleep(retryDelay, undefined, { signal: this.#softStop.signal }).catch(() => {});
           retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY_MS);
         } finally {
-          await stream?.close(logger);
+          await stream?.close();
         }
       }
     } catch (error) {
@@ -552,7 +556,7 @@ class JournalWriter {
       transforms: [
         createCoalescer(),
         createCompressor(compression),
-        ...(encrypt ? [encrypt()] : []),
+        ...(encrypt ? [encrypt(this.#signal)] : []),
       ],
       contentType: SEGMENT_CONTENT_TYPE,
       signal: this.#signal,

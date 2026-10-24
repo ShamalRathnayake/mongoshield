@@ -33,8 +33,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
   try {
     const { command: name, rest } = splitCommand(argv);
 
-    if (name === undefined) return runWithoutCommand(io, out, rest);
-    if (name === "help") return printHelpFor(out, rest[0]);
+    // `await` so a usage error thrown here is reported below, not left as a rejection.
+    if (name === undefined) return await runWithoutCommand(io, out, rest);
+    if (name === "help") return printHelpFor(io, out, rest[0]);
 
     const command = findCommand(name);
     if (!command) throw unknownCommandError(name);
@@ -47,7 +48,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       color: shouldUseColor(io, parsed.global.noColor),
     });
     if (parsed.help) {
-      out.result(renderCommandHelp(command, out));
+      printHelp(io, out, renderCommandHelp(command, out));
       return 0;
     }
 
@@ -82,7 +83,7 @@ async function runWithoutCommand(io: CliIo, out: Output, rest: readonly string[]
 
   const wantsHelp = rest.length === 0 || rest.includes("--help") || rest.includes("-h");
   if (wantsHelp) {
-    out.result(renderRootHelp(COMMANDS, out));
+    printHelp(io, out, renderRootHelp(COMMANDS, out));
     return 0;
   }
 
@@ -93,15 +94,23 @@ async function runWithoutCommand(io: CliIo, out: Output, rest: readonly string[]
 }
 
 /** `mongoshield help [command]`. */
-function printHelpFor(out: Output, name: string | undefined): number {
+function printHelpFor(io: CliIo, out: Output, name: string | undefined): number {
   if (name === undefined) {
-    out.result(renderRootHelp(COMMANDS, out));
+    printHelp(io, out, renderRootHelp(COMMANDS, out));
     return 0;
   }
   const command = findCommand(name);
   if (!command) throw unknownCommandError(name);
-  out.result(renderCommandHelp(command, out));
+  printHelp(io, out, renderCommandHelp(command, out));
   return 0;
+}
+
+/**
+ * Help is printed as text even with --json: it was asked for explicitly, and
+ * `Output.result` (which --json silences) would print nothing at all.
+ */
+function printHelp(io: CliIo, out: Output, text: string): void {
+  new Output(io, { ...out.settings, json: false }).result(text);
 }
 
 function unknownCommandError(name: string): MongoShieldError {
@@ -127,10 +136,13 @@ function isGlobalFlag(argument: string): boolean {
 
 /** Output settings guessed from raw arguments, before the real parse. */
 function settingsFromRawArgs(io: CliIo, argv: readonly string[]): OutputSettings {
+  // Arguments after `--` are values (`… -- --json`), not flags.
+  const separator = argv.indexOf("--");
+  const flags = separator === -1 ? argv : argv.slice(0, separator);
   return {
-    json: argv.includes("--json"),
-    quiet: argv.includes("--quiet") || argv.includes("-q"),
-    verbose: argv.includes("--verbose"),
-    color: shouldUseColor(io, argv.includes("--no-color")),
+    json: flags.includes("--json"),
+    quiet: flags.includes("--quiet") || flags.includes("-q"),
+    verbose: flags.includes("--verbose"),
+    color: shouldUseColor(io, flags.includes("--no-color")),
   };
 }

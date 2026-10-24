@@ -9,10 +9,14 @@
  * serves a fresh run, a checkpoint (backup-checkpoint.ts) and a resumed run. A
  * resumed run rebuilds the plan from its checkpoint instead of planning again:
  * part boundaries must not move between invocations.
+ *
+ * A namespace dropped while it is backed up in mode `none` is marked `vanished`
+ * (see `ReplacedCollectionPolicy` in backup-namespace.ts): its files are deleted and
+ * the manifest leaves it out, with a warning naming it.
  */
 
 import { MongoShieldError } from "../errors.ts";
-import { dataFileKey } from "../format/layout.ts";
+import { dataFileKey, resolveBackupKey } from "../format/layout.ts";
 import type { NamespaceEntry, StoredFile } from "../format/manifest.ts";
 import type { CollectionSpec } from "../mongo/index.ts";
 import { withEngineSpan } from "../telemetry/engine-spans.ts";
@@ -61,6 +65,8 @@ export interface NamespacePlan {
   readonly boundaries: readonly unknown[] | undefined;
   /** In `_id` order. One for unsplit collections, none for views. */
   readonly parts: PartState[];
+  /** Set when the collection was dropped while it was backed up (mode `none`). */
+  vanished?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,9 +204,16 @@ export function namespaceEntry(plan: NamespacePlan): NamespaceEntry {
   };
 }
 
-/** True when every part of every namespace is stored. */
+/** True when every part of every namespace is stored (or its collection vanished). */
 export function allPartsDone(plans: readonly NamespacePlan[]): boolean {
-  return plans.every((plan) => plan.parts.every((part) => part.done !== undefined));
+  return plans.every(
+    (plan) => plan.vanished === true || plan.parts.every((part) => part.done !== undefined),
+  );
+}
+
+/** The namespaces that were dropped while they were backed up, for the manifest warning. */
+export function vanishedNamespaces(plans: readonly NamespacePlan[]): string[] {
+  return plans.filter((plan) => plan.vanished === true).map((plan) => plan.ns);
 }
 
 /** Finished and total part counts, plus documents and bytes in finished parts. */
@@ -322,6 +335,7 @@ export async function runPendingParts(
                 }
               : undefined,
           });
+          if ("vanished" in dumped) return dumped;
           span.setAttributes({
             [ATTRIBUTES.documents]: dumped.documents,
             [ATTRIBUTES.bytesRaw]: dumped.bytesRaw,
@@ -332,6 +346,12 @@ export async function runPendingParts(
       );
 
       namespace.running.delete(index);
+      if ("vanished" in result) {
+        await markVanished(plan, context);
+        namespace.pending -= 1;
+        if (namespace.pending === 0) await finishNamespace(plan, namespace, context, options);
+        return;
+      }
       part.done = {
         size: result.file.size,
         sha256: result.file.sha256,
@@ -349,6 +369,24 @@ export async function runPendingParts(
     },
     { concurrency: options.parallelism, signal: options.signal },
   );
+}
+
+/**
+ * Leaves a dropped namespace out: marks its plan and deletes the files already stored
+ * for it (best effort: they are unreferenced either way, as the manifest skips it).
+ */
+async function markVanished(plan: NamespacePlan, context: NamespaceDumpContext): Promise<void> {
+  if (plan.vanished === true) return;
+  plan.vanished = true;
+  const keys = [plan.metadata.key, ...plan.parts.map((part) => part.key)].map((key) =>
+    resolveBackupKey(context.backupId, key),
+  );
+  await context.storage.delete(keys).catch((error: unknown) => {
+    context.logger.debug("Could not delete the files of a dropped namespace", {
+      ns: plan.ns,
+      error: String(error),
+    });
+  });
 }
 
 /** What `dumpPart` needs to know about part `index` of `plan`. */

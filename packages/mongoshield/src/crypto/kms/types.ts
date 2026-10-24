@@ -40,22 +40,35 @@ export interface KmsCiphertext {
   readonly ciphertext: Uint8Array;
 }
 
+/** Per-call options for `KmsClient` methods. */
+export interface KmsCallOptions {
+  /**
+   * Cancels the call. Built-in adapters pass it to the SDK (AWS `abortSignal`,
+   * Azure `abortSignal`; Google's client has no signal support, so the adapter
+   * stops waiting and lets the request finish in the background) and reject with
+   * MS_ABORTED. Custom clients should do the same; ignoring it only delays
+   * cancellation until the call returns.
+   */
+  readonly signal?: AbortSignal | undefined;
+}
+
 /**
  * One cloud KMS key that can wrap and unwrap data keys.
  *
  * Implementations throw `MongoShieldError`s: `MS_ENCRYPTION_FAILED` /
  * `MS_DECRYPTION_FAILED` for refused or failed calls (with a hint naming the missing
- * permission when access was denied) and `MS_CONFIG_INVALID` when the provider's SDK
- * is not installed. Errors must never contain the data key.
+ * permission when access was denied), `MS_CONFIG_INVALID` when the provider's SDK
+ * is not installed, and `MS_ABORTED` when `options.signal` fires. Errors must never
+ * contain the data key.
  */
 export interface KmsClient {
   readonly provider: KmsProvider;
   /** The key this client was created for (as given to the factory). */
   readonly key: string;
   /** Wraps a data key (here: always a 16-byte age file key). */
-  encryptDataKey(dataKey: Uint8Array): Promise<KmsCiphertext>;
+  encryptDataKey(dataKey: Uint8Array, options?: KmsCallOptions): Promise<KmsCiphertext>;
   /** Unwraps a data key previously returned by `encryptDataKey`. */
-  decryptDataKey(wrapped: KmsCiphertext): Promise<Uint8Array>;
+  decryptDataKey(wrapped: KmsCiphertext, options?: KmsCallOptions): Promise<Uint8Array>;
   /**
    * Releases SDK resources (sockets) the client created itself. Never closes an SDK
    * client that was passed in: the caller owns that one.

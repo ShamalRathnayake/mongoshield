@@ -10,7 +10,8 @@
  *   address     string          "4127 Maple Lane, Riverton"
  *   ip          string          IPv4 → 10.x.y.z (private range); IPv6 → 2001:db8::/32
  *                                 (documentation prefix)
- *   uuid        string | UUID   a version-4 UUID, as a string or a BSON UUID like the input
+ *   uuid        string | UUID   a version-4 UUID, as a string or a BSON UUID (subtype 4, or
+ *                                 the legacy subtype 3) like the input
  *   date-shift  Date            the date moved by a keyed offset of ±1…`days` days
  *
  * Each fake is seeded by HMAC(secret, kind, value): the same input always gives the
@@ -64,8 +65,9 @@ const EMAIL_SUFFIX_LENGTH = 8;
 /** House numbers run from 1 to this. */
 const MAX_HOUSE_NUMBER = 9999;
 
-/** BSON binary subtype of UUIDs. */
+/** BSON binary subtypes of UUIDs: 4, and 3 for the legacy (driver-specific byte order) form. */
 const UUID_SUBTYPE = 4;
+const LEGACY_UUID_SUBTYPE = 3;
 
 /**
  * Fakes one value of the given kind (see the header comment).
@@ -138,10 +140,14 @@ function fakeUuid(value: unknown, stream: KeyedStream): unknown {
     const text = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     return value === value.toUpperCase() && /[A-F]/.test(value) ? text.toUpperCase() : text;
   }
-  if (bsonTag(value) === "Binary" && value instanceof Binary && value.sub_type === UUID_SUBTYPE) {
-    return new Binary(bytes, UUID_SUBTYPE);
+  if (bsonTag(value) === "Binary" && value instanceof Binary && isUuidSubtype(value.sub_type)) {
+    return new Binary(bytes, value.sub_type);
   }
   return UNSUPPORTED;
+}
+
+function isUuidSubtype(subtype: number): boolean {
+  return subtype === UUID_SUBTYPE || subtype === LEGACY_UUID_SUBTYPE;
 }
 
 /**

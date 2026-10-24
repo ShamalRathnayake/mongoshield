@@ -33,6 +33,7 @@ import {
   type WriteError,
 } from "mongodb";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
+import { documentId, inStoredOrderAnywhere, valueInStoredOrder } from "../format/field-order.ts";
 import { splitNamespace } from "../mongo/index.ts";
 import type { BackupSelector, DecryptionOptions, SourceOptions } from "../types.ts";
 import type { RestoreContext } from "./context.ts";
@@ -167,7 +168,7 @@ export async function restoreDocuments(
   };
   const limits = options.batchLimits ?? DEFAULT_BATCH_LIMITS;
   for await (const batch of batchMatches(
-    matchingDocuments(opened, matcher, options.signal),
+    matchingDocuments(opened, matcher, options.signal, { logger: context.logger }),
     limits,
   )) {
     throwIfAborted(options.signal);
@@ -321,13 +322,21 @@ export async function* batchMatches(
   if (batch.length > 0) yield batch;
 }
 
-/** Writes (or, in a dry run, counts) one batch and adds the outcome to `counts`. */
+/**
+ * Writes (or, in a dry run, counts) one batch and adds the outcome to `counts`.
+ *
+ * Documents are written in stored field order (src/format/field-order.ts): those with
+ * integer-like field names become Maps first. The whole document is searched, not
+ * just its root, because a document shown as of the end of a converge window may be
+ * a backed-up document with a `$set` value from a change event inside it.
+ */
 export async function writeBatch(
   writer: BatchWriter,
-  documents: Document[],
+  parsed: Document[],
   counts: Counts,
 ): Promise<void> {
   const namespace = writer.collection.namespace;
+  const documents = parsed.map((document) => inStoredOrderAnywhere(document));
   try {
     if (writer.dryRun) {
       const existing = writer.targetExists ? await countExisting(writer.collection, documents) : 0;
@@ -350,10 +359,12 @@ async function countExisting(
   documents: readonly Document[],
 ): Promise<number> {
   const ids = documents
-    .filter((document) => document._id !== undefined)
-    .map((document) => document._id);
+    .map((document) => documentId(document))
+    .filter((id) => id !== undefined)
+    .map((id) => valueInStoredOrder(id));
   if (ids.length === 0) return 0;
-  return collection.countDocuments({ _id: { $in: ids } }, { collation: BINARY_COLLATION });
+  const query: Document = { _id: { $in: ids } };
+  return collection.countDocuments(query, { collation: BINARY_COLLATION });
 }
 
 /** Common write options: unordered (keeps going past duplicates), write concern. */
@@ -388,24 +399,29 @@ async function insertBatch(
   }
 }
 
-/** Replaces each document by `_id`, inserting it when missing. */
+/**
+ * Replaces each document by `_id`, inserting it when missing. Documents may be Maps
+ * (see `writeBatch`), so the `_id` is read with `documentId`.
+ */
 async function upsertBatch(
   writer: BatchWriter,
   documents: Document[],
   counts: Counts,
 ): Promise<void> {
-  const operations: AnyBulkWriteOperation[] = documents.map((document) =>
-    document._id === undefined
+  const operations: AnyBulkWriteOperation[] = documents.map((document) => {
+    const id = documentId(document);
+    const filter: Document = { _id: id };
+    return id === undefined
       ? { insertOne: { document } }
       : {
           replaceOne: {
-            filter: { _id: document._id },
+            filter,
             replacement: document,
             upsert: true,
             collation: BINARY_COLLATION,
           },
-        },
-  );
+        };
+  });
   const result = await writer.collection.bulkWrite(operations, writeOptions(writer));
   counts.replaced += result.matchedCount;
   counts.inserted += result.upsertedCount + result.insertedCount;

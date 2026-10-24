@@ -6,16 +6,12 @@
 // Each round trip restores into a fresh database and compares it with the source:
 // every document as raw BSON bytes, every index, and the collection options.
 //
-// The tools come from MONGO_TOOLS_BIN, or from packages/mongoshield/.tools/ (fill it
-// with `node scripts/fetch-mongo-tools.ts`). Without them these tests are skipped.
+// The tools come from test/helpers/mongo-tools.ts (skipped locally without them,
+// failing in CI).
 
-import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import {
   Binary,
   BSON,
@@ -41,42 +37,14 @@ import { importMongodump, type MongodumpSource } from "../../src/interop/import.
 import { silentLogger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
 import type { StorageAdapter } from "../../src/storage/types.ts";
-import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
+import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
+import { tool, toolsMissing } from "../helpers/mongo-tools.ts";
 
-const run = promisify(execFile);
-
-/** The directory holding mongodump and mongorestore, or undefined when they are not installed. */
-function findToolsBin(): string | undefined {
-  const fromEnv = process.env.MONGO_TOOLS_BIN;
-  if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
-  const toolsRoot = fileURLToPath(new URL("../../.tools/", import.meta.url));
-  if (!existsSync(toolsRoot)) return undefined;
-  for (const entry of readdirSync(toolsRoot)) {
-    const bin = join(toolsRoot, entry, "bin");
-    if (existsSync(join(bin, "mongodump")) || existsSync(join(bin, "mongodump.exe"))) return bin;
-  }
-  return undefined;
-}
-
-const toolsBin = findToolsBin();
 const client = useMongoClient();
 const source = uniqueDb("io");
 
 /** A collection name that mongodump has to shorten in file names (escaped, it is 600 bytes). */
 const LONG_NAME = "é".repeat(100);
-
-/** Runs a tool from the tools directory; fails the test with its output on error. */
-async function tool(name: "mongodump" | "mongorestore", args: readonly string[]): Promise<void> {
-  if (toolsBin === undefined) throw new Error("tools not installed");
-  try {
-    await run(join(toolsBin, name), ["--uri", mongoUri(), ...args], {
-      maxBuffer: 64 * 1024 * 1024,
-    });
-  } catch (error) {
-    const stderr = String(Reflect.get(Object(error), "stderr") ?? "");
-    throw new Error(`${name} ${args.join(" ")} failed:\n${stderr}`);
-  }
-}
 
 /** One document with every BSON type mongodump and mongorestore must carry unchanged. */
 function everyBsonType(index: number): Document {
@@ -164,7 +132,7 @@ function newTarget(): string {
   return name;
 }
 
-describe.skipIf(toolsBin === undefined)("compatibility with mongodump and mongorestore", () => {
+describe.skipIf(toolsMissing)("compatibility with mongodump and mongorestore", () => {
   let expected: DatabaseSnapshot;
 
   beforeAll(async () => {

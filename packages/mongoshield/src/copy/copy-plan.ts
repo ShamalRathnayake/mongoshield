@@ -13,9 +13,13 @@
  * itself one of the copied source namespaces is a conflict in every mode: `drop`
  * would destroy the data being copied, and inserting into it would read and write
  * the same collection at once.
+ *
+ * A RESUMED copy keeps the action the interrupted run chose for every target it
+ * already created (they now hold its documents, which would otherwise be conflicts),
+ * and each entry says what is left to do (`resume`, see `CopyResumeState`).
  */
 
-import { Binary, type Document, type MongoClient } from "mongodb";
+import { Binary, type Document, type MongoClient, MongoServerError } from "mongodb";
 import { decideAction, inspectTargets, type TargetState } from "../engine/restore-plan.ts";
 import { assertValidTargetNamespace, compileRenameMap } from "../engine/restore-rename.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
@@ -23,7 +27,14 @@ import type { Logger } from "../logger.ts";
 import type { Mask } from "../mask/index.ts";
 import { type CollectionSpec, discoverNamespaces, splitNamespace } from "../mongo/index.ts";
 import { type CompiledSubset, compileSubset } from "../subset/index.ts";
-import type { CopyOptions, CopyPlan, CopyPlanEntry, RestoreMode } from "../types.ts";
+import type {
+  CopyOptions,
+  CopyPlan,
+  CopyPlanEntry,
+  CopyResumeState,
+  RestoreMode,
+} from "../types.ts";
+import type { CopyCheckpoint, NamespaceState } from "./copy-checkpoint.ts";
 
 /** Connected clients for both sides. The engine never opens or closes them. */
 export interface CopyContext {
@@ -34,8 +45,17 @@ export interface CopyContext {
   readonly logger: Logger;
 }
 
-/** The engine's options: `CopyOptions` without the connection settings (the context has the clients). */
-export type CopyEngineOptions = Omit<CopyOptions, "from" | "to">;
+/**
+ * The engine's options: `CopyOptions` without the connection settings (the context has
+ * the clients), plus tuning that is not part of the public options.
+ */
+export type CopyEngineOptions = Omit<CopyOptions, "from" | "to"> & {
+  /**
+   * Checkpointed copies split collections larger than this (raw BSON bytes) into
+   * `_id` ranges. Defaults to `DEFAULT_PART_SIZE_BYTES` (256 MiB), like backups.
+   */
+  readonly partSizeBytes?: number;
+};
 
 /** One planned namespace with the source spec needed to copy it. */
 export interface PlannedCopyNamespace {
@@ -68,9 +88,11 @@ export async function buildCopyPlan(
   context: CopyContext,
   options: CopyEngineOptions,
   mask: Mask | undefined,
+  checkpoint?: CopyCheckpoint,
 ): Promise<DetailedCopyPlan> {
   const mode = options.mode ?? DEFAULT_COPY_MODE;
   const specs = await discoverSource(context, options);
+  if (checkpoint !== undefined) assertSameSourceCollections(specs, checkpoint);
   const subset =
     options.subset === undefined
       ? undefined
@@ -90,6 +112,7 @@ export async function buildCopyPlan(
     const to = targets.get(spec.ns) ?? spec.ns;
     const state: TargetState = states.get(to) ?? { exists: false };
     const selfConflict = sameDeployment && sourceNamespaces.has(to);
+    const resumed = checkpoint?.namespaces.find((candidate) => candidate.from === spec.ns);
     const decision = selfConflict
       ? {
           conflict:
@@ -97,7 +120,10 @@ export async function buildCopyPlan(
               ? "it is the source itself (same deployment); use --rename to copy elsewhere"
               : "it is also a source namespace of this copy (same deployment)",
         }
-      : decideAction(mode, spec.type, state);
+      : resumed?.prepared === true || resumed?.finished === true
+        ? { action: resumed.action }
+        : decideAction(mode, spec.type, state);
+    const selection = subset?.selectionOf(spec.ns) ?? "all";
 
     const entry: CopyPlanEntry = {
       from: spec.ns,
@@ -105,17 +131,71 @@ export async function buildCopyPlan(
       type: spec.type,
       documents: spec.estimatedDocuments,
       existingDocuments: state.exists ? state.documents : 0,
-      subset: subset?.selectionOf(spec.ns) ?? "all",
+      subset: selection,
       masked: spec.type === "view" ? [] : (mask?.forNamespace(spec.ns)?.summary ?? []),
       ...("conflict" in decision
         ? { action: "conflict" as const, reason: decision.conflict }
         : { action: decision.action }),
+      ...(checkpoint === undefined
+        ? {}
+        : { resume: resumeStateOf(resumed, selection, checkpoint.referencesDone) }),
     };
     entries.push(entry);
     if (entry.action !== "conflict") namespaces.push({ spec, entry });
   }
 
   return { plan: { mode, entries }, namespaces, subset, sameDeployment };
+}
+
+/**
+ * What a resumed copy does with one namespace, from its checkpointed state.
+ *
+ * Unordered namespaces (no `_id` index, e.g. time series) cannot continue mid-way, so
+ * unfinished ones start over: their roots when not all copied, and also when they are
+ * followed into and following did not finish (references are followed again from the
+ * start, and a time series could not skip the measurements it already holds).
+ */
+export function resumeStateOf(
+  state: NamespaceState | undefined,
+  selection: CopyPlanEntry["subset"],
+  referencesDone: boolean,
+): CopyResumeState {
+  if (state === undefined || (!state.prepared && !state.finished)) return "not-started";
+  if (state.finished) return "done";
+  if (!state.ordered) {
+    const hasRoots = selection !== "referenced";
+    const isFollowed = selection === "referenced" || selection === "filtered+referenced";
+    if ((hasRoots && !state.rootsDone) || (isFollowed && !referencesDone)) return "restart";
+  }
+  return "partial";
+}
+
+/**
+ * A resumed copy reads the source in the `_id` ranges the interrupted run planned:
+ * they only describe the same documents if every source collection is still the
+ * same one, and none of the checkpointed collections has gone.
+ *
+ * @throws MongoShieldError `MS_CONFIG_INVALID` naming the collections that changed.
+ */
+function assertSameSourceCollections(
+  specs: readonly CollectionSpec[],
+  checkpoint: CopyCheckpoint,
+): void {
+  const byNs = new Map(specs.map((spec) => [spec.ns, spec]));
+  const changed: string[] = [];
+  for (const state of checkpoint.namespaces) {
+    const spec = byNs.get(state.from);
+    const uuid = spec?.uuid ?? null;
+    if (spec === undefined || (state.sourceUuid !== null && uuid !== state.sourceUuid)) {
+      changed.push(state.from);
+    }
+  }
+  if (changed.length === 0) return;
+  throw new MongoShieldError(
+    "MS_CONFIG_INVALID",
+    `The interrupted copy cannot be resumed: the source collection(s) ${changed.join(", ")} were dropped or replaced since.`,
+    { hint: "Copy again without --resume (with --drop to replace the partial targets)." },
+  );
 }
 
 /**
@@ -221,13 +301,31 @@ async function isSameDeployment(
 
   for (const database of databases) {
     throwIfAborted(signal);
-    const infos = await context.target
-      .db(database)
-      .listCollections({}, { nameOnly: false, authorizedCollections: true })
-      .toArray();
+    const infos = await listCollectionInfos(context.target, database);
     if (infos.some((info) => sourceUuids.has(uuidOf(info)))) return true;
   }
   return false;
+}
+
+/** Server error code for "not authorized". */
+const UNAUTHORIZED_CODE = 13;
+
+/**
+ * `listCollections` of one target database, or nothing when the target user may not
+ * list it. A least-privilege target user (`readWrite` on the target databases only)
+ * cannot list the SOURCE database names on the target; it cannot write there either,
+ * so they cannot be the copy's target and only its own databases matter for the check.
+ */
+async function listCollectionInfos(client: MongoClient, database: string): Promise<Document[]> {
+  try {
+    return await client
+      .db(database)
+      .listCollections({}, { nameOnly: false, authorizedCollections: true })
+      .toArray();
+  } catch (error) {
+    if (error instanceof MongoServerError && error.code === UNAUTHORIZED_CODE) return [];
+    throw error;
+  }
 }
 
 /** The collection UUID of a `listCollections` entry as 32 lowercase hex characters, or "". */

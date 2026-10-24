@@ -7,7 +7,7 @@
  * the command registry.
  */
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -335,5 +335,86 @@ describe("mongoshield pull", () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toContain("WITHOUT masking");
     expect(await client().db(target).collection("users").countDocuments()).toBe(2);
+  });
+});
+
+describe("mongoshield copy --resume", () => {
+  it("leaves a checkpoint when interrupted, continues with --resume, and deletes it at the end", async () => {
+    const source = uniqueDb("src");
+    const target = uniqueDb("dst");
+    await seed(source);
+    // A custom mask that fails while a marker file exists: a deterministic interruption.
+    const marker = join(workDir, `fail-${source}`);
+    const mask = join(workDir, `mask-fail-${source}.ts`);
+    await writeFile(
+      mask,
+      [
+        'import { existsSync } from "node:fs";',
+        "export default {",
+        `  rules: { "${source}.orders": { total: (value: unknown) => {`,
+        `    if (existsSync(${JSON.stringify(marker)})) throw new Error("interrupted on purpose");`,
+        "    return value;",
+        "  } } },",
+        "};",
+      ].join("\n"),
+    );
+    await writeFile(marker, "");
+    const args = [
+      "--from",
+      mongoUri(),
+      "--to",
+      mongoUri(),
+      "--include",
+      `${source}.*`,
+      "--rename",
+      `${source}.*=${target}.*`,
+      "--mask",
+      mask,
+    ];
+    const env = { MONGOSHIELD_MASK_SECRET: SECRET };
+
+    const failed = await run(copyCommand, args, env);
+    expect(failed.code).not.toBe(0);
+    expect(failed.stderr).toContain("interrupted on purpose");
+    expect(failed.stderr).toContain("--resume");
+    const checkpoints = await readdir(join(workDir, ".mongoshield"));
+    expect(checkpoints.some((name) => name.startsWith("copy-"))).toBe(true);
+
+    // Without --resume, the user is told about the interrupted copy (a dry run, so
+    // the checkpoint stays; whether the plan conflicts depends on what was copied).
+    await rm(marker);
+    const fresh = await run(copyCommand, [...args, "--dry-run"], env);
+    expect(fresh.stderr).toContain("add --resume to continue it");
+
+    const resumed = await run(copyCommand, [...args, "--resume"], env);
+    expect(resumed.code).toBe(0);
+    expect(resumed.stderr).toMatch(/resume|done/);
+    expect(resumed.stdout).toContain("Resumed the copy");
+    expect(await client().db(target).collection("orders").countDocuments()).toBe(2);
+    expect(await client().db(target).collection("users").countDocuments()).toBe(2);
+    const left = await readdir(join(workDir, ".mongoshield"));
+    expect(left.filter((name) => name.startsWith("copy-"))).toEqual([]);
+  });
+
+  it("puts the checkpoint where --checkpoint says, and refuses --resume without one", async () => {
+    const source = uniqueDb("src");
+    const target = uniqueDb("dst");
+    await seed(source);
+    const result = await run(copyCommand, [
+      "--from",
+      mongoUri(),
+      "--to",
+      mongoUri(),
+      "--include",
+      `${source}.*`,
+      "--rename",
+      `${source}.*=${target}.*`,
+      "--checkpoint",
+      `checkpoints/${target}.json`,
+      "--resume",
+    ]);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain(join(workDir, "checkpoints", `${target}.json`));
+    expect(result.stderr).toContain("no interrupted copy to resume");
   });
 });

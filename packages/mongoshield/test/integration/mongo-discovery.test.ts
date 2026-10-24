@@ -2,7 +2,7 @@
 // One database is filled with every kind of namespace and index MongoShield must
 // capture, then discovery is checked spec by spec.
 
-import { Binary, type CommandSucceededEvent, type Document, MongoClient } from "mongodb";
+import { Binary, BSON, type CommandSucceededEvent, type Document, MongoClient } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../../src/errors.ts";
 import type { Logger } from "../../src/logger.ts";
@@ -241,8 +241,14 @@ describe("discoverNamespaces", () => {
       const wildcardDb = await discoverNamespaces(client(), { include: [`*.${marker}`] });
       expect(wildcardDb).toEqual([]);
 
+      // Other test files restore users and roles in parallel, which stages them in
+      // temporary `admin` collections (restore-authz.ts, mongorestore), so `admin.*`
+      // may list more than the marker: only the marker is this test's to expect.
       const named = await discoverNamespaces(client(), { include: ["admin.*"] });
-      expect(named.map((spec) => spec.ns)).toEqual([`admin.${marker}`]);
+      expect(named.map((spec) => spec.ns)).toContain(`admin.${marker}`);
+      expect(named.every((spec) => spec.db === "admin")).toBe(true);
+      const literal = await discoverNamespaces(client(), { include: [`admin.${marker}`] });
+      expect(literal.map((spec) => spec.ns)).toEqual([`admin.${marker}`]);
     } finally {
       await admin.collection(marker).drop();
     }
@@ -265,42 +271,72 @@ describe("discoverNamespaces", () => {
   it("skips a collection dropped between listing and reading, with a warning", async () => {
     // The test server has no fail points, so the race is staged with command monitoring:
     // as soon as listCollections replies, drop the LAST listed collection. Discovery
-    // reaches it only after two round trips for every collection before it.
-    const racyDb = uniqueDb("race");
-    const setup = client().db(racyDb);
-    for (let index = 0; index < 30; index++)
-      await setup.collection(`c${index}`).insertOne({ index });
-
-    const monitored = new MongoClient(mongoUri(), { monitorCommands: true });
-    let victim: string | undefined;
-    let dropped: Promise<unknown> = Promise.resolve();
-    monitored.on("commandSucceeded", (event: CommandSucceededEvent) => {
-      if (event.commandName !== "listCollections" || victim !== undefined) return;
-      const reply: Document = event.reply ?? {};
-      const batch: unknown = reply.cursor?.firstBatch;
-      if (!Array.isArray(batch) || batch.length === 0) return;
-      const last: unknown = batch[batch.length - 1]?.name;
-      if (typeof last !== "string") return;
-      victim = last;
-      dropped = client().db(racyDb).collection(last).drop();
-    });
-
-    const logger = recordingLogger();
-    try {
-      const specs = await discoverNamespaces(monitored, { include: [`${racyDb}.*`], logger });
-      await dropped;
-      expect(victim).toBeDefined();
-      expect(specs).toHaveLength(29);
-      expect(specs.some((spec) => spec.name === victim)).toBe(false);
-      expect(logger.warnings).toEqual([
-        { message: expect.stringMatching(/dropped/), fields: { ns: `${racyDb}.${victim}` } },
+    // reaches it only after a few round trips for every collection before it, which is
+    // nearly always later than the drop; on a server busy with the other test files the
+    // drop can still lose, and then discovery rightly sees the collection. Such an
+    // attempt staged nothing, so it is repeated with a fresh database.
+    for (let attempt = 1; ; attempt++) {
+      const outcome = await stageDropDuringDiscovery();
+      if (outcome.dropLost && attempt < 5) continue;
+      expect(outcome.dropLost).toBe(false);
+      expect(outcome.specs).toHaveLength(29);
+      expect(outcome.specs.some((spec) => spec.name === outcome.victim)).toBe(false);
+      expect(outcome.warnings).toEqual([
+        {
+          message: expect.stringMatching(/dropped/),
+          fields: { ns: `${outcome.database}.${outcome.victim}` },
+        },
       ]);
-    } finally {
-      await monitored.close();
-      await client().db(racyDb).dropDatabase();
+      return;
     }
   });
 });
+
+/** One attempt of the race above: discovery of 30 collections while the last is dropped. */
+async function stageDropDuringDiscovery(): Promise<{
+  database: string;
+  victim: string;
+  specs: CollectionSpec[];
+  warnings: { message: string; fields?: unknown }[];
+  /** True when discovery read the victim before the drop took effect. */
+  dropLost: boolean;
+}> {
+  const racyDb = uniqueDb("race");
+  const setup = client().db(racyDb);
+  for (let index = 0; index < 30; index++) await setup.collection(`c${index}`).insertOne({ index });
+
+  const monitored = new MongoClient(mongoUri(), { monitorCommands: true });
+  let victim: string | undefined;
+  let dropped: Promise<unknown> = Promise.resolve();
+  monitored.on("commandSucceeded", (event: CommandSucceededEvent) => {
+    if (event.commandName !== "listCollections" || victim !== undefined) return;
+    const reply: Document = event.reply ?? {};
+    // Discovery lists collections with `raw: true` (to keep their stored field order),
+    // and the event then carries the cursor as raw BSON.
+    const cursor: unknown = reply.cursor;
+    const parsed: Document | undefined =
+      cursor instanceof Uint8Array ? BSON.deserialize(cursor) : (cursor as Document | undefined);
+    const batch: unknown = parsed?.firstBatch;
+    if (!Array.isArray(batch) || batch.length === 0) return;
+    const last: unknown = batch[batch.length - 1]?.name;
+    if (typeof last !== "string") return;
+    victim = last;
+    dropped = client().db(racyDb).collection(last).drop();
+  });
+
+  const logger = recordingLogger();
+  try {
+    const specs = await discoverNamespaces(monitored, { include: [`${racyDb}.*`], logger });
+    await dropped;
+    if (victim === undefined) throw new Error("listCollections was never seen");
+    const name = victim;
+    const dropLost = specs.some((spec) => spec.name === name) && logger.warnings.length === 0;
+    return { database: racyDb, victim: name, specs, warnings: logger.warnings, dropLost };
+  } finally {
+    await monitored.close();
+    await client().db(racyDb).dropDatabase();
+  }
+}
 
 describe("orderForRestore with discovered specs", () => {
   it("creates collections first and the view-on-view after the view it reads", async () => {

@@ -16,13 +16,28 @@
  * Long `_id` above 2^53 or an Int32 that became a double would move a boundary,
  * and a resumed run must cut the collection exactly where the first run did.
  *
+ * Why in their exact field ORDER too (src/format/field-order.ts): an embedded-document
+ * `_id` with integer-like field names (`{ b: 1, "1": 2 }`) is a different value once
+ * JavaScript lists "1" first, and reordering does not keep the sort order: sampled
+ * boundaries could come out of order, so parts would overlap (documents dumped twice)
+ * and a resumed run would cut elsewhere. So `_id`s are sampled as raw BSON and parsed
+ * in stored order, sent to the server in that order (`valueInStoredOrder`), and
+ * written to checkpoints and the manifest as order-keeping Extended JSON
+ * (`toCanonical`, src/format/ordered-json.ts).
+ *
  * Collections without a plain `{ _id: 1 }` index (time series, capped collections
  * created without one, clustered collections) are never split.
  * See docs/specs/PARTS-AND-RESUME.md.
  */
 
-import { BSON, type Document, type MongoClient, type ReadPreference } from "mongodb";
+import type { MongoClient, ReadPreference } from "mongodb";
+import { deserializeInStoredOrder } from "../format/field-order.ts";
 import type { PartRange } from "../format/manifest.ts";
+import {
+  fromExtendedJson,
+  stringifyJsonInStoredOrder,
+  toExtendedJson,
+} from "../format/ordered-json.ts";
 import type { Logger } from "../logger.ts";
 import type { CollectionSpec } from "../mongo/index.ts";
 
@@ -37,14 +52,6 @@ export const MAX_SAMPLES = 100_000;
 
 /** The index every split part is read through. */
 export const ID_INDEX = { _id: 1 } as const;
-
-/** BSON deserialization that keeps every value's exact type (see the file header). */
-const EXACT_BSON = {
-  promoteValues: false,
-  promoteLongs: false,
-  promoteBuffers: false,
-  bsonRegExp: true,
-} as const;
 
 /** What the planner learns about a collection from `$collStats`. */
 export interface CollectionStats {
@@ -141,22 +148,26 @@ export function toPartRange(bounds: PartBounds): PartRange {
   };
 }
 
-/** A BSON value as canonical Extended JSON (exact types survive a round trip). */
+/**
+ * A BSON value as canonical Extended JSON (exact types survive a round trip). The
+ * stored field order of documents is recorded on the result, so files written with
+ * `stringifyJsonInStoredOrder` keep it (see the file header).
+ */
 export function toCanonical(value: unknown): unknown {
-  // BSON.EJSON.serialize only takes documents, so the value is wrapped and unwrapped.
-  const wrapped: Document = BSON.EJSON.serialize({ value }, { relaxed: false });
-  return wrapped.value;
+  return toExtendedJson(value, { relaxed: false });
 }
 
-/** The inverse of `toCanonical`. */
+/**
+ * The inverse of `toCanonical`, also for values read with `parseJsonInStoredOrder`
+ * (their recorded order is kept).
+ */
 export function fromCanonical(value: unknown): unknown {
-  const wrapped: Document = BSON.EJSON.deserialize({ value } as Document, { relaxed: false });
-  return wrapped.value;
+  return fromExtendedJson(value, { relaxed: false });
 }
 
 /** A string that is equal for equal BSON values (used to drop repeated boundaries). */
 function canonicalKey(value: unknown): string {
-  return JSON.stringify(toCanonical(value));
+  return stringifyJsonInStoredOrder(toCanonical(value));
 }
 
 /** Where and how planning reads. */
@@ -219,12 +230,15 @@ export async function sampleSortedIds(
     .aggregate([{ $sample: { size: count } }, { $project: { _id: 1 } }, { $sort: { _id: 1 } }], {
       readPreference: options.readPreference,
       allowDiskUse: true,
-      ...EXACT_BSON,
+      // Raw, then parsed losslessly in stored order: exact types and field order.
+      raw: true,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
   const ids: unknown[] = [];
   // Bounded by `count` (at most MAX_SAMPLES small documents), so collecting is fine.
-  for await (const document of cursor) ids.push(document._id);
+  for await (const raw of cursor) {
+    if (raw instanceof Uint8Array) ids.push(deserializeInStoredOrder(raw)._id);
+  }
   return ids;
 }
 

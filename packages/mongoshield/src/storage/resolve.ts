@@ -8,6 +8,9 @@
  * - `file:///abs/path`                 local directory (absolute file URL)
  * - `./backups`, `/var/backups`, `C:\b` bare paths, relative to the working directory
  * - `s3://bucket/prefix?region=…&endpoint=…&forcePathStyle=true`
+ *   (also `requestChecksumCalculation=WHEN_REQUIRED` for S3-compatible services
+ *   that fail multipart uploads with the SDK's default checksums, and
+ *   `exactLastModified=true`; see the s3Storage options)
  * - `gs://bucket/prefix?projectId=…`   Google Cloud Storage
  * - `az://account/container/prefix?endpoint=…`   Azure Blob Storage
  * - `sftp://user@host:port/path?fingerprint=SHA256:…`   SFTP (`/~/path` = relative to the login directory)
@@ -26,8 +29,10 @@
  * - SFTP authenticates with the private key file in `MONGOSHIELD_SFTP_KEY_FILE`
  *   (passphrase in `MONGOSHIELD_SFTP_KEY_PASSPHRASE`) and/or the SSH agent in
  *   `SSH_AUTH_SOCK`. The host key must match `fingerprint` (repeatable) or
- *   `MONGOSHIELD_SFTP_HOST_FINGERPRINT` (comma-separated); only
- *   `allowUnknownHostKey=true` skips that check.
+ *   `MONGOSHIELD_SFTP_HOST_FINGERPRINT` (comma-separated). Without either, it
+ *   must be listed in the known_hosts file named by `MONGOSHIELD_SFTP_KNOWN_HOSTS`
+ *   (default `~/.ssh/known_hosts`), and hosts not listed there are refused. Only
+ *   `allowUnknownHostKey=true` skips host key verification.
  * - `s3://`, `gs://` and `az://` accept `retention=compliance|governance`: the
  *   write-once retention mode used for immutable backups (`retainDays`). Default
  *   `compliance`. See docs/guides/immutable-backups.md.
@@ -48,7 +53,14 @@ import type { RetentionOptions, StorageAdapter } from "./types.ts";
 export const SUPPORTED_STORAGE_SCHEMES = ["file", "s3", "gs", "az", "sftp", "memory"] as const;
 
 /** Query parameters accepted on `s3://` URLs. Anything else is rejected to catch typos. */
-const S3_QUERY_PARAMETERS = new Set(["region", "endpoint", "forcePathStyle", "retention"]);
+const S3_QUERY_PARAMETERS = new Set([
+  "region",
+  "endpoint",
+  "forcePathStyle",
+  "retention",
+  "requestChecksumCalculation",
+  "exactLastModified",
+]);
 /** Query parameters accepted on `gs://` URLs. */
 const GCS_QUERY_PARAMETERS = new Set(["projectId", "retention"]);
 /** Query parameters accepted on `az://` URLs. */
@@ -62,8 +74,12 @@ const ENV = {
   sftpKeyFile: "MONGOSHIELD_SFTP_KEY_FILE",
   sftpKeyPassphrase: "MONGOSHIELD_SFTP_KEY_PASSPHRASE",
   sftpHostFingerprint: "MONGOSHIELD_SFTP_HOST_FINGERPRINT",
+  sftpKnownHosts: "MONGOSHIELD_SFTP_KNOWN_HOSTS",
   sshAgent: "SSH_AUTH_SOCK",
 } as const;
+
+/** The known_hosts file `sftp://` URLs use when no fingerprint is given, like `ssh` itself. */
+const DEFAULT_KNOWN_HOSTS = "~/.ssh/known_hosts";
 
 /**
  * Named in-memory stores. `memory://x` must mean the same store every time it is
@@ -139,6 +155,7 @@ function s3StorageOf(url: string): StorageAdapter {
   const region = parsed.searchParams.get("region");
   const endpoint = parsed.searchParams.get("endpoint");
   const forcePathStyle = parsed.searchParams.get("forcePathStyle");
+  const exactLastModified = parsed.searchParams.get("exactLastModified");
   if (endpoint !== null) parseUrl(endpoint);
 
   return s3Storage({
@@ -147,7 +164,24 @@ function s3StorageOf(url: string): StorageAdapter {
     ...(region ? { region } : {}),
     ...(endpoint ? { endpoint } : {}),
     ...(forcePathStyle === null ? {} : { forcePathStyle: parseBoolean(forcePathStyle) }),
+    ...(exactLastModified === null ? {} : { exactLastModified: parseBoolean(exactLastModified) }),
+    ...checksumParameter(parsed),
     ...retentionParameter(parsed),
+  });
+}
+
+/** `?requestChecksumCalculation=WHEN_REQUIRED` (case-insensitive) → the s3Storage option. */
+function checksumParameter(parsed: URL): {
+  requestChecksumCalculation?: "WHEN_SUPPORTED" | "WHEN_REQUIRED";
+} {
+  const value = parsed.searchParams.get("requestChecksumCalculation");
+  if (value === null) return {};
+  const normalized = value.toUpperCase();
+  if (normalized === "WHEN_SUPPORTED" || normalized === "WHEN_REQUIRED") {
+    return { requestChecksumCalculation: normalized };
+  }
+  throw configError(`Invalid requestChecksumCalculation "${value}" in storage URL.`, {
+    hint: "Use requestChecksumCalculation=WHEN_REQUIRED or WHEN_SUPPORTED.",
   });
 }
 
@@ -275,6 +309,13 @@ function sftpStorageOf(url: string): StorageAdapter {
     .filter((value) => value.length > 0);
   const fingerprints = fromUrl.length > 0 ? fromUrl : fromEnv;
   const allowUnknown = parsed.searchParams.get("allowUnknownHostKey");
+  const allowUnknownHostKey = allowUnknown === null ? undefined : parseBoolean(allowUnknown);
+  // Without a fingerprint, trust what `ssh` would trust: the user's known_hosts.
+  // allowUnknownHostKey=true keeps its meaning of "verify nothing".
+  const knownHostsPath =
+    fingerprints.length === 0 && allowUnknownHostKey !== true
+      ? process.env[ENV.sftpKnownHosts] || DEFAULT_KNOWN_HOSTS
+      : undefined;
 
   return sftpStorage({
     host,
@@ -285,7 +326,8 @@ function sftpStorageOf(url: string): StorageAdapter {
     ...(passphrase ? { passphrase } : {}),
     ...(hasAgent ? { agent: true as const } : {}),
     ...(fingerprints.length > 0 ? { hostFingerprint: fingerprints } : {}),
-    ...(allowUnknown === null ? {} : { allowUnknownHostKey: parseBoolean(allowUnknown) }),
+    ...(knownHostsPath === undefined ? {} : { knownHostsPath }),
+    ...(allowUnknownHostKey === undefined ? {} : { allowUnknownHostKey }),
   });
 }
 

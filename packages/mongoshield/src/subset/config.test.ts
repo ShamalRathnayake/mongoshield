@@ -82,3 +82,46 @@ describe("compileSubset", () => {
     expect(() => compileSubset(config, namespaces)).toThrow(message);
   });
 });
+
+describe("compileSubset with time series", () => {
+  const withMetrics = [...namespaces, { ns: "app.metrics", type: "timeseries" }] as const;
+
+  it("refuses a time series that is both filtered and followed into", () => {
+    expect(() =>
+      compileSubset(
+        {
+          filters: { "app.metrics": { at: { $gte: new Date("2026-01-01") } } },
+          follow: [{ from: "app.orders.metricId", to: "app.metrics._id" }],
+        },
+        withMetrics,
+      ),
+    ).toThrow(/time series "app\.metrics" has a filter AND is followed into/);
+  });
+
+  it("refuses a time series followed into through two fields", () => {
+    expect(() =>
+      compileSubset(
+        {
+          follow: [
+            { from: "app.orders.metricId", to: "app.metrics._id" },
+            { from: "app.users.hostName", to: "app.metrics.meta.host" },
+          ],
+        },
+        withMetrics,
+      ),
+    ).toThrow(/followed into through several fields \(_id, meta\.host\)/);
+  });
+
+  it("accepts a time series selected one way, by several rules on one field", () => {
+    const subset = compileSubset(
+      {
+        follow: [
+          { from: "app.orders.host", to: "app.metrics.meta.host" },
+          { from: "app.users.host", to: "app.metrics.meta.host" },
+        ],
+      },
+      withMetrics,
+    );
+    expect(subset.selectionOf("app.metrics")).toBe("referenced");
+  });
+});

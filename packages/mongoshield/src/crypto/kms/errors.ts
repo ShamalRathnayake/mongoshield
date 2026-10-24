@@ -10,7 +10,7 @@
  * secrets) but never include data keys or ciphertexts.
  */
 
-import { type ErrorCode, MongoShieldError } from "../../errors.ts";
+import { abortError, type ErrorCode, MongoShieldError, throwIfAborted } from "../../errors.ts";
 import type { DecryptionStage } from "../failures.ts";
 import type { KmsProvider } from "./types.ts";
 
@@ -121,6 +121,60 @@ function hintFor(provider: KmsProvider, operation: KmsOperation, kind: KmsFailur
     case "other":
       return `Check network access to ${PROVIDER_NAMES[provider]} and retry. The cause has the provider's error.`;
   }
+}
+
+/**
+ * Runs one SDK call and turns its failure into a MongoShieldError: MS_ABORTED when
+ * `signal` fired (whatever the SDK threw for it), otherwise `kmsCallError` with the
+ * kind `classify` derives from the SDK error. Shared by the three adapters.
+ */
+export async function callKms<Output>(
+  target: {
+    readonly provider: KmsProvider;
+    readonly operation: KmsOperation;
+    readonly key: string;
+    readonly signal?: AbortSignal | undefined;
+  },
+  classify: (error: unknown) => KmsFailureKind,
+  call: () => Promise<Output>,
+): Promise<Output> {
+  const { provider, operation, key, signal } = target;
+  throwIfAborted(signal);
+  try {
+    return await untilAborted(call(), signal);
+  } catch (error) {
+    if (signal?.aborted) throw abortError(signal);
+    throw kmsCallError(provider, operation, key, classify(error), error);
+  }
+}
+
+/**
+ * Settles with `promise`, or rejects as soon as `signal` fires, whichever comes
+ * first. For SDKs that cannot cancel a request themselves (and as a backstop for
+ * those that can): the caller stops waiting at once, and the request, which only
+ * carries one 16-byte key, finishes or fails in the background unobserved.
+ */
+export function untilAborted<Output>(
+  promise: Promise<Output>,
+  signal: AbortSignal | undefined,
+): Promise<Output> {
+  if (signal === undefined) return promise;
+  return new Promise<Output>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal));
+    if (signal.aborted) onAbort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    // Promise.resolve: a hand-written client (or test double) may return a plain value.
+    Promise.resolve(promise).then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** The SDK for a provider is not installed. */

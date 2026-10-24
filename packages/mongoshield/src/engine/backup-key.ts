@@ -39,7 +39,7 @@ import {
   generateIdentity,
   PASSPHRASE_RECIPIENT_LABEL,
 } from "../crypto/index.ts";
-import { createKmsKeyWrapper, kmsRecipientLabel } from "../crypto/kms/index.ts";
+import { createKmsKeyWrapper, kmsRecipientLabel, resolveKmsClient } from "../crypto/kms/index.ts";
 import { resolveBackupKey } from "../format/layout.ts";
 import type { StoredFile } from "../format/manifest.ts";
 import type { StorageAdapter } from "../storage/types.ts";
@@ -91,7 +91,10 @@ export async function prepareFileEncryption(
     // One stanza per KMS key: any of them can unlock the envelope (e.g. keys in two
     // regions, so one region's outage does not block restores).
     const encryptor = createEncryptStream({
-      keyWrappers: plan.kms.map((ref) => createKmsKeyWrapper(ref)),
+      // The signal reaches the KMS call, so a cancelled backup does not wait for it.
+      keyWrappers: plan.kms.map((ref) =>
+        createKmsKeyWrapper(ref, resolveKmsClient, { signal: target.signal }),
+      ),
     });
     const { recipient, keyFile } = await writeKeyEnvelope(encryptor, target);
     return {

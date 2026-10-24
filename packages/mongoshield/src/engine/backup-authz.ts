@@ -28,12 +28,18 @@
  *
  * Users and roles are read when the dump is done, right before the manifest is
  * written: they are not part of a snapshot or converge window.
+ *
+ * The replies' users and roles are read as raw BSON and parsed with their stored
+ * field order recorded (src/format/field-order.ts), and written back in that order:
+ * a user's `customData` is free-form and may hold integer-like field names, which
+ * JavaScript objects would move first.
  */
 
 import { Readable } from "node:stream";
 import { BSON, type Document, type MongoClient, MongoServerError } from "mongodb";
 import { createCompressor } from "../compression/index.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
+import { deserializeInStoredOrder, inStoredOrderAnywhere } from "../format/field-order.ts";
 import { createCountingStream } from "../format/hashing.ts";
 import { dataFileKey, resolveBackupKey } from "../format/layout.ts";
 import type { NamespaceEntry } from "../format/manifest.ts";
@@ -123,12 +129,13 @@ export async function captureUsersAndRoles(
     const roles: Document[] = [];
     for (const database of databases) {
       throwIfAborted(signal);
-      const reply = await client.db(database).command({
-        rolesInfo: 1,
-        showPrivileges: true,
-        showBuiltinRoles: false,
-      });
-      for (const role of documentsIn(reply.roles))
+      const reply = await client
+        .db(database)
+        .command(
+          { rolesInfo: 1, showPrivileges: true, showBuiltinRoles: false },
+          { fieldsAsRaw: { roles: true } },
+        );
+      for (const role of rawDocumentsIn(reply.roles))
         roles.push(withoutFields(role, COMPUTED_ROLE_FIELDS));
     }
     return { users: sortById(users), roles: sortById(roles) };
@@ -144,15 +151,19 @@ async function captureUsers(
   signal: AbortSignal | undefined,
 ): Promise<Document[]> {
   const options = { showCredentials: true, showCustomData: true, showPrivileges: false };
+  // The users come back as raw BSON (see the file header).
+  const raw = { fieldsAsRaw: { users: true } };
   if (scope.kind === "all") {
-    const reply = await client.db("admin").command({ usersInfo: { forAllDBs: true }, ...options });
-    return documentsIn(reply.users).map((user) => withoutFields(user, COMPUTED_USER_FIELDS));
+    const reply = await client
+      .db("admin")
+      .command({ usersInfo: { forAllDBs: true }, ...options }, raw);
+    return rawDocumentsIn(reply.users).map((user) => withoutFields(user, COMPUTED_USER_FIELDS));
   }
   const users: Document[] = [];
   for (const database of scope.databases) {
     throwIfAborted(signal);
-    const reply = await client.db(database).command({ usersInfo: 1, ...options });
-    for (const user of documentsIn(reply.users))
+    const reply = await client.db(database).command({ usersInfo: 1, ...options }, raw);
+    for (const user of rawDocumentsIn(reply.users))
       users.push(withoutFields(user, COMPUTED_USER_FIELDS));
   }
   return users;
@@ -223,7 +234,9 @@ async function writeAuthzEntry(
     const digest = await writeStoredFile({
       storage: context.storage,
       key,
-      source: Readable.from(documents.map((document) => Buffer.from(BSON.serialize(document)))),
+      source: Readable.from(
+        documents.map((document) => Buffer.from(BSON.serialize(inStoredOrderAnywhere(document)))),
+      ),
       transforms: [
         counter.stream,
         createCompressor(context.compression),
@@ -272,7 +285,24 @@ function documentsIn(value: unknown): Document[] {
   );
 }
 
-/** A shallow copy of `document` without the given fields. */
+/**
+ * The documents of a reply's array field returned as raw BSON (`fieldsAsRaw`), parsed
+ * with their stored field order recorded. The driver's default options are used, so
+ * the values are what the driver's own parse gave (plain numbers); only the order is
+ * kept in addition.
+ */
+function rawDocumentsIn(value: unknown): Document[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Uint8Array => item instanceof Uint8Array)
+    .map((item) => deserializeInStoredOrder(item, {}));
+}
+
+/**
+ * A shallow copy of `document` without the given fields. The copy's root has no
+ * recorded order, but its fields are the server's fixed names; nested values (custom
+ * data) keep theirs.
+ */
 function withoutFields(document: Document, fields: readonly string[]): Document {
   const copy: Document = {};
   for (const [name, value] of Object.entries(document)) {

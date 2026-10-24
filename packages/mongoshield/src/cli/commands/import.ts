@@ -6,9 +6,11 @@
  *   mongodump --archive | mongoshield import - --archive --to …        an archive on stdin
  *
  * The result is a normal backup (manifest, checksums, compression, optional
- * encryption), so `verify`, `restore`, `list` and `prune` work on it. What could
- * not be imported (time-series and system collections, users and roles, the oplog)
- * is listed with the reason, as warnings.
+ * encryption), so `verify`, `restore`, `list` and `prune` work on it. Time-series
+ * buckets become measurements, users and roles the backup's users and roles
+ * entries, and the oplog of `mongodump --oplog` change events that restore replays
+ * (consistency `converge`; --ignore-oplog leaves it out). What is not imported
+ * (system collections, the auth schema version) is listed with the reason, as warnings.
  */
 
 import { stat } from "node:fs/promises";
@@ -50,8 +52,10 @@ export const importCommand: CommandSpec = {
     "Reads a directory written by `mongodump --out` or a file written by",
     "`mongodump --archive` (gzipped or not) and stores it as a regular MongoShield",
     "backup: compressed, optionally encrypted, with a manifest and checksums.",
-    "Documents are copied byte for byte. Time-series and system collections,",
-    "users and roles, and the oplog are not imported; they are listed as warnings.",
+    "Documents are copied byte for byte. Time-series buckets are unpacked into",
+    "measurements, users and roles become the backup's users and roles, and the oplog",
+    "of `mongodump --oplog` is replayed on restore (up to the end of the dump).",
+    "System collections are not imported; they are listed as warnings.",
   ].join("\n"),
   positionals: [
     {
@@ -103,6 +107,10 @@ export const importCommand: CommandSpec = {
       type: "string",
       valueName: "<date>",
       description: "When the dump was taken, e.g. 2026-01-31T02:00:00Z (default: the files' time)",
+    },
+    "ignore-oplog": {
+      type: "boolean",
+      description: "Leave out the oplog of a `mongodump --oplog` dump (consistency `none`)",
     },
   },
   examples: [
@@ -215,6 +223,7 @@ function importOptions(
     ...(exclude ? { exclude } : {}),
     ...(labels ? { labels } : {}),
     ...(dumpedAt ? { dumpedAt } : {}),
+    ...(context.flags.boolean("ignore-oplog") ? { ignoreOplog: true } : {}),
   };
 }
 
@@ -275,6 +284,7 @@ function printImportResult(context: CommandContext, result: ImportResult, storag
           `${formatBytes(manifest.totals.bytesRaw)} raw → ${formatBytes(manifest.totals.bytesStored)} stored`,
         ],
         ["Dumped at", manifest.completedAt],
+        ["Consistency", consistencyText(manifest)],
         ["Skipped", plural(result.skipped.length, "namespace")],
         ["Duration", formatDuration(result.durationMs)],
       ],
@@ -282,6 +292,12 @@ function printImportResult(context: CommandContext, result: ImportResult, storag
     ),
   );
   out.info(out.style("dim", `Next: mongoshield verify ${result.id} --deep`));
+}
+
+/** "converge (oplog: 120 changes replayed on restore)" or "none". */
+function consistencyText(manifest: ImportResult["manifest"]): string {
+  if (manifest.consistency.mode !== "converge") return manifest.consistency.mode;
+  return `converge (oplog: ${plural(manifest.changes?.events ?? 0, "change")} replayed on restore)`;
 }
 
 /** The parser already checked the value against `choices`; this narrows the type. */

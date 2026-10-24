@@ -100,6 +100,29 @@ describe("createGcpKmsClient", () => {
     expect(fake.calls).toEqual([]);
   });
 
+  it("stops waiting with MS_ABORTED when the signal fires, though gax cannot cancel", async () => {
+    const never = new Promise<never>(() => {});
+    const client: GcpKmsSdkClient = { encrypt: () => never, decrypt: () => never };
+    const kms = createGcpKmsClient(GCP_KEY, { client });
+    const controller = new AbortController();
+    const pending = kms.encryptDataKey(DATA_KEY, { signal: controller.signal });
+    setTimeout(() => controller.abort(), 10);
+    expect((await failure(pending)).code).toBe("MS_ABORTED");
+    const wrapped = { key: GCP_KEY, algorithm: GCP_KMS_ALGORITHM, ciphertext: DATA_KEY };
+    const signal = AbortSignal.abort();
+    expect((await failure(kms.decryptDataKey(wrapped, { signal }))).code).toBe("MS_ABORTED");
+  });
+
+  it("still maps failures normally when a signal is given but never fires", async () => {
+    const fake = new FakeKms();
+    fake.denied.add(GCP_KEY);
+    const kms = createGcpKmsClient(GCP_KEY, { client: fakeGcpSdkClient(fake) });
+    const error = await failure(
+      kms.encryptDataKey(DATA_KEY, { signal: new AbortController().signal }),
+    );
+    expect(error.code).toBe("MS_ENCRYPTION_FAILED");
+  });
+
   it("never closes a client it was given", async () => {
     const client = fakeGcpSdkClient(new FakeKms());
     const kms = createGcpKmsClient(GCP_KEY, { client });

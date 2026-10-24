@@ -251,6 +251,104 @@ describe("s3Storage", () => {
     });
   });
 
+  describe("lastModified after put", () => {
+    const serverTime = new Date("2026-10-24T05:56:17.000Z");
+
+    it("uses the local clock and sends no HEAD by default", async () => {
+      s3.on(PutObjectCommand).resolves({ ETag: '"e"' });
+      const before = Date.now();
+      const info = await storage().put("a", Buffer.from("x"));
+      expect(info.lastModified.getTime()).toBeGreaterThanOrEqual(before);
+      expect(s3.commandCalls(HeadObjectCommand)).toHaveLength(0);
+    });
+
+    it("reads the server's value for exactly the object written (If-Match on its ETag)", async () => {
+      s3.on(PutObjectCommand).resolves({ ETag: '"e1"' });
+      s3.on(HeadObjectCommand).resolves({ LastModified: serverTime, ContentLength: 1 });
+      const info = await storage({ exactLastModified: true }).put("a", Buffer.from("x"));
+      expect(info.lastModified).toEqual(serverTime);
+      expect(s3.commandCalls(HeadObjectCommand)[0]?.args[0].input).toEqual({
+        Bucket: "bkt",
+        Key: "base/a",
+        IfMatch: '"e1"',
+      });
+    });
+
+    it("names the version instead in versioned buckets, also for multipart uploads", async () => {
+      s3.on(CreateMultipartUploadCommand).resolves({ UploadId: "u" });
+      s3.on(UploadPartCommand).resolves({ ETag: '"p"' });
+      s3.on(CompleteMultipartUploadCommand).resolves({ ETag: '"c-2"', VersionId: "v7" });
+      s3.on(HeadObjectCommand).resolves({ LastModified: serverTime });
+      const body = Readable.from([Buffer.alloc(6 * MiB)]);
+      const info = await storage({ exactLastModified: true, partSize: 5 * MiB }).put("big", body);
+      expect(info.lastModified).toEqual(serverTime);
+      expect(s3.commandCalls(HeadObjectCommand)[0]?.args[0].input).toEqual({
+        Bucket: "bkt",
+        Key: "base/big",
+        VersionId: "v7",
+      });
+    });
+
+    it("falls back to the local clock when the HEAD fails or has no date", async () => {
+      s3.on(PutObjectCommand).resolves({});
+      s3.on(HeadObjectCommand).rejectsOnce(serviceError("PreconditionFailed", 412)).resolves({});
+      const adapter = storage({ exactLastModified: true });
+      const before = Date.now();
+      const first = await adapter.put("a", Buffer.from("x"));
+      const second = await adapter.put("a", Buffer.from("x"));
+      expect(first.lastModified.getTime()).toBeGreaterThanOrEqual(before);
+      expect(second.lastModified.getTime()).toBeGreaterThanOrEqual(before);
+      expect(s3.commandCalls(HeadObjectCommand)[1]?.args[0].input.IfMatch).toBeUndefined();
+    });
+
+    it("passes the signal to the HEAD and reports MS_ABORTED when it fires there", async () => {
+      const controller = new AbortController();
+      s3.on(PutObjectCommand).resolves({ ETag: '"e"' });
+      s3.on(HeadObjectCommand).callsFake(async () => {
+        controller.abort();
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      });
+      const error = await rejection(
+        storage({ exactLastModified: true }).put("a", Buffer.from("x"), {
+          signal: controller.signal,
+        }),
+      );
+      expect(isMongoShieldError(error, "MS_ABORTED")).toBe(true);
+      // The SDK types `args` as just the command; the send options come second.
+      expect(s3.commandCalls(HeadObjectCommand)[0]?.args).toEqual([
+        expect.anything(),
+        expect.objectContaining({ abortSignal: controller.signal }),
+      ]);
+    });
+
+    it("always reports the server's times from head() and list()", async () => {
+      s3.on(HeadObjectCommand).resolves({ LastModified: serverTime, ContentLength: 3 });
+      s3.on(ListObjectsV2Command).resolves({
+        Contents: [{ Key: "base/a", Size: 3, LastModified: serverTime }],
+      });
+      expect((await storage().head("a"))?.lastModified).toEqual(serverTime);
+      expect((await collect(storage().list("")))[0]?.lastModified).toEqual(serverTime);
+    });
+  });
+
+  describe("checksums on S3-compatible services", () => {
+    it("explains how to fix a multipart completion refused for missing part checksums", async () => {
+      s3.on(CreateMultipartUploadCommand).resolves({ UploadId: "u" });
+      s3.on(UploadPartCommand).resolves({ ETag: '"p"' });
+      s3.on(CompleteMultipartUploadCommand).rejects(
+        Object.assign(serviceError("BadRequest", 400), {
+          message:
+            "The upload was created using a crc32 checksum. The complete request must include the checksum for each part. It was missing for part 1 in the request.",
+        }),
+      );
+      s3.on(AbortMultipartUploadCommand).resolves({});
+      const body = Readable.from([Buffer.alloc(6 * MiB)]);
+      const error = await rejection(storage({ partSize: 5 * MiB }).put("big", body));
+      expect(isMongoShieldError(error, "MS_STORAGE_IO")).toBe(true);
+      expect(isMongoShieldError(error) && error.hint).toContain('"WHEN_REQUIRED"');
+    });
+  });
+
   describe("get", () => {
     it("requests the prefixed key and returns the body stream", async () => {
       s3.on(GetObjectCommand).resolves({ Body: streamingBody("hello") });
@@ -489,6 +587,131 @@ describe("s3Storage", () => {
     });
   });
 
+  describe("edge cases of responses and errors", () => {
+    it("skips listed keys and common prefixes outside the base prefix or not valid as keys", async () => {
+      s3.on(ListObjectsV2Command).resolves({
+        Contents: [{ Key: "elsewhere/a", Size: 1 }, { Key: undefined }, { Key: "base/ok" }],
+        CommonPrefixes: [{ Prefix: "base/a//" }, { Prefix: "elsewhere/" }, { Prefix: "base/b/" }],
+      });
+      const infos = await collect(storage().list(""));
+      expect(infos).toEqual([{ key: "ok", size: 0, lastModified: new Date(0) }]);
+      expect(await collect(storage().listPrefixes(""))).toEqual(["b/"]);
+    });
+
+    it("reports a GetObject response without a readable body as MS_STORAGE_IO", async () => {
+      s3.on(GetObjectCommand).resolves({});
+      const error = await rejection(storage().get("a"));
+      expect(isMongoShieldError(error, "MS_STORAGE_IO")).toBe(true);
+      expect(String(error)).toContain("no readable body");
+    });
+
+    it("describes per-key delete failures that lack a key, code or message", async () => {
+      s3.on(DeleteObjectsCommand).resolves({
+        Errors: [{ Code: undefined, Message: undefined, Key: "outside/x" }, {}],
+      });
+      const error = await rejection(storage().delete(["a", "b"]));
+      expect(isMongoShieldError(error, "MS_STORAGE_IO")).toBe(true);
+      expect(String(error)).toContain("outside/x (and 1 more)");
+      expect(String(error)).toContain("DeleteFailed: delete failed");
+    });
+
+    it("maps a rejected DeleteObjects request", async () => {
+      s3.on(DeleteObjectsCommand).rejects(serviceError("AccessDenied", 403));
+      const error = await rejection(storage().delete(["a"]));
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
+      expect(String(error)).toContain("s3://bkt/base/a");
+    });
+
+    it("maps values thrown without a name or an Error wrapper", async () => {
+      // Not an Error, and a name that is not a string: nothing about it can be trusted.
+      s3.on(HeadObjectCommand).rejects({ name: 42, message: "odd" } as unknown as Error);
+      const odd = await rejection(storage().head("a"));
+      expect(isMongoShieldError(odd, "MS_STORAGE_IO")).toBe(true);
+      s3.on(GetObjectCommand).callsFake(() => Promise.reject("plain string"));
+      const plain = await rejection(storage().get("a"));
+      expect(isMongoShieldError(plain, "MS_STORAGE_IO")).toBe(true);
+      expect(String(plain)).toContain("plain string");
+    });
+
+    it("maps an SDK AbortError to MS_ABORTED even without a signal", async () => {
+      s3.on(HeadObjectCommand).rejects(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      const error = await rejection(storage().head("a"));
+      expect(isMongoShieldError(error, "MS_ABORTED")).toBe(true);
+    });
+
+    it("reports a head without a size as size 0", async () => {
+      s3.on(HeadObjectCommand).resolves({ LastModified: new Date(5) });
+      expect(await storage().head("a")).toEqual({ key: "a", size: 0, lastModified: new Date(5) });
+    });
+
+    it("counts string chunks of a streamed body as UTF-8 bytes", async () => {
+      s3.on(PutObjectCommand).resolves({ ETag: '"e"' });
+      const info = await storage().put("s", Readable.from(["héllo"], { objectMode: true }));
+      expect(info.size).toBe(6);
+    });
+
+    it("rejects a non-integer queue size", () => {
+      expect(() => storage({ queueSize: 1.5 })).toThrow(
+        expect.objectContaining({ code: "MS_CONFIG_INVALID" }),
+      );
+    });
+  });
+
+  describe("clients the adapter creates", () => {
+    // mockClient on the class mocks every instance, including ones built inside the adapter.
+    let classMock: ReturnType<typeof mockClient>;
+
+    beforeEach(() => {
+      classMock = mockClient(S3Client);
+      classMock.on(HeadObjectCommand).resolves({ ContentLength: 1 });
+    });
+
+    afterEach(() => {
+      classMock.restore();
+    });
+
+    /** The config of the S3Client that sent the first request. */
+    async function createdConfig(options: Omit<S3StorageOptions, "bucket">) {
+      const adapter = s3Storage({
+        bucket: "bkt",
+        credentials: { accessKeyId: "a", secretAccessKey: "b" },
+        ...options,
+      });
+      await adapter.head("a");
+      const created = classMock.send.getCall(0).thisValue;
+      await adapter.close?.();
+      if (!(created instanceof S3Client)) throw new Error("no client was created");
+      return created.config;
+    }
+
+    it("uses us-east-1 with a custom endpoint and no region", async () => {
+      const config = await createdConfig({
+        endpoint: "http://localhost:9000",
+        forcePathStyle: true,
+      });
+      expect(await config.region()).toBe("us-east-1");
+      expect(config.forcePathStyle).toBe(true);
+    });
+
+    it("uses the configured region", async () => {
+      const config = await createdConfig({ region: "eu-central-1" });
+      expect(await config.region()).toBe("eu-central-1");
+    });
+
+    it("passes requestChecksumCalculation to the client", async () => {
+      const config = await createdConfig({
+        region: "eu-central-1",
+        requestChecksumCalculation: "WHEN_REQUIRED",
+      });
+      expect(await config.requestChecksumCalculation()).toBe("WHEN_REQUIRED");
+    });
+
+    it("keeps the SDK default checksum mode otherwise", async () => {
+      const config = await createdConfig({ region: "eu-central-1" });
+      expect(await config.requestChecksumCalculation()).toBe("WHEN_SUPPORTED");
+    });
+  });
+
   describe("object lock (immutable backups)", () => {
     const retainUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
@@ -595,6 +818,17 @@ describe("s3Storage", () => {
       const failure = await rejection(storage().put("a", Buffer.from("x"), { retainUntil }));
       expect(isMongoShieldError(failure, "MS_CONFIG_INVALID"), String(failure)).toBe(true);
       expect(s3.commandCalls(PutObjectCommand)).toHaveLength(1);
+    });
+
+    it("also skips the check on a bare 403 and on unnamed errors it cannot classify", async () => {
+      s3.on(GetObjectLockConfigurationCommand).rejectsOnce(serviceError("Weird", 403));
+      s3.on(PutObjectCommand).resolves({ ETag: '"e"' });
+      await storage().put("a", Buffer.from("x"), { retainUntil });
+      expect(s3.commandCalls(PutObjectCommand)).toHaveLength(1);
+
+      s3.on(GetObjectLockConfigurationCommand).rejects(serviceError("InternalError", 500));
+      const failure = await rejection(storage().put("b", Buffer.from("x"), { retainUntil }));
+      expect(isMongoShieldError(failure, "MS_STORAGE_IO")).toBe(true);
     });
 
     it("rejects a retainUntil in the past without sending anything", async () => {

@@ -80,6 +80,15 @@ describe("fakeValue", () => {
     const binary = new Binary(Buffer.from(new BSON.UUID().buffer), 4);
     const fake = fakeValue(binary, "uuid", keys);
     expect(fake instanceof Binary && fake.sub_type).toBe(4);
+    // Legacy UUIDs (subtype 3, written by older drivers) stay legacy UUIDs.
+    const legacy = fakeValue(new Binary(Buffer.from(new BSON.UUID().buffer), 3), "uuid", keys);
+    expect(legacy instanceof Binary && legacy.sub_type).toBe(3);
+    expect(fakeValue(new Binary(Buffer.alloc(16), 0), "uuid", keys)).toBe(UNSUPPORTED);
+  });
+
+  it("makes phone numbers for inputs without digits, and IPv6 addresses for IPv6 inputs", () => {
+    expect(String(fakeValue("ask reception", "phone", keys))).toMatch(/^555-01\d\d$/);
+    expect(String(fakeValue("::1", "ip", keys))).toMatch(/^2001:db8:/);
   });
 
   it("shifts dates by whole days within the limit, never by zero", () => {

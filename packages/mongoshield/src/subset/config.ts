@@ -20,7 +20,8 @@
  *   filter                       the documents matching the filter
  *   followed (a `to` side)       only the documents some copied document references
  *   filter AND followed          both: the filtered documents plus the referenced ones,
- *                                so references from elsewhere never dangle
+ *                                so references from elsewhere never dangle (not for
+ *                                time series: see `assertTimeSeriesSelectedOnce`)
  *
  * References are followed transitively (orders → users → companies) and may form
  * cycles (users.managerId → users._id); every value is followed once.
@@ -123,6 +124,7 @@ export function compileSubset(
     throw subsetError(`batchSize must be a whole number from 1 to ${MAX_FOLLOW_BATCH_SIZE}`);
   }
 
+  assertTimeSeriesSelectedOnce(filters, follows, byNs);
   const followed = new Set(follows.map((follow) => follow.to.ns));
   return {
     filters,
@@ -137,6 +139,44 @@ export function compileSubset(
       return follows.filter((follow) => follow.from.ns === ns);
     },
   };
+}
+
+/**
+ * A time series collection may be selected in ONE way: by a filter, or by references
+ * to one field. Its measurements have no unique `_id` (time series have no `_id`
+ * index), so the target cannot refuse a measurement that arrives twice, as it does
+ * for ordinary collections, and a measurement both matched by the filter and
+ * referenced, or referenced through two different fields, would be copied twice.
+ *
+ * Deduplicating by some measurement identity is not an option: none exists. Two
+ * measurements may legitimately be byte-for-byte identical, and both must be copied.
+ * (Within one field, `copy` also stops when a referenced measurement holds several
+ * values there, for the same reason.)
+ */
+function assertTimeSeriesSelectedOnce(
+  filters: ReadonlyMap<string, Document>,
+  follows: readonly CompiledFollow[],
+  byNs: ReadonlyMap<string, SubsetNamespace>,
+): void {
+  const pathsByNs = new Map<string, Set<string>>();
+  for (const follow of follows) {
+    if (byNs.get(follow.to.ns)?.type !== "timeseries") continue;
+    const paths = pathsByNs.get(follow.to.ns) ?? new Set<string>();
+    paths.add(follow.to.path);
+    pathsByNs.set(follow.to.ns, paths);
+  }
+  for (const [ns, paths] of pathsByNs) {
+    if (filters.has(ns)) {
+      throw subsetError(
+        `the time series "${ns}" has a filter AND is followed into; its measurements have no unique _id, so one matched by the filter and referenced would be copied twice. Select it either way, not both (e.g. move the filter's condition to the collections that reference it)`,
+      );
+    }
+    if (paths.size > 1) {
+      throw subsetError(
+        `the time series "${ns}" is followed into through several fields (${[...paths].join(", ")}); its measurements have no unique _id, so one referenced through two fields would be copied twice. Follow it through one field`,
+      );
+    }
+  }
 }
 
 function compileFilters(

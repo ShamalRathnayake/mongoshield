@@ -25,8 +25,15 @@ import {
 
 const tempDirectory = useTempDirectories();
 
-/** Namespaces of the fixture database that a MongoShield backup can hold. */
-const IMPORTABLE = ["app.capped", "app.empty", "app.users", "app.v1", "app.we/ird name+x~é"];
+/** Namespaces of the fixture database (all of them: time series are unpacked). */
+const IMPORTABLE = [
+  "app.capped",
+  "app.empty",
+  "app.ts",
+  "app.users",
+  "app.v1",
+  "app.we/ird name+x~é",
+];
 
 async function fixtureDocuments(file: string): Promise<Buffer[]> {
   return splitBson(await readFile(fixturePath(`dump/app/${file}`)));
@@ -62,11 +69,19 @@ describe("importMongodump from a dump directory", () => {
     expect(manifest.namespaces.find((entry) => entry.ns === "app.users")?.documents).toBe(2);
   });
 
-  it("skips time-series and system collections, saying why", async () => {
-    const result = await importMongodump({ directory: fixturePath("dump") }, memoryStorage());
-    const skipped = new Map(result.skipped.map((item) => [item.ns, item.reason]));
-    expect(skipped.get("app.ts")).toContain("time-series");
-    expect(skipped.get("app.system.buckets.ts")).toContain("bucket");
+  it("unpacks a time-series collection's buckets into the measurements find returns", async () => {
+    const storage = memoryStorage();
+    const result = await importMongodump({ directory: fixturePath("dump") }, storage);
+    expect(result.skipped).toEqual([]);
+    const entry = result.manifest.namespaces.find((candidate) => candidate.ns === "app.ts");
+    expect(entry?.type).toBe("timeseries");
+    const measurements = await storedDocuments(storage, result.manifest, "app.ts");
+    // Two version 1 buckets of one measurement each: time first, then meta, then the rest.
+    expect(measurements.map((measurement) => Object.keys(BSON.deserialize(measurement)))).toEqual([
+      ["t", "m", "v", "_id"],
+      ["t", "m", "v", "_id"],
+    ]);
+    expect(measurements.map((measurement) => BSON.deserialize(measurement).v)).toEqual([2, 3]);
   });
 
   it("reads gzipped dumps (mongodump --gzip) the same way", async () => {
@@ -113,6 +128,7 @@ describe("importMongodump from a dump directory", () => {
     });
     expect(result.manifest.namespaces.map((entry) => entry.ns)).toEqual([
       "app.empty",
+      "app.ts",
       "app.users",
       "app.we/ird name+x~é",
     ]);

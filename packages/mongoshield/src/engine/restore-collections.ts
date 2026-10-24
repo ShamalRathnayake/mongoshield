@@ -17,9 +17,14 @@
  * nothing of its own (it would, for example, create extra collections for
  * `encryptedFields`). A few options are removed because `create` rejects them
  * on current servers; see `REJECTED_CREATE_OPTIONS`.
+ *
+ * Option values are sent in their stored field order (src/format/field-order.ts):
+ * a validator, a view pipeline or a clustered index key read from metadata or a
+ * change event may hold integer-like field names that JavaScript lists first.
  */
 
 import { type Db, type Document, MongoServerError, type WriteConcernSettings } from "mongodb";
+import { valueInStoredOrder } from "../format/field-order.ts";
 
 /**
  * Options `listCollections` may report that `create` refuses, so they are removed:
@@ -66,7 +71,12 @@ export async function createNamespace(
   options: Document,
   writeConcern: WriteConcernSettings | undefined,
 ): Promise<void> {
-  await db.command({ create: name, ...options, ...commandWriteConcern(writeConcern) });
+  // Each option value in stored order (Maps where needed); the command itself stays a
+  // plain object, which the driver adds its own fields to.
+  const ordered: Document = {};
+  for (const [option, value] of Object.entries(options))
+    ordered[option] = valueInStoredOrder(value);
+  await db.command({ create: name, ...ordered, ...commandWriteConcern(writeConcern) });
 }
 
 /**

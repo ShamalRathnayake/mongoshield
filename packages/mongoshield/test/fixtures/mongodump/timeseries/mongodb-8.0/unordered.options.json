@@ -1,0 +1,1 @@
+{"timeseries":{"timeField":"t","granularity":"seconds","bucketMaxSpanSeconds":{"$numberInt":"3600"}}}

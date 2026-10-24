@@ -4,7 +4,9 @@
  *
  *   journal start    the writer, a long-running process (a container, a systemd
  *                    service, a Kubernetes Deployment with ONE replica). It records every
- *                    change into segments next to the backups. On SIGTERM or Ctrl-C it
+ *                    change into segments next to the backups. Segment length, size and
+ *                    the gap policy come from the config's `journal` section, which the
+ *                    flags override (`journalSettings`). On SIGTERM or Ctrl-C it
  *                    closes and commits the current segment, releases its lease and
  *                    exits 0. A second Ctrl-C exits immediately (nothing committed is
  *                    lost; the next writer resumes after the last commit).
@@ -16,7 +18,13 @@
 import type { MongoShieldConfig } from "../../config/schema.ts";
 import { formatClusterTime } from "../../engine/converge-time.ts";
 import { MongoShieldError } from "../../errors.ts";
-import { type JournalStatus, journalStatus, startJournal } from "../../journal/index.ts";
+import {
+  DEFAULT_SEGMENT_BYTES,
+  DEFAULT_SEGMENT_SECONDS,
+  type JournalStatus,
+  journalStatus,
+  startJournal,
+} from "../../journal/index.ts";
 import { describeTime } from "../../journal/plan.ts";
 import { dateOfClusterTime } from "../../journal/time.ts";
 import { openConnection } from "../../mongo/index.ts";
@@ -74,19 +82,19 @@ export const journalCommand: CommandSpec = {
     "segment-seconds": {
       type: "string",
       valueName: "<n>",
-      defaultText: "300",
+      defaultText: "config journal.segmentSeconds, else 300",
       description: "Close a segment after this many seconds (the normal worst-case RPO)",
     },
     "segment-size": {
       type: "string",
       valueName: "<size>",
-      defaultText: "64MiB",
+      defaultText: "config journal.segmentBytes, else 64MiB",
       description: "…or once it holds this much change data",
     },
     "on-gap": {
       type: "string",
       choices: ["backup", "fail"],
-      defaultText: "backup",
+      defaultText: "config journal.onGap, else backup",
       description: "When change history is lost: take a new base backup, or stop",
     },
     heartbeat: {
@@ -157,8 +165,7 @@ async function runStart(context: CommandContext): Promise<number> {
     }
     const include = listOrUndefined(context, "include") ?? config.backup?.include;
     const exclude = listOrUndefined(context, "exclude") ?? config.backup?.exclude;
-    const segmentSeconds = flags.integer("segment-seconds", { min: 1, max: 86_400 });
-    const segmentBytes = segmentSizeFlag(flags.string("segment-size"));
+    const { segmentSeconds, segmentBytes, onGap } = journalSettings(context, config.journal);
     const webhookSecret = context.io.env[WEBHOOK_SECRET_ENV];
     if (webhookSecret) context.addSecret(webhookSecret);
     const heartbeat = flags.string("heartbeat");
@@ -166,6 +173,9 @@ async function runStart(context: CommandContext): Promise<number> {
     const connection = await openConnection({ uri: sourceUri }, { logger });
     try {
       out.info(`Journaling ${displayUri(sourceUri)} → ${storageLabel}`);
+      out.info(
+        `Segments close after ${formatDuration(segmentSeconds * 1000)} or ${formatBytes(segmentBytes)}; on a gap in the change history: ${onGap === "fail" ? "stop" : "take a new base backup"}.`,
+      );
       const journal = await startJournal({
         client: connection.client,
         storage: shield.storage,
@@ -175,7 +185,7 @@ async function runStart(context: CommandContext): Promise<number> {
         exclude,
         segmentSeconds,
         segmentBytes,
-        onGap: flags.string("on-gap") === "fail" ? "fail" : "backup",
+        onGap,
         takeBaseBackup: (signal) =>
           shield.backup({
             consistency: "converge",
@@ -316,6 +326,38 @@ function printStatus(context: CommandContext, status: JournalStatus, storageLabe
       ),
     );
   }
+}
+
+/** The writer's segment and gap settings. */
+export interface JournalCliSettings {
+  readonly segmentSeconds: number;
+  readonly segmentBytes: number;
+  readonly onGap: "backup" | "fail";
+}
+
+/**
+ * Segment length, segment size and the gap policy: each flag wins over the config
+ * file's `journal` section, which wins over the library defaults.
+ *
+ * @throws MongoShieldError `MS_CONFIG_INVALID` for malformed flags.
+ */
+export function journalSettings(
+  context: Pick<CommandContext, "flags">,
+  config: MongoShieldConfig["journal"],
+): JournalCliSettings {
+  const { flags } = context;
+  const onGapFlag = flags.string("on-gap");
+  return {
+    segmentSeconds:
+      flags.integer("segment-seconds", { min: 1, max: 86_400 }) ??
+      config?.segmentSeconds ??
+      DEFAULT_SEGMENT_SECONDS,
+    segmentBytes:
+      segmentSizeFlag(flags.string("segment-size")) ??
+      config?.segmentBytes ??
+      DEFAULT_SEGMENT_BYTES,
+    onGap: onGapFlag === "fail" || onGapFlag === "backup" ? onGapFlag : (config?.onGap ?? "backup"),
+  };
 }
 
 /**

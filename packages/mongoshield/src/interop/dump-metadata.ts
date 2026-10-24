@@ -10,11 +10,16 @@
  *   file name or prelude entry, which is authoritative anyway;
  * - no `type` (old mongodump): inferred from the options the way mongorestore
  *   does (`viewOn` means a view, `timeseries` a time-series collection).
+ *
+ * The JSON is parsed and re-written with the order-keeping Extended JSON functions
+ * (src/format/ordered-json.ts), so index keys and validators keep the field order
+ * mongodump wrote, integer-like field names included.
  */
 
-import { BSON, type Document } from "mongodb";
+import type { Document } from "mongodb";
 import { MongoShieldError } from "../errors.ts";
 import { type CollectionMetadata, parseCollectionMetadata } from "../format/metadata.ts";
+import { parseExtendedJson, stringifyExtendedJson } from "../format/ordered-json.ts";
 
 /**
  * Parses mongodump metadata for the collection `collection`.
@@ -42,7 +47,7 @@ export function parseDumpMetadata(
     ...(raw.type === undefined ? { type: inferType(options) } : {}),
   };
   // Hand the completed document to the strict parser, which validates every field.
-  return parseCollectionMetadata(BSON.EJSON.stringify(completed, { relaxed: false }), where);
+  return parseCollectionMetadata(stringifyExtendedJson(completed, { relaxed: false }), where);
 }
 
 /** The collection name a metadata file records, if any (needed for shortened file names). */
@@ -63,14 +68,16 @@ function inferType(options: unknown): string {
 function parseObject(text: string, where: string): Document {
   let value: unknown;
   try {
-    value = BSON.EJSON.parse(text, { relaxed: false });
+    value = parseExtendedJson(text, { relaxed: false });
   } catch (error) {
     throw new MongoShieldError("MS_INTEGRITY_FAILED", `${where} is not valid Extended JSON.`, {
       cause: error,
       hint: "The metadata file of the dump is damaged; re-run mongodump.",
     });
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  // EJSON turns a bare number into an Int32 or Double object: a value, not a document.
+  const isValue = typeof value === "object" && value !== null && "_bsontype" in value;
+  if (typeof value !== "object" || value === null || Array.isArray(value) || isValue) {
     throw new MongoShieldError("MS_INTEGRITY_FAILED", `${where} is not a JSON object.`, {
       hint: "The metadata file of the dump is damaged; re-run mongodump.",
     });

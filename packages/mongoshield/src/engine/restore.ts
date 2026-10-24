@@ -4,14 +4,17 @@
  *   1. plan          select the backup, filter, rename, inspect targets, pick actions
  *                    (`restore-plan.ts`); conflicts stop here with MS_RESTORE_CONFLICT
  *   2. pre-flight    keys present (MS_NO_IDENTITY), every metadata file read and
- *                    decrypted (proves the key works), privileges checked.
+ *                    decrypted (proves the key works), privileges checked, and with
+ *                    `verifyFirst` every data file checksummed (restore-verify-first.ts).
  *                    Nothing has been written yet; a dry run stops here.
  *   3. collections   `parallelism` collections at once, each: drop? → create with its
  *                    options → load documents with `insertWorkers` workers → indexes
  *                    Converge backups (manifest `changes`): every collection's documents
  *                    first, then the change events of the backup window are replayed
- *                    (converge-replay.ts), then the indexes are built.
- *   4. views         last, in dependency order, `viewOn` adjusted for renames
+ *                    (converge-replay.ts), then the indexes are built: the dumped
+ *                    ones, then the index changes of the window (converge-indexes.ts).
+ *   4. views         last, in dependency order, `viewOn` and the collections their
+ *                    pipelines read adjusted for renames (restore-views.ts)
  *   5. users/roles   only with `usersAndRoles` "create" / "replace" (restore-authz.ts)
  *
  * Safety: the default mode never touches existing data, every failure before step 3
@@ -28,7 +31,7 @@ import {
   type WriteConcernSettings,
 } from "mongodb";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
-import type { ChangesFile, ClusterTime } from "../format/manifest.ts";
+import type { ChangesFile, ClusterTime, StoredFile } from "../format/manifest.ts";
 import type { CollectionMetadata } from "../format/metadata.ts";
 import type { Logger } from "../logger.ts";
 import {
@@ -44,6 +47,7 @@ import { ATTRIBUTES, ENGINE_SPANS } from "../telemetry/names.ts";
 import type { Telemetry } from "../telemetry/telemetry.ts";
 import type { RestoreOptions, RestoreResult, SearchIndexRef } from "../types.ts";
 import type { RestoreContext } from "./context.ts";
+import { applyIndexChanges } from "./converge-indexes.ts";
 import { replayChanges } from "./converge-replay.ts";
 import {
   type ChangeWindowSummary,
@@ -72,6 +76,8 @@ import {
 } from "./restore-plan.ts";
 import { compileRenameMap, type NamespaceMapper } from "./restore-rename.ts";
 import { restoreSearchIndexes } from "./restore-search-indexes.ts";
+import { verifyBeforeWriting } from "./restore-verify-first.ts";
+import { renameView } from "./restore-views.ts";
 
 export { planRestore } from "./restore-plan.ts";
 
@@ -187,6 +193,16 @@ export async function runRestore(
     items,
     replay !== undefined,
   );
+  // verifyFirst: every data file to be read is checksummed now, so a file damaged
+  // late in a large collection cannot stop the restore halfway (restore-verify-first.ts).
+  if (options.verifyFirst === true) {
+    await verifyBeforeWriting({
+      source,
+      files: filesToRead(items, replay),
+      logger: context.logger,
+      signal: options.signal,
+    });
+  }
 
   if (options.dryRun === true) {
     context.logger.info("Dry run: nothing was written", { backupId: plan.backupId });
@@ -286,6 +302,20 @@ async function readAllMetadata(
     }),
     { concurrency: METADATA_READ_CONCURRENCY, signal },
   );
+}
+
+/** The data files (and changes file) the restore will read: what `verifyFirst` checks. */
+function filesToRead(
+  items: readonly RestoreItem[],
+  replay: PlannedReplay | undefined,
+): StoredFile[] {
+  const files: StoredFile[] = [];
+  for (const item of items) {
+    if (item.planned.entry.action === "skip") continue;
+    files.push(...item.planned.source.files);
+  }
+  if (replay !== undefined) files.push(replay.file);
+  return files;
 }
 
 /**
@@ -484,6 +514,17 @@ async function restoreConverged(
       }),
     { concurrency: limits.parallelism, signal },
   );
+
+  // Index changes made during the window, on top of the dumped indexes; for
+  // collections created during the window they are the only ones (converge-indexes.ts).
+  if (run.options.skipIndexes === true) return;
+  for (const [target, plan] of result.indexChanges) {
+    throwIfAborted(signal);
+    await applyIndexChanges(run.client, target, plan, {
+      writeConcern: run.writeConcern,
+      logger: run.logger,
+    });
+  }
 }
 
 /**
@@ -664,7 +705,7 @@ function orderViews(items: readonly RestoreItem[]): RestoreItem[] {
   return ordered;
 }
 
-/** Recreates one view, reading from the (possibly renamed) source collection. */
+/** Recreates one view, reading from the (possibly renamed) source collections. */
 async function restoreView(run: RestoreRun, item: RestoreItem): Promise<void> {
   const { entry } = item.planned;
   const { database, collection } = splitNamespace(entry.to);
@@ -672,16 +713,10 @@ async function restoreView(run: RestoreRun, item: RestoreItem): Promise<void> {
   run.inProgress.add(entry.to);
   run.tracker.startNamespace(entry.to, 0);
 
-  const options = createOptionsFrom(item.metadata.options);
-  const viewOn = viewSourceAfterRename(run, item, options.viewOn);
+  const options = viewOptionsAfterRename(run, item, createOptionsFrom(item.metadata.options));
   await inStep(entry.to, "Creating the view", async () => {
     if (entry.action === "drop-and-create") await dropNamespace(db, collection, run.writeConcern);
-    await createNamespace(
-      db,
-      collection,
-      viewOn === undefined ? options : withViewSource(options, viewOn),
-      run.writeConcern,
-    );
+    await createNamespace(db, collection, options, run.writeConcern);
   });
 
   run.tracker.finishNamespace(entry.to, 0, 0);
@@ -690,30 +725,36 @@ async function restoreView(run: RestoreRun, item: RestoreItem): Promise<void> {
 }
 
 /**
- * `viewOn` names a collection in the view's own database. When the rename rules
- * moved that collection, the view follows it, as long as it stays in the same
- * database as the view (a view cannot read from another database).
+ * `viewOn` and the collections the pipeline reads (`$lookup`, `$graphLookup`,
+ * `$unionWith`, …) follow the rename rules, as long as they stay in the view's
+ * database (a view cannot read from another database); see restore-views.ts.
+ * References that cannot follow keep their old name, with a warning.
  */
-function viewSourceAfterRename(
-  run: RestoreRun,
-  item: RestoreItem,
-  viewOn: unknown,
-): string | undefined {
-  if (typeof viewOn !== "string") return undefined;
+function viewOptionsAfterRename(run: RestoreRun, item: RestoreItem, options: Document): Document {
   const { entry, source } = item.planned;
-  const renamedSource = splitNamespace(run.renameMapper(`${source.db}.${viewOn}`));
-  const viewDatabase = splitNamespace(entry.to).database;
-  if (renamedSource.database === viewDatabase) return renamedSource.collection;
-
-  run.logger.warn(
-    "A view's source was renamed into another database; the view keeps its old source name",
+  const renamed = renameView(
+    { viewOn: options.viewOn, pipeline: options.pipeline },
     {
-      view: entry.to,
-      viewOn,
-      sourceRestoredTo: `${renamedSource.database}.${renamedSource.collection}`,
+      sourceDatabase: source.db,
+      targetDatabase: splitNamespace(entry.to).database,
+      rename: run.renameMapper,
     },
   );
-  return viewOn;
+  for (const reference of renamed.unfollowed) {
+    run.logger.warn(
+      "A view's source was renamed into another database; the view keeps its old source name",
+      {
+        view: entry.to,
+        field: reference.field,
+        source: reference.collection,
+        sourceRestoredTo: reference.restoredTo,
+      },
+    );
+  }
+  const result =
+    typeof renamed.viewOn === "string" ? withViewSource(options, renamed.viewOn) : { ...options };
+  if (options.pipeline !== undefined) result.pipeline = renamed.pipeline;
+  return result;
 }
 
 // ---------------------------------------------------------------------------

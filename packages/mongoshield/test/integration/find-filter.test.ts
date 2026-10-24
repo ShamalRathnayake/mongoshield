@@ -2,9 +2,11 @@
 // exactly the documents that `collection.find(filter)` selects on a real server, for
 // random documents and random filters built from the supported operators.
 //
-// Documents are read back as raw BSON and deserialized like a backup's documents
-// (LOSSLESS_DESERIALIZE_OPTIONS), so the evaluator sees Int32 / Long / Double /
-// Decimal128 objects exactly as find() over a backup would.
+// Documents are read back as raw BSON and parsed like a backup's documents
+// (parseBackedUpDocument: lossless, with stored field order), so the evaluator sees
+// Int32 / Long / Double / Decimal128 objects exactly as find() over a backup would.
+// Stored documents are built from Maps, so embedded documents can hold integer-like
+// field names ("0", "1") in an order JavaScript objects cannot represent.
 
 import fc from "fast-check";
 import {
@@ -24,13 +26,13 @@ import {
 } from "mongodb";
 import { describe, expect, it } from "vitest";
 import { compileFilter } from "../../src/engine/filter.ts";
-import { LOSSLESS_DESERIALIZE_OPTIONS } from "../../src/format/bson-stream.ts";
+import { parseBackedUpDocument } from "../../src/engine/find-parse.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 
 const client = useMongoClient();
 
 /** Each run inserts up to 25 random documents and compares 10 random filters. */
-const PROPERTY_RUNS = Number(process.env.FIND_PROPERTY_RUNS ?? 150);
+const PROPERTY_RUNS = Number(process.env.FIND_PROPERTY_RUNS ?? 500);
 
 // ---------------------------------------------------------------------------
 // Generators
@@ -55,6 +57,8 @@ const scalars: readonly unknown[] = [
   Decimal128.fromString("-Infinity"),
   "",
   "a",
+  "a\nb",
+  "a b",
   "ab",
   "b",
   "B",
@@ -82,19 +86,45 @@ const scalars: readonly unknown[] = [
 ];
 
 const scalar = fc.constantFrom(...scalars);
-const fieldName = fc.constantFrom("a", "b", "c");
+const fieldName = fc.constantFrom("a", "b", "c", "0", "1");
 
-/** Values nested at most two levels deep: scalars, arrays and small documents. */
-const value: fc.Arbitrary<unknown> = fc.letrec<{ value: unknown }>((tie) => ({
+/** Up to three fields with distinct names, in random order. */
+function fields(child: fc.Arbitrary<unknown>): fc.Arbitrary<[string, unknown][]> {
+  return fc.uniqueArray(fc.tuple(fieldName, child), {
+    maxLength: 3,
+    selector: ([name]) => name,
+  });
+}
+
+/**
+ * Stored values nested at most two levels deep: scalars, arrays and small documents.
+ * Documents are Maps, so their field order is kept as generated (JavaScript objects
+ * would move "0" and "1" first).
+ */
+const storedValue: fc.Arbitrary<unknown> = fc.letrec<{ value: unknown }>((tie) => ({
   value: fc.oneof(
     { depthSize: "small", withCrossShrink: true },
     { arbitrary: scalar, weight: 4 },
     { arbitrary: fc.array(tie("value"), { maxLength: 3 }), weight: 2 },
-    { arbitrary: fc.dictionary(fieldName, tie("value"), { maxKeys: 3 }), weight: 2 },
+    { arbitrary: fields(tie("value")).map((entries) => new Map(entries)), weight: 2 },
   ),
 })).value;
 
-const documentBody = fc.dictionary(fieldName, value, { maxKeys: 3 });
+/** A stored value as a filter operand: Maps become plain objects (JavaScript order). */
+function asOperand(stored: unknown): unknown {
+  if (stored instanceof Map) {
+    const operand: Document = {};
+    for (const [name, child] of stored) operand[String(name)] = asOperand(child);
+    return operand;
+  }
+  if (Array.isArray(stored)) return stored.map((element: unknown) => asOperand(element));
+  return stored;
+}
+
+/** Filter operands: the same shapes, as hand-written filters hold them. */
+const value: fc.Arbitrary<unknown> = storedValue.map(asOperand);
+
+const documentBody = fields(storedValue);
 
 const path = fc.constantFrom(
   "a",
@@ -108,6 +138,10 @@ const path = fc.constantFrom(
   "a.0.b",
   "b.a",
   "a.b.0",
+  "0",
+  "1",
+  "a.1.0",
+  "0.a",
 );
 
 const comparison = fc.constantFrom("$eq", "$ne", "$gt", "$gte", "$lt", "$lte");
@@ -131,7 +165,26 @@ const typeName = fc.constantFrom(
   "minKey",
   "maxKey",
 );
-const regexPattern = fc.constantFrom("^a", "b", ".", "^$", "é", "^.$", "A", "a|b");
+const regexPattern = fc.constantFrom(
+  "^a",
+  "b",
+  ".",
+  "^$",
+  "é",
+  "^.$",
+  "A",
+  "a|b",
+  "^a.b$",
+  "^b",
+  "a b",
+  "^ a # comment",
+  "a\\ b",
+  "[ ]",
+  "(?i)^A",
+  "\\Aa",
+  "b\\z",
+);
+const regexOptions = fc.constantFrom("", "i", "x", "s", "m", "ix", "sx", "ms");
 
 /** One operator applied to a field: `{ $gt: 1 }`, `{ $in: [...] }`, … */
 const fieldOperators: fc.Arbitrary<Document> = fc.letrec<{ operators: Document }>((tie) => ({
@@ -144,7 +197,7 @@ const fieldOperators: fc.Arbitrary<Document> = fc.letrec<{ operators: Document }
     typeName.map((type) => ({ $type: type })),
     fc.array(typeName, { minLength: 1, maxLength: 2 }).map((types) => ({ $type: types })),
     fc
-      .tuple(regexPattern, fc.constantFrom("", "i"))
+      .tuple(regexPattern, regexOptions)
       .map(([pattern, options]) =>
         options === "" ? { $regex: pattern } : { $regex: pattern, $options: options },
       ),
@@ -162,7 +215,9 @@ const fieldOperators: fc.Arbitrary<Document> = fc.letrec<{ operators: Document }
         },
       )
       .map((items) => ({ $in: items })),
-    regexPattern.map((pattern) => ({ $not: new BSONRegExp(pattern, "i") })),
+    fc
+      .tuple(regexPattern, regexOptions)
+      .map(([pattern, options]) => ({ $not: new BSONRegExp(pattern, options) })),
     fc
       .tuple(comparison, scalar, comparison, scalar)
       .map(([first, low, second, high]) => ({ $elemMatch: { [first]: low, [second]: high } })),
@@ -229,9 +284,7 @@ async function storedDocuments(database: string, collectionName: string): Promis
     .collection(collectionName)
     .find({}, { raw: true })
     .toArray();
-  return raw.map((bytes) =>
-    BSON.deserialize(bytes as unknown as Uint8Array, LOSSLESS_DESERIALIZE_OPTIONS),
-  );
+  return raw.map((bytes) => parseBackedUpDocument(bytes as unknown as Uint8Array));
 }
 
 function evaluatorMatches(documents: readonly Document[], query: Document): number[] {
@@ -255,9 +308,14 @@ describe("filter evaluator vs. the server", () => {
         async (bodies, queries) => {
           const collection = client().db(database).collection(collectionName);
           await collection.deleteMany({});
-          await collection.insertMany(
-            bodies.map((body, index): Document => ({ ...body, _id: index })),
-          );
+          // The raw insert command keeps each Map's field order (insertMany would add
+          // an _id property the serializer cannot see on a Map).
+          await client()
+            .db(database)
+            .command({
+              insert: collectionName,
+              documents: bodies.map((body, index) => new Map([["_id", index], ...body])),
+            });
           const documents = await storedDocuments(database, collectionName);
 
           for (const query of queries) {
@@ -276,5 +334,74 @@ describe("filter evaluator vs. the server", () => {
       { numRuns: PROPERTY_RUNS },
     );
     expect(compared).toBeGreaterThan(PROPERTY_RUNS * 7);
-  }, 300_000);
+  }, 900_000);
+});
+
+describe("filter evaluator vs. the server: stored field order", () => {
+  it("compares embedded documents with integer-like field names in stored order", async () => {
+    const database = uniqueDb("filterorder");
+    const collectionName = "docs";
+    const stored = [
+      new Map<string, unknown>([
+        ["_id", 0],
+        [
+          "a",
+          new Map<string, unknown>([
+            ["b", 1],
+            ["0", 2],
+          ]),
+        ],
+      ]),
+      new Map<string, unknown>([
+        ["_id", 1],
+        [
+          "a",
+          new Map<string, unknown>([
+            ["0", 2],
+            ["b", 1],
+          ]),
+        ],
+      ]),
+      new Map<string, unknown>([
+        ["_id", 2],
+        [
+          "a",
+          [
+            new Map<string, unknown>([
+              ["1", "x"],
+              ["0", "y"],
+            ]),
+          ],
+        ],
+      ]),
+      new Map<string, unknown>([
+        ["_id", 3],
+        [
+          "a",
+          new Map<string, unknown>([
+            ["10", 1],
+            ["9", 1],
+          ]),
+        ],
+      ]),
+    ];
+    await client().db(database).command({ insert: collectionName, documents: stored });
+    const documents = await storedDocuments(database, collectionName);
+
+    const filters: Document[] = [
+      { a: { b: 1, "0": 2 } },
+      { a: { "0": 2, b: 1 } },
+      { a: { $gt: { "0": 2, b: 0 } } },
+      { a: { $lt: { b: 1, "0": 3 } } },
+      { a: { $in: [{ "0": 2, b: 1 }] } },
+      { a: { "0": "y", "1": "x" } },
+      { a: { $elemMatch: { $eq: { "0": "y", "1": "x" } } } },
+      { a: { "9": 1, "10": 1 } },
+      { a: { $gte: { "9": 1 } } },
+    ];
+    for (const query of filters) {
+      const expected = await serverMatches(collectionName, database, query);
+      expect(evaluatorMatches(documents, query), BSON.EJSON.stringify(query)).toEqual(expected);
+    }
+  });
 });

@@ -28,6 +28,7 @@ import {
   resolveBackupKey,
 } from "../format/layout.ts";
 import { type Compression, StoredFileSchema } from "../format/manifest.ts";
+import { parseJsonInStoredOrder, stringifyJsonInStoredOrder } from "../format/ordered-json.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import type { BackupOptions } from "../types.ts";
 import { readStreamToBuffer } from "../util/streams.ts";
@@ -213,7 +214,9 @@ export async function writeCheckpoint(
   checkpoint: Checkpoint,
   signal: AbortSignal,
 ): Promise<void> {
-  const body = Buffer.from(`${JSON.stringify(checkpoint, null, 2)}\n`, "utf8");
+  // Order-keeping JSON: part boundaries may be embedded-document `_id`s whose field
+  // order JavaScript would change (see backup-parts.ts); otherwise JSON.stringify.
+  const body = Buffer.from(`${stringifyJsonInStoredOrder(checkpoint, 2)}\n`, "utf8");
   await storage.put(checkpointKey(checkpoint.id), body, {
     contentType: "application/json",
     sizeHint: body.length,
@@ -243,7 +246,8 @@ export async function readCheckpoint(
 
   let json: unknown;
   try {
-    json = JSON.parse(text);
+    // Records the stored order of part boundaries (see `writeCheckpoint`).
+    json = parseJsonInStoredOrder(text);
   } catch (cause) {
     throw invalidCheckpoint(key, "it is not valid JSON", cause);
   }

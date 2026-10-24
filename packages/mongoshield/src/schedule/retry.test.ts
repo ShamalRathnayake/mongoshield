@@ -91,6 +91,60 @@ describe("withRetries", () => {
   });
 });
 
+describe("withRetries while backing off", () => {
+  it("gives up, keeping the attempt count, when aborted during the wait before a retry", async () => {
+    const controller = new AbortController();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const promise = withRetries(
+      async () => {
+        throw new MongoShieldError("MS_CONNECTION_FAILED", "connection reset");
+      },
+      {
+        policy: { retries: 5, baseDelayMs: 60_000, maxDelayMs: 60_000 },
+        step: "backup",
+        signal: controller.signal,
+        logger,
+        random: () => 0,
+      },
+    );
+    // The first attempt failed and the 30 s backoff (half of 60 s, random 0) started.
+    await vi.waitFor(() => expect(logger.warn).toHaveBeenCalled());
+    expect(logger.warn).toHaveBeenCalledWith("The backup step failed; retrying", {
+      attempt: 1,
+      retriesLeft: 5,
+      delayMs: 30_000,
+      code: "MS_CONNECTION_FAILED",
+      error: "connection reset",
+    });
+    controller.abort();
+    const error = await promise.catch((caught: unknown) => caught);
+    expect(error instanceof RetriesExhaustedError && error.attempts).toBe(1);
+    expect(
+      error instanceof RetriesExhaustedError && isMongoShieldError(error.cause, "MS_ABORTED"),
+    ).toBe(true);
+  });
+
+  it("does not start a task once the signal has fired", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const task = vi.fn(async () => "never");
+    const error = await withRetries(task, {
+      policy: FAST,
+      step: "test",
+      signal: controller.signal,
+    }).catch((caught: unknown) => caught);
+    expect(task).not.toHaveBeenCalled();
+    expect(error instanceof RetriesExhaustedError && error.attempts).toBe(1);
+  });
+});
+
+describe("RetriesExhaustedError", () => {
+  it("takes its message from any thrown value", () => {
+    expect(new RetriesExhaustedError(new Error("boom"), 2).message).toBe("boom");
+    expect(new RetriesExhaustedError("plain text", 1).message).toBe("plain text");
+  });
+});
+
 describe("sleep", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -111,5 +165,11 @@ describe("sleep", () => {
     const promise = sleep(60_000, controller.signal);
     controller.abort();
     await expect(promise).rejects.toMatchObject({ code: "MS_ABORTED" });
+  });
+
+  it("rejects at once when the signal has already fired", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(sleep(60_000, controller.signal)).rejects.toMatchObject({ code: "MS_ABORTED" });
   });
 });

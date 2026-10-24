@@ -9,6 +9,7 @@
 
 import { backupTuningFromConfig } from "../../config/backup-tuning.ts";
 import type { MongoShieldConfig, MongoShieldConfigInput } from "../../config/schema.ts";
+import { withShapeLabel } from "../../engine/backup-guard.ts";
 import { MongoShieldError } from "../../errors.ts";
 import type { Manifest } from "../../format/manifest.ts";
 import type {
@@ -236,7 +237,9 @@ function backupOptions(
     ...(section?.exclude ? { exclude: section.exclude } : {}),
     ...(section?.consistency ? { consistency: section.consistency } : {}),
     ...(section?.parallelism ? { parallelism: section.parallelism } : {}),
-    ...(section?.labels ? { labels: section.labels } : {}),
+    // The shape label (as the scheduler writes it) lets `mongoshield prune` and the
+    // guard tell this selection's backups from other jobs' in the same storage.
+    labels: withShapeLabel(section?.labels, section ?? {}),
     ...backupTuningFromConfig(section),
     ...(resume === undefined ? {} : { resume }),
   };

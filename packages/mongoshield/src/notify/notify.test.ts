@@ -14,6 +14,7 @@ import {
   heartbeatUrl,
   notifyRun,
   pingHeartbeat,
+  sendHttp,
   sendWebhook,
   signWebhook,
   slackPayload,
@@ -258,5 +259,143 @@ describe("notifyRun", () => {
     });
     expect(outcome).toEqual({ sent: [], heartbeat: undefined });
     expect(received).toHaveLength(0);
+  });
+});
+
+describe("chat payload details", () => {
+  it("leaves out the backup facts when the run failed before backing up", () => {
+    const { backup: _backup, ...withoutBackup } = report({
+      status: "failure",
+      error: { step: "lock", code: "MS_LOCK_FAILED", message: "no lock" },
+    });
+    const text = JSON.stringify(slackPayload(withoutBackup));
+    expect(text).not.toContain("raw →");
+    expect(text).toContain("MS_LOCK_FAILED: no lock");
+    expect(text).not.toContain("Hint:");
+  });
+
+  it("shows failed verifications and guard findings, but not a guard that passed", () => {
+    const flagged = report({
+      status: "failure",
+      verify: { mode: "fast", ok: false, problems: [], attempts: 1 },
+      guard: { ok: false, action: "fail", findings: [{ message: "users shrank by 90%" }] },
+    });
+    const text = JSON.stringify(discordPayload(flagged));
+    expect(text).toContain("fast: FAILED");
+    expect(text).toContain("1 finding(s), action fail");
+    expect(text).toContain("• users shrank by 90%");
+
+    const passed = report({ guard: { ok: true, action: "warn", findings: [] } });
+    expect(JSON.stringify(slackPayload(passed))).not.toContain("finding(s)");
+  });
+
+  it("titles a checkpointed run as such", () => {
+    expect(slackPayload(report({ status: "checkpointed" })).text).toContain("checkpointed");
+  });
+
+  it("truncates long error details and prints small sizes in bytes", () => {
+    const long = report({
+      status: "failure",
+      error: { step: "backup", code: "MS_STORAGE_FAILED", message: "x".repeat(5000) },
+      backup: {
+        id: "2026-10-20T03-00-00Z_abcdef",
+        namespaces: 1,
+        documents: 1,
+        bytesRaw: 512,
+        bytesStored: 100,
+        durationMs: 10,
+        attempts: 1,
+      },
+    });
+    const text = JSON.stringify(discordPayload(long));
+    expect(text).toContain("…");
+    expect(text).not.toContain("x".repeat(3001));
+    expect(text).toContain("512 B raw → 100 B stored");
+  });
+});
+
+describe("webhook details", () => {
+  it("sends checkpointed runs as backup.checkpointed", () => {
+    expect(webhookPayload(report({ status: "checkpointed" })).event).toBe("backup.checkpointed");
+  });
+
+  it("signs with the current time when no timestamp is given", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    expect(await sendWebhook(`${baseUrl}/hook`, report(), { ...FAST, secret: "s3cret" })).toBe(
+      true,
+    );
+    const timestamp = Number(received[0]?.headers["x-mongoshield-timestamp"]);
+    expect(timestamp).toBeGreaterThanOrEqual(before);
+    expect(received[0]?.headers["x-mongoshield-signature"]).toBe(
+      signWebhook(received[0]?.body ?? "", "s3cret", timestamp),
+    );
+  });
+
+  it("signs webhooks sent by notifyRun with the webhook secret", async () => {
+    await notifyRun(FAILURE, {
+      ...FAST,
+      targets: [{ type: "webhook", url: `${baseUrl}/signed` }],
+      webhookSecret: "s3cret",
+    });
+    expect(received[0]?.headers["x-mongoshield-signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
+  });
+});
+
+describe("delivery edge cases", () => {
+  it("does not ping an invalid heartbeat URL, and warns", async () => {
+    const logger = spyLogger();
+    expect(await pingHeartbeat("not a url", "success", { ...FAST, logger })).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith("The heartbeat URL is invalid; not pinging");
+  });
+
+  it("logs an invalid URL without its text and returns false", async () => {
+    const logger = spyLogger();
+    const sent = await sendHttp(
+      { url: "::not-a-url", method: "GET", label: "test" },
+      { ...FAST, logger },
+    );
+    expect(sent).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("failed"),
+      expect.objectContaining({ host: "(invalid URL)" }),
+    );
+  });
+
+  it("waits the default retry delay before retrying", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      script = [503];
+      const sending = sendHttp({ url: `${baseUrl}/retry`, method: "GET", label: "test" });
+      // The first attempt fails; the retry waits for the (faked) default delay.
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      expect(await sending).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a body that cannot be read as delivered, and a non-Error rejection as a failure", async () => {
+    const fetchStub = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce({
+        status: 204,
+        arrayBuffer: () => Promise.reject(new Error("body lost")),
+      } as unknown as Response)
+      .mockRejectedValue("socket hang up");
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      const logger = spyLogger();
+      const request = { url: "https://hooks.example.com/x", method: "POST" as const, label: "t" };
+      expect(await sendHttp(request, { ...FAST, logger })).toBe(true);
+      expect(await sendHttp(request, { ...FAST, logger })).toBe(false);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ error: "socket hang up" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

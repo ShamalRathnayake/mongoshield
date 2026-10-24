@@ -9,6 +9,7 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve } from "node:path";
+import type { Writable } from "node:stream";
 import { type CANCEL_SYMBOL, cancel, intro, isCancel, outro, select, text } from "@clack/prompts";
 import { CONFIG_FILE_NAMES } from "../../config/load.ts";
 import { assertValidRecipient, generateIdentity } from "../../crypto/index.ts";
@@ -157,6 +158,7 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   intro("mongoshield init", common);
 
   const storage = answered(
+    common,
     await text({
       ...common,
       message: "Where should backups be stored?",
@@ -167,6 +169,7 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   ).trim();
 
   const uriEnv = answered(
+    common,
     await text({
       ...common,
       message: "Which environment variable holds the MongoDB connection string?",
@@ -176,6 +179,7 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   ).trim();
 
   const encryption = answered(
+    common,
     await select<EncryptionChoice>({
       ...common,
       message: "Encrypt backups?",
@@ -192,6 +196,7 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   let keyFile = defaults.keyFile;
   if (encryption === "existing") {
     recipient = answered(
+      common,
       await text({
         ...common,
         message: "Public key (age1…):",
@@ -201,6 +206,7 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
     ).trim();
   } else if (encryption === "generate") {
     keyFile = answered(
+      common,
       await text({
         ...common,
         message: "Where should the secret key file be written?",
@@ -213,10 +219,13 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   return { storage, uriEnv, encryption, recipient, keyFile };
 }
 
-/** Unwraps a prompt answer, turning Ctrl-C/Escape into a clean cancellation. */
-function answered<T>(value: T | typeof CANCEL_SYMBOL): T {
+/**
+ * Unwraps a prompt answer, turning Ctrl-C/Escape into a clean cancellation. The
+ * cancel line goes to the prompts' stream (stderr): clack defaults to stdout.
+ */
+function answered<T>(prompts: { readonly output: Writable }, value: T | typeof CANCEL_SYMBOL): T {
   if (isCancel(value)) {
-    cancel("Cancelled. Nothing was written.");
+    cancel("Cancelled. Nothing was written.", { output: prompts.output });
     throw new MongoShieldError("MS_ABORTED", "Cancelled. Nothing was written.");
   }
   return value;

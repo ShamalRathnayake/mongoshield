@@ -324,7 +324,14 @@ async function runRestore(
     printPlan(context, plan, targetUri);
     if (context.flags.boolean("dry-run")) return finish(context, plan);
 
-    if (plan.matched === 0) return finish(context, plan);
+    if (plan.matched === 0) {
+      // The plan is a dry run; saying "Dry run" here would suggest --dry-run was given.
+      if (!context.out.settings.json) {
+        context.out.success("Nothing to restore: no backed-up document matches.");
+        return 0;
+      }
+      return finish(context, plan);
+    }
     if (plan.mode === "upsert" && plan.replaced > 0) {
       await confirmOrThrow(context, {
         question: `Replace ${plural(plan.replaced, "existing document")} in ${plan.targetNamespace} (${displayUri(targetUri)}) with the backed-up version?`,

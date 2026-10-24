@@ -19,8 +19,11 @@ import { planEncryption } from "../engine/backup-options.ts";
 import { MongoShieldError } from "../errors.ts";
 import type { DecryptionOptions, EncryptionOptions } from "../types.ts";
 
-/** A validated way to encrypt segments: call it once per segment. */
-export type SegmentEncryptor = () => Transform;
+/**
+ * A validated way to encrypt segments: call it once per segment. `signal` cancels the
+ * segment's KMS call (`MS_ABORTED`), so a stopping writer never waits on a slow KMS.
+ */
+export type SegmentEncryptor = (signal?: AbortSignal) => Transform;
 
 /**
  * Validates the encryption settings and returns a factory for per-segment encrypt
@@ -49,19 +52,28 @@ export function planSegmentEncryption(
   const { recipients, kms } = plan;
   // One KMS call per segment (every few minutes): cheap, and it keeps each segment
   // independent of every other.
-  return () =>
-    createEncryptStream({ recipients, keyWrappers: kms.map((ref) => createKmsKeyWrapper(ref)) });
+  return (signal) =>
+    createEncryptStream({
+      recipients,
+      keyWrappers: kms.map((ref) =>
+        createKmsKeyWrapper(ref, undefined, signal === undefined ? {} : { signal }),
+      ),
+    });
 }
 
 /**
  * The decrypt stream for one encrypted segment. Identities open segments encrypted to
  * their recipient; segments encrypted to KMS keys are opened through the KMS named in
- * them (with the credentials of the environment) when no identity matches.
+ * them (with the credentials of the environment) when no identity matches. `signal`
+ * cancels that KMS call (`MS_ABORTED`).
  *
  * @throws MongoShieldError `MS_NO_IDENTITY` when only a passphrase is given (segments
  *   are never passphrase-encrypted).
  */
-export function createSegmentDecryptor(decryption: DecryptionOptions | undefined): Transform {
+export function createSegmentDecryptor(
+  decryption: DecryptionOptions | undefined,
+  signal?: AbortSignal,
+): Transform {
   const identities = decryption?.identities ?? [];
   if (identities.length === 0 && decryption?.passphrase !== undefined) {
     throw new MongoShieldError(
@@ -72,5 +84,8 @@ export function createSegmentDecryptor(decryption: DecryptionOptions | undefined
       },
     );
   }
-  return createDecryptStream({ identities, keyUnwrappers: [createKmsKeyUnwrapper()] });
+  return createDecryptStream({
+    identities,
+    keyUnwrappers: [createKmsKeyUnwrapper(undefined, signal === undefined ? {} : { signal })],
+  });
 }
