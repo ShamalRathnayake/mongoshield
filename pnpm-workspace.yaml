@@ -1,7 +1,25 @@
 packages:
-  - "packages/*"
+  - packages/*
+  - website
+
+# pnpm blocks dependency install scripts by default. Allow only what we need.
 allowBuilds:
-  cpu-features: true
-  esbuild: true
-  protobufjs: true
-  ssh2: true
+  # Installs the git hooks binary.
+  lefthook: true
+  # Downloads mongod at install time; not needed because it also downloads lazily on first use.
+  mongodb-memory-server: false
+  # Optional native speedups pulled in by testcontainers' and ssh2's SSH support; unused.
+  cpu-features: false
+  ssh2: false
+  protobufjs: false
+
+# Supply-chain protection: never install a package version published less than a
+# day ago (most malicious releases are caught and pulled within hours).
+minimumReleaseAge: 1440
+
+# AWS publishes the SDK daily and pins exact versions of its internal packages,
+# so any recent client pulls in day-old dependencies. Trust AWS's official scopes.
+minimumReleaseAgeExclude:
+  - "@aws-sdk/*"
+  - "@smithy/*"
+  - "@aws-crypto/*"

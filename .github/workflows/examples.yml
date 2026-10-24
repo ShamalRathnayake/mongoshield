@@ -1,0 +1,78 @@
+# Static checks for the distribution kit: the Helm chart, the plain Kubernetes
+# manifest, the shell scripts, the Compose example and the example configs.
+# None of these are covered by the package's own tests, and a broken chart or
+# script is only noticed by users otherwise.
+#
+# Actions are pinned by major version (fixes arrive automatically; Dependabot
+# proposes major upgrades). Pin to commit SHAs if your policy requires it.
+name: Examples and deploy
+
+on:
+  pull_request:
+    paths:
+      - action/**
+      - deploy/**
+      - docker/**
+      - examples/**
+      - .github/workflows/examples.yml
+  push:
+    branches: [main]
+    paths:
+      - action/**
+      - deploy/**
+      - docker/**
+      - examples/**
+      - .github/workflows/examples.yml
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  helm:
+    name: Helm chart and manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5 # v5: current major
+      - uses: azure/setup-helm@v4 # v4: current major
+
+      # Lint, then render with defaults and with every optional feature switched on,
+      # so template branches that are off by default are exercised too.
+      - name: Lint and render the chart
+        run: |
+          helm lint deploy/helm/mongoshield
+          helm template test deploy/helm/mongoshield > rendered-default.yaml
+          helm template test deploy/helm/mongoshield \
+            --set identity.secretName=mongoshield-identity \
+            --set persistence.enabled=true,persistence.existingClaim=backups \
+            --set recipients[0]=age1example \
+            --set ttlSecondsAfterFinished=86400 \
+            --set-string podLabels.team=platform \
+            > rendered-full.yaml
+
+      # Validate the rendered chart and the plain manifest against the Kubernetes
+      # API schemas (offline; no cluster needed).
+      - name: Validate against Kubernetes schemas (kubeconform)
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0
+          "$(go env GOPATH)/bin/kubeconform" -strict -summary \
+            rendered-default.yaml rendered-full.yaml deploy/kubernetes/cronjob.yaml
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5 # v5: current major
+      # shellcheck is preinstalled on GitHub's Ubuntu runners.
+      - run: shellcheck docker/install-sdks.sh action/run.sh
+
+  compose:
+    name: Compose example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5 # v5: current major
+      # Parses and validates the Compose file without starting anything.
+      - run: docker compose -f examples/docker-compose/compose.yaml config --quiet

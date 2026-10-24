@@ -1,63 +1,36 @@
 {
   "name": "mongoshield-monorepo",
   "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.14.0",
   "engines": {
-    "node": ">= 20.x"
+    "node": ">=22.12.0"
   },
   "scripts": {
-    "build": "pnpm -r run build",
-    "dev": "pnpm -r run dev",
-    "test": "vitest run",
-    "release": "changeset publish",
-    "docs": "typedoc",
-    "commit": "git-cz",
-    "prepare": "husky"
+    "build": "pnpm --filter \"./packages/*\" build",
+    "dev": "pnpm --filter mongoshield dev",
+    "test": "pnpm --filter \"./packages/*\" test",
+    "test:unit": "pnpm --filter \"./packages/*\" test:unit",
+    "test:integration": "pnpm --filter \"./packages/*\" test:integration",
+    "coverage": "pnpm --filter \"./packages/*\" coverage",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "pnpm --filter \"./packages/*\" typecheck",
+    "check:package": "pnpm --filter \"./packages/*\" check:package",
+    "check": "pnpm lint && pnpm typecheck && pnpm --filter mongoshield docs:errors:check && pnpm test && pnpm build && pnpm check:package",
+    "changeset": "changeset",
+    "release": "pnpm build && changeset publish",
+    "prepare": "lefthook install",
+    "docs:errors": "pnpm --filter mongoshield docs:errors",
+    "docs:dev": "pnpm --filter website dev",
+    "docs:build": "pnpm --filter website build"
   },
-  "lint-staged": {
-    "*.{js,ts,cjs,mjs,cts,mts,jsx,tsx,json,jsonc}": "biome check --write"
-  },
-  "author": "ShamalRathnayake",
-  "license": "MIT",
   "devDependencies": {
-    "@biomejs/biome": "^2.4.13",
-    "@changesets/cli": "^2.31.0",
-    "@commitlint/cli": "^20.5.2",
-    "@commitlint/config-conventional": "^20.5.0",
-    "@testcontainers/mongodb": "^11.14.0",
-    "@types/node": "^25.6.0",
-    "commitizen": "^4.3.1",
-    "cz-conventional-changelog": "^3.3.0",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.4.0",
-    "testcontainers": "^11.14.0",
-    "tsup": "^8.5.1",
-    "typedoc": "^0.28.19",
-    "typedoc-plugin-markdown": "^4.11.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.5"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ShamalRathnayake/mongoshield.git"
-  },
-  "bugs": {
-    "url": "https://github.com/ShamalRathnayake/mongoshield/issues"
-  },
-  "homepage": "https://github.com/ShamalRathnayake/mongoshield#readme",
-  "config": {
-    "commitizen": {
-      "path": "cz-conventional-changelog"
-    }
-  },
-  "pnpm": {
-    "overrides": {
-      "vite": "7.3.2",
-      "lodash": ">=4.18.0",
-      "uuid": ">=14.0.0",
-      "tmp": ">=0.2.4",
-      "fast-uri": ">=3.1.2",
-      "protobufjs": ">=7.5.6"
-    }
-  },
-  "packageManager": "pnpm@9.15.4"
+    "@biomejs/biome": "2.5.15",
+    "@changesets/changelog-github": "^1.0.0",
+    "@changesets/cli": "^3.0.3",
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.0",
+    "lefthook": "^2.2.2"
+  }
 }

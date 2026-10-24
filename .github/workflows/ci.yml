@@ -1,0 +1,82 @@
+# Runs on every pull request and push to main.
+# Jobs: lint/typecheck, tests against a MongoDB × Node matrix, and package checks.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome ci .
+      - run: pnpm typecheck
+
+  test:
+    name: Test (Node ${{ matrix.node }}, MongoDB ${{ matrix.mongodb }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+        mongodb: ["7.0.24", "8.0.13"]
+    env:
+      # mongodb-memory-server downloads this server version for the integration tests.
+      MONGOMS_VERSION: ${{ matrix.mongodb }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      # The official age CLI and zstd let the integration tests prove that backups can be
+      # decrypted and decompressed with standard tools, without MongoShield.
+      - name: Install age and zstd
+        run: sudo apt-get update && sudo apt-get install -y age zstd
+      # The official mongodump/mongorestore, for the round-trip compatibility tests.
+      - name: Fetch MongoDB Database Tools
+        working-directory: packages/mongoshield
+        run: echo "MONGO_TOOLS_BIN=$(node scripts/fetch-mongo-tools.ts | tail -1)" >> "$GITHUB_ENV"
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-${{ matrix.mongodb }}
+      - run: pnpm coverage
+
+  package:
+    name: Package checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # publint checks package.json against the files; attw checks the type entry points.
+      - run: pnpm check:package
+      # Import the built package exactly as a user would, to catch ESM/runtime packaging bugs.
+      - name: Smoke-test the published entry points
+        run: |
+          cd packages/mongoshield
+          node --input-type=module -e "const m = await import('mongoshield'); if (!m.version) process.exit(1)"
+          node -e "const m = require('mongoshield'); if (!m.version) process.exit(1)"

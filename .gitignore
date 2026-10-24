@@ -1,11 +1,15 @@
 node_modules/
 dist/
-.env
-.DS_Store
 coverage/
-*.resolved
-mongoshield_*
-setup_roadmap.md
-*.txt
-manual-test/*
-GEMINI.md
+.astro/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+.mongodb-binaries/
+mongoshield-backups/
+
+# Official MongoDB Database Tools downloaded for compatibility tests (scripts/fetch-mongo-tools.ts).
+.tools/

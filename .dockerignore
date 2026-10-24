@@ -1,0 +1,33 @@
+# Files Docker never sends to the build. The Dockerfile copies only what it needs,
+# so this mostly keeps the build context small (node_modules alone is hundreds of MB)
+# and keeps local secrets out of it even if a future COPY is too broad.
+
+# Dependencies and build output: always rebuilt inside the image.
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+
+# Version control, editors, OS noise.
+.git
+.github
+.changeset
+.DS_Store
+.vscode
+.idea
+
+# Local secrets and backups must never end up in an image layer.
+.env
+.env.*
+*.key
+*identity*.txt
+mongoshield-backups
+.mongodb-binaries
+.tools
+
+# Not needed to build the package.
+docs
+examples
+deploy
+action
+*.log

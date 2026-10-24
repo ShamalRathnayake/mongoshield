@@ -1,50 +1,54 @@
+# Publishes to npm when changesets are merged to main.
+# Uses npm trusted publishing (OIDC): configure this repository + workflow as a trusted
+# publisher on npmjs.com. No NPM_TOKEN secret is stored anywhere.
 name: Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+concurrency: release-${{ github.ref }}
+
+permissions:
+  contents: write # create the "Version Packages" PR and tags
+  pull-requests: write
+  id-token: write # npm trusted publishing + provenance
 
 jobs:
   release:
-    name: Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-      pull-requests: write
-
+    outputs:
+      # Set by changesets/action; used below to build the matching Docker image.
+      published: ${{ steps.changesets.outputs.published }}
+      packages: ${{ steps.changesets.outputs.publishedPackages }}
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v3
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
-          cache: "pnpm"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build packages
-        run: pnpm run build
-
-      - name: Create Release Pull Request or Publish to npm
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: changesets/action@v1
         id: changesets
-        uses: changesets/action@v1
         with:
-          publish: pnpm run release
+          publish: pnpm release
+          title: "chore: version packages"
+          commit: "chore: version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
+
+  # Tags pushed with GITHUB_TOKEN don't trigger other workflows, so the image for a
+  # new npm release is built by calling the Docker workflow directly.
+  docker:
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ fromJSON(needs.release.outputs.packages)[0].version }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write

@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.bson binary
+*.age binary
+*.zst binary
+*.gz binary

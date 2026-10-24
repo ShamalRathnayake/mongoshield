@@ -1,0 +1,87 @@
+# The documentation website (website/, Astro + Starlight).
+# Pull requests: build it and check every internal link, so broken docs never merge.
+# Pushes to main: build and deploy to GitHub Pages.
+#
+# One-time setup: Settings → Pages → Source: "GitHub Actions".
+name: Docs
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "website/**"
+      - "packages/mongoshield/src/cli/**"
+      - "packages/mongoshield/src/config/**"
+      - "packages/mongoshield/src/errors.ts"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          # The generators import the package's TypeScript directly, which needs Node 24.
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      # Gives the site's origin and base path (e.g. /mongoshield), so links stay right
+      # if the site moves to a custom domain. Skipped on PRs, where Pages is not needed.
+      - name: Configure GitHub Pages
+        id: pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+
+      # `build` syncs docs/, generates the CLI and config references, builds the site
+      # and checks every internal link (website/package.json).
+      # On PRs the Pages step is skipped and the site's defaults apply. Otherwise use
+      # what Pages reports; its base path is empty for a custom domain, which is valid.
+      - name: Build
+        run: |
+          if [ "${{ steps.pages.outcome }}" = "success" ]; then
+            export DOCS_SITE="$PAGES_ORIGIN" DOCS_BASE="$PAGES_BASE_PATH"
+          fi
+          pnpm --filter website build
+        env:
+          PAGES_ORIGIN: ${{ steps.pages.outputs.origin }}
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: website/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # Never cancel a deployment half-way.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
