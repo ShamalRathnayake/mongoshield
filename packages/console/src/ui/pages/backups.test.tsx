@@ -103,7 +103,12 @@ describe("document browser", () => {
   it("validates the Extended JSON filter before sending it", async () => {
     const { user, backend } = await openBrowser();
     const filter = screen.getByLabelText("Filter (Extended JSON)");
-    const before = requestsTo(backend, "GET", "/api/storage/st-s3/backups/").length;
+    // Document pages only: clicking the filter also samples field names for suggestions.
+    const pages = () =>
+      requestsTo(backend, "GET", "/api/storage/st-s3/backups/").filter(
+        (request) => !request.url.includes("/sample"),
+      );
+    const before = pages().length;
 
     await user.click(filter);
     await user.paste("{plan: 'pro'}");
@@ -115,7 +120,7 @@ describe("document browser", () => {
     await user.paste('{"plan": {"$equals": "pro"}}');
     await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(screen.getByText(/Unknown operator "\$equals"/)).toBeTruthy();
-    expect(requestsTo(backend, "GET", "/api/storage/st-s3/backups/")).toHaveLength(before);
+    expect(pages()).toHaveLength(before);
 
     await user.clear(filter);
     await user.paste('{ "plan": "pro" }');

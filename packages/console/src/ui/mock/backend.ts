@@ -176,8 +176,11 @@ export interface MockBackendOptions {
   readonly setupComplete?: boolean;
   /** Start signed in as this user (`admin`, `maya`, `sam`). */
   readonly signedInAs?: string;
-  /** Delay before each response, to make loading states visible. Default 0. */
-  readonly latencyMs?: number;
+  /**
+   * Delay before each response, to make loading states visible. Default 0. A function
+   * picks the delay per request URL, so a test can slow down exactly one request.
+   */
+  readonly latencyMs?: number | ((url: string) => number);
   /** Time between job progress steps. 0 disables automatic progress (tests drive it). */
   readonly jobTickMs?: number;
   /** Fixed "now" for fixtures, so test output is stable. */
@@ -1351,8 +1354,9 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
   // ---- fetch and EventSource -----------------------------------------------
 
   const fetchImpl: FetchLike = async (url, init) => {
-    if ((options.latencyMs ?? 0) > 0)
-      await new Promise((resolve) => setTimeout(resolve, options.latencyMs));
+    const latency =
+      typeof options.latencyMs === "function" ? options.latencyMs(url) : (options.latencyMs ?? 0);
+    if (latency > 0) await new Promise((resolve) => setTimeout(resolve, latency));
     const parsedBody: unknown = init.body === undefined ? undefined : JSON.parse(init.body);
     requests.push({ method: init.method, url, headers: init.headers, body: parsedBody });
     try {

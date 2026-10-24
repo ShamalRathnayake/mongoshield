@@ -201,9 +201,15 @@ describe("browsing records", () => {
   });
 
   it("can cancel a slow query", async () => {
-    const { user } = renderApp({ signedInAs: "maya", hash: STAGING_USERS, latencyMs: 300 });
-    // Every request takes a while here, so the first page needs more than the default wait.
-    await screen.findByRole("table", { name: "Documents" }, { timeout: 8000 });
+    // Only the second page is slow (10 s), so it is certainly still running when Cancel
+    // is clicked, however slow the machine; everything else answers at once.
+    const secondPage = (url: string) => url.includes("/documents?") && /[?&]skip=[1-9]/.test(url);
+    const { user } = renderApp({
+      signedInAs: "maya",
+      hash: STAGING_USERS,
+      latencyMs: (url) => (secondPage(url) ? 10_000 : 0),
+    });
+    await screen.findByRole("table", { name: "Documents" });
     await user.click(screen.getByRole("button", { name: "Next page" }));
     await user.click(await screen.findByRole("button", { name: "Cancel query" }));
     expect(await screen.findByText(/You cancelled the request/)).toBeTruthy();
