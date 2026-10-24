@@ -28,7 +28,7 @@ import {
   type WriteConcernSettings,
 } from "mongodb";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
-import type { ChangesFile } from "../format/manifest.ts";
+import type { ChangesFile, ClusterTime } from "../format/manifest.ts";
 import type { CollectionMetadata } from "../format/metadata.ts";
 import type { Logger } from "../logger.ts";
 import {
@@ -93,6 +93,8 @@ interface RestoreItem {
 /** A converge backup's change replay, planned during pre-flight. */
 interface PlannedReplay {
   readonly file: ChangesFile;
+  /** The end of the window (`consistency.to`): events after it are never replayed. */
+  readonly until: ClusterTime | undefined;
   readonly summary: ChangeWindowSummary;
   readonly targets: ReplayTargets;
   /** Targets of collections created during the window that `drop` mode replaces. */
@@ -301,7 +303,9 @@ async function planReplay(
 ): Promise<PlannedReplay | undefined> {
   const file = detailed.manifest.changes;
   if (file === undefined) return undefined;
-  const summary = await scanChangeWindow(source, file, options.signal);
+  // The manifest's T1 bounds the replay, not the file: see eventsUntil.
+  const until = detailed.manifest.consistency.to;
+  const summary = await scanChangeWindow(source, file, options.signal, until);
   const restored = new Map<string, string>();
   for (const planned of detailed.namespaces) {
     if (planned.entry.action !== "skip") restored.set(planned.entry.from, planned.entry.to);
@@ -323,7 +327,7 @@ async function planReplay(
     events: summary.events,
     createdDuringBackup: [...targets.windowTargets.values()],
   });
-  return { file, summary, targets, dropFirst };
+  return { file, until, summary, targets, dropFirst };
 }
 
 /**
@@ -452,7 +456,7 @@ async function restoreConverged(
         logger: run.logger,
         source: run.source,
         file: replay.file,
-        until: undefined,
+        until: replay.until,
         targets: replay.targets,
         writeConcern: run.writeConcern,
         bypassDocumentValidation: run.bypassDocumentValidation,

@@ -158,8 +158,8 @@ export interface TestSftpServer {
 /** Starts the server on a random port on 127.0.0.1. */
 export async function startSftpServer(): Promise<TestSftpServer> {
   const username = "tester";
-  const hostKey = ssh2.utils.generateKeyPairSync("ed25519");
-  const clientKey = ssh2.utils.generateKeyPairSync("ed25519");
+  const hostKey = generateUsableKeyPair();
+  const clientKey = generateUsableKeyPair();
   const authorizedKeys: ParsedKey[] = [parsedKey(clientKey.public)];
   const connections = new Set<ServerConnection>();
   let accepted = 0;
@@ -196,8 +196,7 @@ export async function startSftpServer(): Promise<TestSftpServer> {
     ...clientOptions,
     clientOptions,
     authorizeNewKey(passphrase) {
-      const pair = ssh2.utils.generateKeyPairSync(
-        "ed25519",
+      const pair = generateUsableKeyPair(
         passphrase === undefined ? undefined : { passphrase, cipher: "aes256-ctr", rounds: 4 },
       );
       authorizedKeys.push(parsedKey(pair.public));
@@ -213,6 +212,28 @@ export async function startSftpServer(): Promise<TestSftpServer> {
       return new Promise<void>((done) => server.close(() => done()));
     },
   };
+}
+
+/** How often to retry key generation before giving up (see `generateUsableKeyPair`). */
+const KEY_GENERATION_ATTEMPTS = 20;
+
+/**
+ * An ed25519 key pair that ssh2 can read back. ssh2's own `generateKeyPairSync`
+ * occasionally produces a public key its parser rejects as "Malformed OpenSSH public
+ * key" (seen on CI, roughly one run in several hundred). The test server only needs
+ * some valid key, so it generates again until both halves parse.
+ */
+function generateUsableKeyPair(options?: { passphrase: string; cipher: string; rounds: number }): {
+  private: string;
+  public: string;
+} {
+  for (let attempt = 1; attempt <= KEY_GENERATION_ATTEMPTS; attempt++) {
+    const pair = ssh2.utils.generateKeyPairSync("ed25519", options);
+    const publicKey = ssh2.utils.parseKey(pair.public);
+    const privateKey = ssh2.utils.parseKey(pair.private, options?.passphrase);
+    if (!(publicKey instanceof Error) && !(privateKey instanceof Error)) return pair;
+  }
+  throw new Error(`ssh2 produced no parseable key pair in ${KEY_GENERATION_ATTEMPTS} attempts`);
 }
 
 function parsedKey(key: string): ParsedKey {

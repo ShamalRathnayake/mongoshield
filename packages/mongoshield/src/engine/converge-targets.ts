@@ -21,7 +21,7 @@
 
 import type { Document, MongoClient } from "mongodb";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
-import type { StoredFile } from "../format/manifest.ts";
+import type { ClusterTime, StoredFile } from "../format/manifest.ts";
 import { type NamespaceFilter, splitNamespace } from "../mongo/index.ts";
 import type { RestoreMode } from "../types.ts";
 import {
@@ -29,6 +29,7 @@ import {
   readChangeEvents,
   type StoredChangeEvent,
 } from "./converge-events.ts";
+import { compareClusterTimes } from "./converge-time.ts";
 import type { StoredBackupSource } from "./read-pipeline.ts";
 import { decideAction } from "./restore-plan.ts";
 import type { NamespaceMapper } from "./restore-rename.ts";
@@ -58,8 +59,28 @@ export async function scanChangeWindow(
   source: StoredBackupSource,
   file: StoredFile,
   signal: AbortSignal | undefined,
+  until?: ClusterTime,
 ): Promise<ChangeWindowSummary> {
-  return summarizeChangeEvents(readChangeEvents(source, file, signal));
+  return summarizeChangeEvents(eventsUntil(readChangeEvents(source, file, signal), until));
+}
+
+/**
+ * The events at or before `until` (all of them when `until` is undefined).
+ *
+ * The capture writes events in the background and only learns the end of the window
+ * (T1) after its closing `ping` returns, so a changes file can hold a few events from
+ * just after T1. Replay and planning must therefore apply the bound themselves: the
+ * manifest's `consistency.to` is the authority, not the file's last event.
+ */
+export async function* eventsUntil(
+  events: AsyncIterable<StoredChangeEvent>,
+  until: ClusterTime | undefined,
+): AsyncGenerator<StoredChangeEvent> {
+  for await (const stored of events) {
+    // Events are in cluster-time order: the first one past the bound ends the window.
+    if (until !== undefined && compareClusterTimes(stored.event.clusterTime, until) > 0) return;
+    yield stored;
+  }
 }
 
 /**

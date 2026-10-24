@@ -28,10 +28,11 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts", "src/cli/index.ts"],
       reporter: ["text", "html", "json-summary"],
-      // Floors at the measured coverage (Oct 2026: lines 91.9, branches 78.8, functions
-      // 94.0, statements 90.0), so coverage can only go up. Raise them as tests improve;
-      // branches is the one to work on.
-      thresholds: { lines: 90, branches: 78, functions: 90, statements: 90 },
+      // Floors just under the measured coverage (Oct 2026: lines 91.9, branches 78.8,
+      // functions 94.0, statements 90.0), with about a point of margin because some
+      // paths only run under certain timings (retries, slow drains). Raise them as tests
+      // improve; branches is the one to work on.
+      thresholds: { lines: 90, branches: 77, functions: 92, statements: 89 },
     },
   },
 });

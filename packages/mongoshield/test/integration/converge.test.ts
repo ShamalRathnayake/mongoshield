@@ -10,8 +10,9 @@ import { runBackup } from "../../src/engine/backup.ts";
 import { runRestore } from "../../src/engine/restore.ts";
 import { verifyBackup } from "../../src/engine/verify.ts";
 import { MongoShieldError } from "../../src/errors.ts";
-import { resolveBackupKey } from "../../src/format/layout.ts";
+import { manifestKey, resolveBackupKey } from "../../src/format/layout.ts";
 import type { Manifest } from "../../src/format/manifest.ts";
+import { serializeManifest } from "../../src/format/manifest-io.ts";
 import { silentLogger } from "../../src/logger.ts";
 import { type MemoryStorage, memoryStorage } from "../../src/storage/memory.ts";
 import type { BackupOptions, EncryptionOptions, RestoreOptions } from "../../src/types.ts";
@@ -323,6 +324,54 @@ describe("consistency converge", () => {
     await restore(storage, { backup: manifest.id, rename: { [`${source}.*`]: `${target}.*` } });
     await expectSameCollections(source, target);
     expect(await collectionNames(client(), target)).toEqual(["a", "z_moved"]);
+  });
+
+  it("never replays events after the manifest's end of the window", async () => {
+    // The capture only learns T1 when its closing ping returns, so the changes file may
+    // hold events from just after T1 (a race seen on busy CI runners). Restore must
+    // bound the replay by the manifest's consistency.to, not by the file.
+    const source = newDatabase("cv_until");
+    await seed(source, "a", 5);
+    await seed(source, "b", 5);
+    let updated = false;
+    const storage = hookedStorage(memoryStorage(), async (key) => {
+      if (updated || !isDataFileOf(key, "b")) return;
+      updated = true;
+      // "a" is already dumped (parallelism 1, name order): this change exists only as
+      // an event in the changes file.
+      await client()
+        .db(source)
+        .collection<TestDocument>("a")
+        .updateOne({ _id: 1 }, { $set: { late: true } });
+    });
+    const manifest = await backup(storage, source);
+
+    // As recorded, the change is inside the window and is replayed.
+    const withChange = newDatabase("cv_until_full");
+    await restore(storage, { backup: manifest.id, rename: { [`${source}.*`]: `${withChange}.*` } });
+    expect(
+      await client().db(withChange).collection<TestDocument>("a").findOne({ _id: 1 }),
+    ).toMatchObject({
+      late: true,
+    });
+
+    // Move the end of the window back to its start: the same event is now after T1.
+    const from = manifest.consistency.from;
+    if (from === undefined) throw new Error("converge backup without consistency.from");
+    const earlier: Manifest = { ...manifest, consistency: { ...manifest.consistency, to: from } };
+    await storage.put(manifestKey(manifest.id), Buffer.from(serializeManifest(earlier)));
+
+    const withoutChange = newDatabase("cv_until_cut");
+    await restore(storage, {
+      backup: manifest.id,
+      rename: { [`${source}.*`]: `${withoutChange}.*` },
+    });
+    const document = await client()
+      .db(withoutChange)
+      .collection<TestDocument>("a")
+      .findOne({ _id: 1 });
+    expect(document).not.toBeNull();
+    expect(document).not.toHaveProperty("late");
   });
 
   it("writes an empty changes file when nothing changed during the backup", async () => {

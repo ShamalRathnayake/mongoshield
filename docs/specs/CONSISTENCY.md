@@ -100,6 +100,14 @@ listed in FORMAT.md):
   cluster time and stores it as `drop` + `create` + one `insert` per document right
   after the rename, so B is exact whatever A held.
 
+**The manifest's T1 is the authority.** The capture keeps reading the change stream
+in the background and only learns T1 when its closing `ping` returns, so the changes
+file can hold a few events from just after T1. Readers must ignore every event whose
+cluster time is after `consistency.to`, and the restore does so for both its planning
+scan and the replay. T1 itself is read from the server's logical clock (`$clusterTime`),
+which is never behind a write the server has applied; T0 is read from `operationTime`,
+which can lag, and that is the safe direction for a start time.
+
 ### Restore
 
 Implemented in `src/engine/converge-targets.ts` (planning) and
