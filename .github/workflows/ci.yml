@@ -20,10 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec biome ci .
       - run: pnpm typecheck
@@ -41,10 +43,12 @@ jobs:
       MONGOMS_VERSION: ${{ matrix.mongodb }}
     steps:
       - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-      - run: corepack enable
       - run: pnpm install --frozen-lockfile
       # The official age CLI and zstd let the integration tests prove that backups can be
       # decrypted and decompressed with standard tools, without MongoShield.
@@ -66,10 +70,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       # publint checks package.json against the files; attw checks the type entry points.

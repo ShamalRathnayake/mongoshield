@@ -174,7 +174,7 @@ jobs:
       #    node_modules. Unfixed ones are ignored: there is nothing to upgrade to yet.
       #    trivy-action has no major-version tag, so it is pinned to a release.
       - name: Vulnerability scan (Trivy)
-        uses: aquasecurity/trivy-action@0.33.1 # no major tag exists; bump deliberately
+        uses: aquasecurity/trivy-action@v0.36.0 # no major tag exists; bump deliberately
         with:
           image-ref: ${{ env.LOCAL_IMAGE }}
           scanners: vuln
