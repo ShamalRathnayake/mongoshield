@@ -132,7 +132,10 @@ describe("round trips", () => {
       ),
       { numRuns: 30 },
     );
-  });
+    // Thirty files of up to 4 chunks each, encrypted and decrypted: well under a
+    // second locally, but slower than Vitest's 5 s default on a busy CI runner with
+    // coverage instrumentation.
+  }, 30_000);
 
   it("decrypts input delivered one byte at a time", async () => {
     const plaintext = randomBytes(1000);
