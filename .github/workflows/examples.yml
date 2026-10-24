@@ -74,6 +74,9 @@ jobs:
       - uses: actions/setup-node@v5 # v5: current major
         with:
           node-version: 24
+          # setup-node v5 caches the package manager named in package.json (pnpm),
+          # which this job never installs; the script needs no packages.
+          package-manager-cache: false
       - name: Plain operator manifests are up to date
         run: node packages/operator/scripts/generate-manifests.ts --check
 

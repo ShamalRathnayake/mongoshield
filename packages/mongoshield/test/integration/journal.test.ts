@@ -363,6 +363,11 @@ describe("planning a point-in-time restore", () => {
     try {
       await insertRange(database, 5, 10);
       const between = await readClusterTime(client());
+      // Let the journal store the segment holding `between` before the later writes,
+      // so a segment ends between the two backups. On a busy machine the stream can
+      // deliver both batches together; one segment spanning both backups is still
+      // needed by the second one, and the prune below would rightly keep it.
+      await waitForJournalToCatchUp(client(), storage);
       await sleep(1100);
       // A write after `between`, so the second backup's cluster time is later.
       await insertRange(database, 10, 12);
