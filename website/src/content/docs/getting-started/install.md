@@ -3,7 +3,9 @@ title: Install
 description: Install the MongoShield CLI or library, and the optional packages for cloud storage and KMS.
 ---
 
-MongoShield needs **Node.js 22.12 or newer**.
+MongoShield needs **Node.js 22.12 or newer**. It also runs on **Bun 1.4** and
+**Deno 2.9** or newer (`bunx --bun mongoshield@next`, `deno run -A npm:mongoshield@next`);
+see the [Bun and Deno guide](/guides/bun-and-deno/) for what is tested there.
 
 ## The CLI
 

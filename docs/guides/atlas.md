@@ -5,6 +5,9 @@ connection string. It complements Atlas Cloud Backup with portable copies you ow
 your own bucket and cloud, in standard formats, and works on tiers without Cloud
 Backup.
 
+On a **Free (M0) or Flex** cluster? Start with [Atlas Free tier backups](./atlas-free-tier.md):
+`mongoshield init --preset atlas-free` and ready-made GitHub Actions workflows.
+
 ## 1. A database user for backups
 
 Create a dedicated user (Database Access → Add New Database User) with the built-in role
@@ -58,7 +61,8 @@ the access list.
 
 Every Atlas cluster is a replica set, so `consistency: "snapshot"` works on dedicated
 tiers (M10+) for backups that finish within the snapshot window (5 minutes by default).
-On shared and Flex tiers some server features are restricted; use the default (`auto`)
+On Free and Flex tiers some server features are restricted; MongoShield detects them and
+adapts (see [Atlas Free tier backups](./atlas-free-tier.md)), so keep the default (`auto`)
 there. See [CONSISTENCY.md](../specs/CONSISTENCY.md).
 
 ## 5. Search indexes, users and roles
@@ -71,13 +75,14 @@ mongodump skips both; MongoShield can keep them.
   not wait for them to become queryable. Restoring onto a server without Atlas Search
   restores everything else and warns about the search indexes it left out. Pass
   `--skip-search-indexes` (`skipSearchIndexes: true`) to leave them out on purpose.
-- **Users and custom roles** are backed up with `--users-and-roles`
-  (`includeUsersAndRoles: true`, config `backup.usersAndRoles: true`). They include
-  password hashes, so encrypt such backups. Restore them with
-  `--users-and-roles create` (or `replace`). Atlas manages database users through its
-  own API and refuses to restore password hashes, so on Atlas restored users get a
-  random password and are listed as needing a password reset; custom roles may also be
-  refused there (create them in the Atlas UI instead).
+- **Users and custom roles**: Atlas manages them through its UI, Admin API, CLI or
+  Terraform, and rolls back changes made with database commands. MongoShield therefore
+  refuses `--users-and-roles create` / `replace` restores into Atlas before writing
+  anything, and refuses `--users-and-roles` backups from Free and Flex clusters (which
+  do not allow `usersInfo`). Keep their definitions in Terraform, or export them with
+  `atlas dbusers list --output json` and `atlas customDbRoles list --output json`.
+  Backups of users and roles from self-managed MongoDB can still be restored into
+  self-managed MongoDB.
 
 ## 6. Try it
 

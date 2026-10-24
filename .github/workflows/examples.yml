@@ -1,5 +1,6 @@
 # Static checks for the distribution kit: the Helm chart, the plain Kubernetes
-# manifest, the shell scripts, the Compose example and the example configs.
+# manifest, the shell scripts, the Compose example, the example configs and the
+# example GitHub Actions workflows.
 # None of these are covered by the package's own tests, and a broken chart or
 # script is only noticed by users otherwise.
 #
@@ -53,6 +54,29 @@ jobs:
             --set-string podLabels.team=platform \
             > rendered-full.yaml
 
+      # The operator chart: defaults (cluster-wide), and namespaced with every option on.
+      - name: Lint and render the operator chart
+        run: |
+          helm lint deploy/helm/mongoshield-operator
+          helm template ops deploy/helm/mongoshield-operator --namespace mongoshield-system \
+            > rendered-operator-default.yaml
+          helm template ops deploy/helm/mongoshield-operator --namespace mongoshield-system \
+            --set 'watchNamespaces={prod,staging}' \
+            --set replicaCount=2 \
+            --set metrics.serviceMonitor.enabled=true \
+            --set jobImage.pullPolicy=Always \
+            --set rbac.aggregateToDefaultRoles=false \
+            --set-string podLabels.team=platform \
+            > rendered-operator-full.yaml
+
+      # deploy/operator/operator.yaml is rendered from the operator chart; fail if it
+      # was not regenerated after a chart change. (The script needs only Node and helm.)
+      - uses: actions/setup-node@v5 # v5: current major
+        with:
+          node-version: 24
+      - name: Plain operator manifests are up to date
+        run: node packages/operator/scripts/generate-manifests.ts --check
+
       # Validate the rendered chart and the plain manifest against the Kubernetes
       # API schemas (offline; no cluster needed).
       - name: Validate against Kubernetes schemas (kubeconform)
@@ -60,6 +84,14 @@ jobs:
           go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0
           "$(go env GOPATH)/bin/kubeconform" -strict -summary \
             rendered-default.yaml rendered-full.yaml deploy/kubernetes/cronjob.yaml
+          # The operator: chart renders and plain manifests. ServiceMonitor is a
+          # Prometheus Operator kind with no built-in schema. The CRDs themselves are not
+          # here: kubeconform's schema set has no CustomResourceDefinition schema. A real
+          # API server validates them instead (including their CEL rules), in the operator
+          # e2e workflow (operator-e2e.yml), and the operator's unit tests check them.
+          "$(go env GOPATH)/bin/kubeconform" -strict -summary -skip ServiceMonitor \
+            rendered-operator-default.yaml rendered-operator-full.yaml \
+            deploy/operator/operator.yaml
 
   scripts:
     name: Shell scripts
@@ -68,6 +100,21 @@ jobs:
       - uses: actions/checkout@v5 # v5: current major
       # shellcheck is preinstalled on GitHub's Ubuntu runners.
       - run: shellcheck docker/install-sdks.sh action/run.sh
+
+  workflows:
+    name: Example workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5 # v5: current major
+      # The copy-paste GitHub Actions templates in examples/github-actions are not run
+      # here (they need a real cluster and bucket), so lint them instead: actionlint
+      # checks workflow syntax, expressions, action inputs and, through the
+      # preinstalled shellcheck, every `run:` script. Pinned for reproducible results.
+      - name: Lint the example workflows (actionlint)
+        run: |
+          bash <(curl --fail --silent --show-error --location \
+            https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color examples/github-actions/*.yml
 
   compose:
     name: Compose example

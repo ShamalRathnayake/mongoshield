@@ -31,12 +31,16 @@ on:
       - .dockerignore
       - .github/workflows/docker.yml
       - packages/mongoshield/**
+      - packages/operator/**
       - pnpm-lock.yaml
   push:
     branches: [main]
     tags:
       - "mongoshield@*"
-      - "v*"
+      # Full versions only (v2.0.0, v2.1.0-next.1). The moving major tag `v2`, which
+      # GitHub Action users reference (`.../action@v2`), must not trigger an image build:
+      # "2" is not a version the tag logic below can publish.
+      - "v[0-9]+.[0-9]+.[0-9]+*"
   workflow_call:
     inputs:
       version:
@@ -59,8 +63,9 @@ concurrency:
 permissions:
   contents: read
 
-# Two images are built from this repository: the CLI (docker/Dockerfile) and the
-# web console (docker/console.Dockerfile). The matrix below builds both the same way.
+# Three images are built from this repository: the CLI (docker/Dockerfile), the
+# web console (docker/console.Dockerfile) and the Kubernetes operator
+# (docker/operator.Dockerfile). The matrix below builds them the same way.
 
 jobs:
   image:
@@ -74,6 +79,11 @@ jobs:
             dockerfile: docker/Dockerfile
           - image: mongoshield-console
             dockerfile: docker/console.Dockerfile
+          # The operator has its own 0.x version line (its CRDs are v1alpha1), so a
+          # release tags its image with packages/operator/package.json's version.
+          - image: mongoshield-operator
+            dockerfile: docker/operator.Dockerfile
+            version-file: packages/operator/package.json
     env:
       IMAGE: ghcr.io/shamalrathnayake/${{ matrix.image }}
       # The image built for the smoke test and the vulnerability scan (never pushed).
@@ -95,6 +105,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
+          VERSION_FILE: ${{ matrix.version-file }}
         run: |
           set -euo pipefail
           version=""
@@ -104,6 +115,11 @@ jobs:
             # mongoshield@2.0.0 -> 2.0.0, v2.0.0 -> 2.0.0
             version="${REF_NAME#mongoshield@}"
             version="${version#v}"
+          fi
+          # Images with their own version line (the operator): on a release, use the
+          # version in their package.json instead of the library's.
+          if [[ -n "${version}" && -n "${VERSION_FILE}" ]]; then
+            version="$(jq -r .version "${VERSION_FILE}")"
           fi
           push=true
           if [[ "${EVENT}" == "pull_request" ]]; then push=false; fi
@@ -168,6 +184,22 @@ jobs:
           curl -fsS http://localhost:8080/healthz
           docker logs console 2>&1 | grep -q "/setup?token="
           docker stop console
+          test "$(docker inspect --format '{{.Config.User}}' "${LOCAL_IMAGE}")" = "65532:65532"
+
+      # The operator needs a cluster to do anything, but without one it must still
+      # start, serve /healthz and shut down cleanly on SIGTERM.
+      - name: Smoke test (operator)
+        if: matrix.image == 'mongoshield-operator'
+        run: |
+          set -euo pipefail
+          docker run -d --name operator -p 8080:8080 -e LEADER_ELECTION=false "${LOCAL_IMAGE}"
+          for _ in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8080/healthz
+          # To a file first: `grep -q` closing the pipe early would fail curl under pipefail.
+          curl -fsS http://localhost:8080/metrics > operator-metrics.txt
+          grep -q mongoshield_operator_leader operator-metrics.txt
+          docker stop operator
+          test "$(docker inspect --format '{{.State.ExitCode}}' operator)" = "0"
           test "$(docker inspect --format '{{.Config.User}}' "${LOCAL_IMAGE}")" = "65532:65532"
 
       # 3. Fail on known, fixable HIGH/CRITICAL vulnerabilities in the OS packages or

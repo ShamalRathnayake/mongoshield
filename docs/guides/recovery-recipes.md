@@ -164,6 +164,23 @@ Things to know: the live side is read without a snapshot, so a database being wr
 gives an approximate answer; a changed field order counts as a change; time series
 collections (whose `_id`s need not be unique) are compared approximately.
 
+Previewing a restore from code: `shield.diff()` also takes `rename` (the restore's
+rename rules: each backed-up namespace is compared with the namespace it would be
+restored into, and nothing else on the live side) and, against a live deployment,
+`sample: { above, size }` (namespaces with more than `above` documents are compared by
+their first `size` backed-up documents, default 1,000, looked up by `_id`; the counts
+are then estimates and the namespace carries `sampled`). The console's restore preview
+is built on both.
+
+```ts
+const preview = await shield.diff({
+  from: "latest",
+  to: { live: client },
+  rename: { "app.*": "app_restored.*" },
+  sample: { above: 100_000 },
+});
+```
+
 ## Exporting as JSON Lines or CSV
 
 ```bash

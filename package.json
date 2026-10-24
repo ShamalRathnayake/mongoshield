@@ -21,6 +21,7 @@
     "changeset": "changeset",
     "release": "pnpm build && changeset publish",
     "prepare": "lefthook install",
+    "bench": "pnpm build:lib && pnpm --filter mongoshield bench",
     "docs:errors": "pnpm --filter mongoshield docs:errors",
     "docs:dev": "pnpm --filter website dev",
     "docs:build": "pnpm --filter website build",

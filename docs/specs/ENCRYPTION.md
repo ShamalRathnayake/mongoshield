@@ -5,9 +5,12 @@ standard **age v1 file format** ([C2SP spec](https://c2sp.org/age)). Every encry
 file is an ordinary `.age` file, so you can always decrypt a backup with the official
 `age` CLI, without MongoShield and without network access.
 
-The implementation (`packages/mongoshield/src/crypto/`) is a streaming,
-dependency-free implementation of age v1 on `node:crypto`. It is tested against the
-official [CCTV age test vectors](https://github.com/C2SP/CCTV/tree/main/age).
+The implementation (`packages/mongoshield/src/crypto/`) is a streaming
+implementation of age v1 on `node:crypto`. On runtimes whose `node:crypto` lacks
+ChaCha20-Poly1305 (Bun), that one primitive comes from the audited `@noble/ciphers`
+instead, loaded only there; the bytes are identical (see
+[the Bun and Deno guide](../guides/bun-and-deno.md)). It is tested against the official
+[CCTV age test vectors](https://github.com/C2SP/CCTV/tree/main/age), with both ciphers.
 
 ## Why age
 

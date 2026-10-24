@@ -1,0 +1,81 @@
+# Nightly backup of a MongoDB Atlas Free (M0) or Flex cluster, kept as a GitHub
+# Actions artifact: no cloud account or bucket needed.
+# Copy to .github/workflows/atlas-backup.yml in your repository.
+#
+# Good for small hobby and side-project databases. Know the trade-offs:
+#   - Artifacts expire: after 90 days at most (fewer if your repository or
+#     organization sets a lower limit), so this is a rolling window, not an archive.
+#   - Artifacts count against your GitHub Actions storage quota.
+#   - Anyone with read access to the repository can download them. That is why the
+#     backup is encrypted: without the secret age key the files are useless.
+#   - It lives in the same GitHub account as your code. For a copy that survives
+#     losing that account, use atlas-free-tier-s3.yml (S3 or Cloudflare R2) instead.
+#
+# Needs (Settings > Secrets and variables > Actions):
+#   secret   MONGODB_URI        mongodb+srv://… of a database user with the
+#                               "Only read any database" role (readAnyDatabase)
+#   variable BACKUP_PUBLIC_KEY  age public key (age1…) from `npx mongoshield@next keygen`
+#
+# Network access: GitHub-hosted runners have no fixed IP address, so the Atlas IP
+# Access List must allow 0.0.0.0/0 (use a long random password and the read-only user
+# above), or copy the two access list steps from atlas-free-tier-s3.yml.
+#
+# Restore: download the artifact from the run's page, unzip it into ./backups, then
+#   npx mongoshield@next restore latest --from ./backups --identity-file backup.key
+name: Atlas backup
+
+on:
+  schedule:
+    # 03:15 UTC daily. GitHub may start scheduled runs some minutes late under load,
+    # and disables schedules in repositories with no activity for 60 days.
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: atlas-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # MongoShield detects the Free/Flex tier when it connects and adapts by itself
+      # (lower parallelism, a read rate limit, no commands the tier refuses).
+      - name: Back up the Atlas cluster
+        id: backup
+        uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or commit SHA
+        with:
+          command: backup
+          uri: ${{ secrets.MONGODB_URI }}
+          storage: ./backups
+          recipients: ${{ vars.BACKUP_PUBLIC_KEY }}
+          args: --label trigger=github-actions --label run=${{ github.run_id }}
+
+      # Checks every file's checksum against the manifest. No key needed.
+      - name: Verify the new backup
+        uses: ShamalRathnayake/mongoshield/action@main
+        with:
+          command: verify
+          storage: ./backups
+          args: ${{ steps.backup.outputs.backup-id }}
+
+      # One artifact per night, named after the backup. GitHub deletes it after
+      # `retention-days`, which is the retention policy of this setup.
+      - name: Keep the backup as an artifact
+        uses: actions/upload-artifact@v4 # v4: current major
+        with:
+          name: atlas-backup-${{ steps.backup.outputs.backup-id }}
+          path: backups/
+          retention-days: 30
+          # The files are already zstd-compressed and encrypted; zipping again is wasted work.
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Summary
+        env:
+          BACKUP_ID: ${{ steps.backup.outputs.backup-id }}
+        run: echo "Atlas backup \`${BACKUP_ID}\` created, verified and kept for 30 days." >> "$GITHUB_STEP_SUMMARY"

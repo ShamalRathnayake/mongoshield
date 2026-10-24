@@ -18,7 +18,7 @@ Capture works the same way; it just never stops.
 
 | Term | Meaning |
 |---|---|
-| base backup | an ordinary complete backup whose manifest records a cluster time: `consistency.to` for converge, `consistency.from` for snapshot. Backups with consistency `none` cannot be a base. |
+| base backup | an ordinary complete backup whose manifest records a cluster time: `consistency.to` for converge, `consistency.from` for snapshot. Backups with consistency `none` cannot be a base, and neither can incremental backups (they hold changes, not data; a time an incremental chain covers is restored through the chain, see [FORMAT.md](FORMAT.md#incremental-backups)). |
 | journal | a chained sequence of segments of change events, with recorded gaps |
 | segment | one stored object holding every journaled event with a cluster time in `(from, to]` |
 | recovery point | the newest cluster time up to which the journal is complete (`state.json`) |
@@ -210,6 +210,10 @@ cluster time for exact control.
    base backup's indexes already); `skipIndexes` leaves them out.
 4. Report the exact cluster time restored to (`restoredTo`), the number of events and
    the indexes created and dropped (`indexesCreated`, `indexesDropped`).
+
+When the journal does not reach `at` (`MS_CHANGE_HISTORY_LOST`), `restore({ backup:
+"latest", at })` looks for an intact incremental chain that covers `at` and restores it up
+to `at` instead; the error lists the chains' ranges next to the journal's when none does.
 
 `mongoshield journal status` shows the recovery point, the RPO, the covered ranges and
 any gaps (`--json` for scripts, `--max-rpo 10m` exits 1 when the journal is further

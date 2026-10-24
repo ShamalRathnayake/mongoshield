@@ -4,6 +4,7 @@
  *   docs/guides/*.md  →  src/content/docs/guides/<name>.md
  *   docs/specs/*.md   →  src/content/docs/specs/<name in lower case>.md
  *   docs/errors.md    →  src/content/docs/reference/errors.md
+ *   docs/benchmarks.md → src/content/docs/compare/benchmarks.md
  *
  * The files in docs/ stay the source of truth and keep working on GitHub. For the
  * site, each copy gets:
@@ -54,14 +55,19 @@ const COLLECTIONS: readonly Collection[] = [
       "scheduling",
       "docker",
       "kubernetes",
+      "kubernetes-operator",
       "github-actions",
       "aws-lambda",
       "vercel",
       "atlas",
+      "atlas-free-tier",
+      "bun-and-deno",
       // Operating them.
       "observability",
       "immutable-backups",
       "point-in-time-recovery",
+      "incremental-backups",
+      "upgrade-rehearsal",
       // Other data workflows.
       "staging-data",
       "testing",
@@ -82,6 +88,12 @@ const SINGLE_FILES: readonly { source: string; target: string; editSource: strin
     target: "reference/errors.md",
     // errors.md is itself generated from the error definitions; edit those.
     editSource: "packages/mongoshield/src/errors.ts",
+  },
+  {
+    // Results of bench/compare.ts; the numbers come from bench/results/*.json.
+    source: "docs/benchmarks.md",
+    target: "compare/benchmarks.md",
+    editSource: "docs/benchmarks.md",
   },
 ];
 

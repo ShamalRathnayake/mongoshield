@@ -25,6 +25,19 @@ with `retention: { last: 24 }`, or two clusters with the same selection: neither
 ever prunes the other's backups. The run report counts the backups it left alone
 (`prune.outOfScope`).
 
+Two jobs with the **same** source and selection in one location (say a daily job keeping
+`last: 7` and a monthly one keeping `last: 12`) need something else to tell them apart:
+give each its own `retention.scopeLabels`. Every backup the job writes carries those
+labels, and its retention only covers backups that have them (`mongoshield prune` uses
+them too):
+
+```json
+{ "retention": { "last": 7, "scopeLabels": { "mongoshield.plan": "daily" } } }
+```
+
+The `mongoshield.plan` key also keeps incremental chains apart: an incremental only
+continues a backup with the same plan label.
+
 A run that cannot tell which deployment its backup came from skips the prune with a
 warning instead of guessing. Backups taken before scoped retention, or by code that
 calls `shield.backup()` without the shape label, are outside every job's scope; remove
@@ -89,6 +102,22 @@ drill: {
 A drill that finds problems fails the run with `MS_INTEGRITY_FAILED`, like a
 failed verification. See the restore drills section of the
 [observability guide](./observability.md).
+
+### Full weekly, incremental hourly
+
+With `backup.incremental`, each run stores only the changes since the previous backup,
+and takes a full backup whenever a new chain is due: the first run, once the chain's full
+backup is `fullEveryDays` old (default 7), at `maxChainLength`, or when an incremental is
+impossible (for example lost oplog history). An hourly cron then gives "full weekly,
+incremental hourly":
+
+```ts
+backup: { include: ["app.*"], incremental: { fullEveryDays: 7 } },
+schedule: { cron: "0 * * * *" },
+```
+
+The run report's `backup.kind` says which was taken. See
+[incremental backups](incremental-backups.md).
 
 ## Where to run it
 

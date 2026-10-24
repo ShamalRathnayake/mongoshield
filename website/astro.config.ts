@@ -88,7 +88,13 @@ export default defineConfig({
         { label: "Specs", collapsed: true, items: [{ autogenerate: { directory: "specs" } }] },
         {
           label: "Compare",
-          items: ["compare/mongodump", "compare/atlas", "compare/percona"],
+          items: [
+            "compare/mongodump",
+            // Generated from docs/benchmarks.md by scripts/sync-docs.ts.
+            "compare/benchmarks",
+            "compare/atlas",
+            "compare/percona",
+          ],
         },
         "limitations",
       ],

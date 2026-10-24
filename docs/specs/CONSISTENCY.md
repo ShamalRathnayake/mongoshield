@@ -237,6 +237,41 @@ Implemented in `src/engine/converge-targets.ts` (planning) and
    Building after the data replay means the intermediate states of the replay can
    never trip a unique index. `skipIndexes` leaves the window's index changes out too.
 
+### Incremental backups
+
+An incremental backup (FORMAT.md, "Incremental backups") is a converge window without
+dumps: the same capture, started right after its parent's end time P (the cluster time
+after P, so no event of the parent is recorded twice) and drained up to its own end.
+Two things differ, both because nothing is read besides the change stream:
+
+- **The end.** A converge T1 must not be earlier than anything the dumps read, so it is
+  the logical clock, erring late. An incremental's end only has to be a time up to which
+  the drain recorded everything: the cluster time of its time series snapshot (it copies
+  every time series whole in one snapshot read, FORMAT.md), or without time series the
+  `operationTime` of a `ping` (the last write the node applied); never earlier than P.
+  The logical clock can be ahead of the last oplog entry (a batched `deleteMany` reserves
+  a timestamp per document and writes one entry); a drain to it waits for the next
+  periodic no-op write, 10 s and more on an idle deployment.
+
+  Full converge backups keep the logical clock and therefore that wait. Their T1 must
+  bound every document the dumps read, and `operationTime` can lag behind writes the
+  node has already applied and a dump has already seen (observed on MongoDB 8.0 under
+  load): an early T1 would leave such a change out of the replay, so the restore would
+  mix moments. Ending at the stream's last position instead is not safe either: with an
+  oplog hole (a write that reserved an earlier timestamp and commits later) the stream
+  stops before writes a primary's dump can already read. The wait costs time, never
+  correctness; an incremental has no dumps, so it can end earlier.
+- **Renames.** The chain before the window holds every namespace the selection keeps as
+  of P, and every later change to it is in the window, so a rename out of such a
+  namespace never needs its destination recorded as of the rename (that snapshot read
+  would usually be outside the snapshot window, an hour after the fact). Scratch
+  collections (`tmp.*`) and namespaces the selection excludes still get the destination
+  records.
+
+The drain of an incremental times out only when the stream makes no progress for 5
+minutes (a long window can take longer than that to read). Lost history is
+`MS_CHANGE_HISTORY_LOST` with a hint to take a full backup.
+
 ### Why replay converges to T1
 
 Every document was read at some moment between T0 and T1. Replaying all events from T0

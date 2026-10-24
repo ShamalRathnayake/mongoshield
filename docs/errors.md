@@ -37,6 +37,7 @@ try {
 | [`MS_FORMAT_UNSUPPORTED`](#ms_format_unsupported) | 32 | The backup uses a format version this release cannot read. |
 | [`MS_INTEGRITY_FAILED`](#ms_integrity_failed) | 33 | Backup data failed an integrity check (checksum, size or count). |
 | [`MS_GUARD_FAILED`](#ms_guard_failed) | 34 | The backup guard refused a backup that looks like data was lost since the previous one. |
+| [`MS_BACKUP_PROTECTED`](#ms_backup_protected) | 35 | The backup cannot be deleted: it is on hold, under an object lock, or other backups depend on it. |
 | [`MS_ENCRYPTION_FAILED`](#ms_encryption_failed) | 40 | Encrypting backup data failed. |
 | [`MS_DECRYPTION_FAILED`](#ms_decryption_failed) | 41 | Backup data could not be decrypted or failed authentication. |
 | [`MS_NO_IDENTITY`](#ms_no_identity) | 42 | The backup is encrypted and no matching identity or passphrase was given. |
@@ -154,6 +155,12 @@ Backup data failed an integrity check (checksum, size or count).
 **`MS_GUARD_FAILED`** · exit code 34
 
 The backup guard refused a backup that looks like data was lost since the previous one.
+
+## ms_backup_protected
+
+**`MS_BACKUP_PROTECTED`** · exit code 35
+
+The backup cannot be deleted: it is on hold, under an object lock, or other backups depend on it.
 
 ## ms_encryption_failed
 

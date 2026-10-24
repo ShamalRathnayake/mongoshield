@@ -41,6 +41,13 @@ metadata files, and it can [import and export](/guides/mongodump/) mongodump out
   building them around `mongodump`.
 - You want safer restores (rename, dry run, refusing to overwrite) and restore drills.
 
+## Performance
+
+On one machine with local disk, MongoShield's zstd backups were 3.5–5× faster than
+`mongodump --gzip` for the same size, and restores were close. Uncompressed `mongodump`
+is the fastest way to get data out, and uses a third of the memory. The
+[benchmarks](/compare/benchmarks/) have the numbers, the method and the caveats.
+
 ## Moving between them
 
 - `mongoshield import ./dump` stores an existing dump as a MongoShield backup.

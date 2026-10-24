@@ -6,11 +6,15 @@ implementation.
 
 The console is a self-hosted web UI for everything around backups. You start one
 container, open a browser, add a connection and a storage location, and get
-scheduled, verified, encrypted backups with a point-and-click restore. It is
-deliberately **not** a data browser like MongoDB Compass: you can't edit live
-documents, run arbitrary queries or build aggregations. Leaving those out keeps it
-focused, and it keeps the security risk of a web app holding production credentials
-as small as possible.
+scheduled, verified, encrypted backups with a point-and-click restore. It also has a
+live data browser (databases → collections → documents, with filters, projections,
+sorts, counts, stats and indexes), and, when an admin turns it on for a connection,
+Compass-like editing of live documents. Unlike Compass, every live write is backed by
+MongoShield: it is conditional on the document not having changed since it was loaded,
+its pre-image is journaled first (sealed, in the connection's journal storage) so it can
+be undone from the Edit history page, and it is audited (see "Live data" below). The
+console still runs no arbitrary commands, shell or server-side JavaScript, and builds no
+aggregations.
 
 ```bash
 docker run -p 8080:8080 -v mongoshield:/data \
@@ -25,8 +29,9 @@ docker run -p 8080:8080 -v mongoshield:/data \
 packages/console          npm: @mongoshield/console (bin: mongoshield-console)
   src/server/             Hono app on @hono/node-server: REST API + static UI
   src/state/              the console's own data: one JSON document + audit log, atomic writes
-  src/jobs/               in-process job runner (backup / restore / verify / drill / prune)
+  src/jobs/               in-process job runner (backup / restore / verify / drill / prune / preview)
   src/server/oidc/        OIDC relying party: discovery, JWKS, ID token checks (node:crypto only)
+  src/server/live/        live data browser: conditional writes, the pre-image journal, undo
   src/ui/                 React 19 + Vite single-page app, built into dist/ui
 ```
 
@@ -55,12 +60,15 @@ packages/console          npm: @mongoshield/console (bin: mongoshield-console)
 3. **Roles:** `viewer` (read everything except secrets), `operator` (run backups,
    verifies and drills, restore into non-production targets), `admin` (everything,
    including connections, storage, users and restores into connections marked
-   "production").
+   "production"). On top of the role, an admin can grant a user the `data:write`
+   permission (operators and admins only), which live edits need; no role includes it.
 4. **SSO:** OIDC (authorization code + PKCE, see below), or trusted reverse-proxy
    headers (`X-Forwarded-User`, accepted only together with a shared secret header the
    proxy sets).
-5. **Restore safety:** restore and copy show a dry-run plan first. A restore into a
-   connection marked "production" requires typing the connection's name to confirm.
+5. **Restore safety:** restore and copy show a dry-run plan first, and the restore
+   wizard can preview what the restore would change in the target (read only, see
+   "Restore preview" below). A restore into a connection marked "production" requires
+   typing the connection's name to confirm.
 6. **Headers:** a strict CSP (no inline scripts), `X-Frame-Options: DENY`, `Referrer-Policy:
    no-referrer`, and HSTS when served over TLS.
 7. **Release gate:** the checklist in `docs/console-security.md` follows OWASP ASVS
@@ -148,6 +156,18 @@ state (all or nothing), and audits each record it creates or changes.
 - Connections are matched by their redacted URI and storage by URL; new connections are
   marked production. Existing connections and storage are never changed by an import.
 
+## Incremental plans
+
+A plan with `incremental: { fullEveryDays }` (the plan editor's "Incremental backups
+between full ones") runs with the library's `backup.incremental`: each run is an
+incremental backup of the changes since the plan's newest backup, and a full backup when
+there is none yet, when the chain's full backup is `fullEveryDays` old, or when an
+incremental is impossible (see docs/guides/incremental-backups.md). The plan label scopes
+which backups a run may continue, so two plans never chain onto each other. The field is
+exported as `backup.incremental` and imported from it (an empty `{}` takes the library's
+default of 7 days). Backup summaries mark incrementals (`kind: "incremental"`,
+`chainLength`), and retention keeps every backup a kept incremental depends on.
+
 ## Pruning
 
 A backup run applies its plan's retention right after the backup (as `mongoshield run`
@@ -166,18 +186,157 @@ Holds, immutable backups and each plan's newest complete backup are always kept 
 library's safety rules). Backups written before plans were labelled are outside every
 plan's scope; remove them with `mongoshield prune --all-sources` if needed.
 
+## Restore preview
+
+Between the dry-run plan and the confirmation, the restore wizard offers "Preview
+changes": what the restore would do to the target's data, before anything is written.
+`POST /api/restore/preview` takes the plan's body (storage, backup, target, include,
+exclude, rename, mode and typed keys; not `filter`: a selected-documents restore has no
+preview, its plan already counts what it replaces) and starts a `preview` job. The job
+plans the restore (`shield.planRestore`) and compares the backup with the target through
+the library's `diff` against the live deployment, with the same rename rules, so each
+backed-up namespace is compared with the namespace it would be restored into and with
+nothing else. `GET /api/restore/preview/:id` (the job id) then returns, per namespace:
+
+- documents only in the backup, only in the target, changed and identical (matched by
+  `_id`, compared by their exact BSON bytes);
+- what the chosen mode does with them (`effect`: inserted, replaced, deleted, kept;
+  none for a conflict or a skipped view), next to the plan's action;
+- index names that differ (only in the backup, only in the target, defined differently)
+  and the collection options that differ;
+- `accuracy`: `exact`, or `sampled` for namespaces with more than 100,000 documents,
+  whose first 1,000 backed-up documents are looked up in the target by `_id` and whose
+  counts are extrapolated (the UI says "Estimate" and prefixes them with ≈).
+
+`GET /api/restore/preview/:id/documents?ns=&category=changed|backup-only|live-only`
+pages through the `_id`s the preview kept (500 per namespace and category at most, fewer
+when there are many namespaces; for a target that does not exist yet, the first
+backed-up ones), and `POST /api/restore/preview/:id/document` with
+`{ ns, id }` (plus typed keys) shows one of them in both versions with the fields that
+differ, by dotted path, BSON types counting. Only listed `_id`s can be opened.
+
+Rules and bounds:
+
+- **Read only.** Planning and comparing use listCollections, listIndexes, counts and
+  `find`; the target is never written to.
+- **Roles.** Starting and reading a preview follows the dry-run plan's rules (operator,
+  admin for production targets, checked again on every request). `_id` lists and
+  document contents also need the document browser's role (`documentsVisible` in the
+  view says whether the user has it).
+- **Secrets.** Values of fields whose names look like secrets (password, token, apiKey,
+  privateKey, secret, credential, …) are shown as `***`, and the change is still
+  reported. Typed keys are used by the job and each document request and never stored;
+  connection strings and keys are scrubbed from errors as in every job.
+- **Bounds.** The job stops after 10 minutes (`CONSOLE_PREVIEW_TIMEOUT`) and can be
+  cancelled; leaving the wizard step cancels a running preview. Previews of one target
+  run one at a time, in their own lane (a long backup of the same deployment does not
+  hold them up). Results are kept in memory only: 20 previews at most, each for an hour.
+- **Audit.** `restore.preview` (start), `restore.preview_documents` (an `_id` page) and
+  `restore.preview_document` (a document), with namespaces and counts, never ids or
+  contents.
+
+## Live data
+
+The data browser (Connections → a connection → "Browse live data", `#/connections/:id/data`)
+reads a connection's databases directly. Reading needs the operator role, like the backup
+document browser, and is audited (`live.browse`: who, which namespace, how many documents;
+never the documents). `admin`, `config`, `local` and `system.*` collections are not
+browsable (they hold MongoDB's users, roles and replication state).
+
+- **Documents:** `GET /api/live/:id/documents?ns=&filter=&projection=&sort=&skip=&limit=`.
+  Filter, projection and sort are Extended JSON objects (≤ 16 KiB); `$where`,
+  `$function` and `$accumulator` are refused anywhere inside them; sorts are 1 or -1;
+  `limit` ≤ 100 and `skip` ≤ 100,000 (filter instead of paging deeper); queries time out
+  after 30 s. Each document comes as relaxed Extended JSON with its `_id` (canonical
+  Extended JSON) and its `version` (SHA-256 of its BSON). Documents read with a
+  projection are partial and carry no version, so they cannot be edited.
+- **Counts without explain:** no filter, the collection's metadata estimate
+  (`estimated`); with a filter, `countDocuments` bounded to 10,000 and 5 s (`exact`, or
+  `at-least` when it stopped).
+- **Collection:** `GET /api/live/:id/collection?ns=` gives the type, counts, sizes from
+  `$collStats` (document, storage and index bytes, average document size), the indexes
+  (key, unique, sparse, hidden, TTL, partial filter, size) and whether the caller may
+  write there (and why not).
+
+**Editing is off by default.** A write needs all of: the operator role or higher, the
+`data:write` permission (granted per user on the Users page; even admins need it), and
+"Allow live edits" turned on for the connection by an admin
+(`PUT /api/connections/:id/live-edits`). For a connection marked production, turning it on
+also needs the connection's name typed again and a reason; both are recorded (the reason
+on the connection and in the audit log). Marking a connection production later turns live
+edits off until an admin confirms again. The settings also choose the journal storage and
+the bulk cap (`maxBulkDocuments`, default 1,000, at most 10,000).
+
+Operations: edit a document (an Extended JSON editor that checks the text, shows a
+field-level diff and saves only after review), insert, duplicate (insert a copy without
+`_id`), delete one, and "update many" / "delete many" by filter. No replacement documents
+or pipelines in bulk updates: only the field update operators (`$set`, `$unset`, `$inc`,
+`$mul`, `$rename`, `$min`, `$max`, `$currentDate`, `$push`, `$pull`, `$pullAll`,
+`$addToSet`, `$pop`), and never on `_id`.
+
+**Every write is conditional.** The browser sends back the `version` it loaded. The
+server reads the document, refuses with `409 CONSOLE_LIVE_CONFLICT` if it changed (or was
+deleted), and then writes with a compare-and-swap filter (`_id` plus
+`$expr: {$eq: ["$$ROOT", {$literal: <pre-image>}]}`), so a change that slips in between
+the check and the write is refused by MongoDB itself. Edits keep the exact BSON type of
+every field the user did not touch (a double that reads `1` stays a double; a Long stays
+a Long), and an edit cannot change `_id`. Inserts get an ObjectId from the console when
+they have no `_id`, and never overwrite an existing `_id`.
+
+**The live edit journal.** Before any write, the console stores the document's pre-image
+(and intended post-image) in the journal; if that fails, nothing is written
+(`502 CONSOLE_LIVE_JOURNAL`). The journal lives in the connection's journal storage
+location (usually the one its backups go to) under `live-edits/<connection>/<entry>/`,
+outside `backups/`, so catalogs and retention never see it; without one it lives in the
+data directory (`<data>/live-journal/`). It is never kept in `console.json`, which is
+rewritten whole on every change, while pre-images can be 16 MiB each. Every journal object
+is sealed with the console's AES-256-GCM key (the key that protects stored secrets),
+with the connection, entry and part bound in as additional data, whatever encryption the
+plans writing to that storage use: pre-images are customer data and are never stored in
+plaintext. Only a console with the same `MONGOSHIELD_SECRET` can read them back, which is
+all undo needs. `console.json` keeps only the index (the newest 1,000 entries: who, when,
+namespace, `_id`, before/after hashes, counts, status).
+
+**Undo** (Edit history page, `POST /api/live-edits/:id/undo`, `data:write`) is the same
+conditional write in reverse: it restores the pre-image only while the document is still
+exactly what the edit left (else `409`, nothing changed), and it is journaled like any
+other edit, so undoing an undo redoes the edit. Single-document entries are undone at once;
+bulk entries by a job.
+
+**Bulk edits** need a preview first (`POST /api/live/:id/bulk/preview`: the matching count,
+the cap, and the text to type, e.g. `delete 42 documents in app.orders`). The confirmation
+(`POST /api/live/:id/bulk`) must repeat that text exactly and the previewed count; it starts
+a `live-edit` job (one per connection at a time) that refuses to run if the count has
+changed or is over the cap, collects the matching `_id`s, and then works 100 documents at
+a time: journal the batch's pre-images, change each document with its own compare-and-swap
+(documents that changed meanwhile are skipped and counted), and record the post-images.
+Jobs show progress and can be cancelled between batches.
+
+**Audit:** `connection.live_edits`, `live.browse`, `live.insert`, `live.update`,
+`live.delete`, `live.bulk_update(.start)`, `live.bulk_delete(.start)`, `live.undo(.start)`
+and `live.history_read`, with the connection, namespace, `_id`, the journal entry and the
+SHA-256 of the document before and after; refused writes are audited with
+`conflict: true`. Document contents never go into the audit log. Documents are shown as
+they are (no field is hidden: the user may edit any field), while error messages keep the
+usual scrubbing of connection strings and stored secrets.
+
+Live write bodies may be up to 1 MiB of Extended JSON (other API bodies stay at 64 KiB);
+larger documents are read-only here.
+
 ## API (JSON, under `/api`)
 
 | Resource | Endpoints |
 |---|---|
 | session | `POST /session` (login) · `DELETE /session` · `GET /session` · `POST /setup` |
 | users | CRUD (admin) |
-| connections | CRUD · `POST /connections/:id/test` (connects and checks privileges) · `GET /connections/:id/namespaces` (database/collection tree with counts, sizes and index counts) |
+| connections | CRUD · `POST /connections/:id/test` (connects and checks privileges) · `GET /connections/:id/namespaces` (database/collection tree with counts, sizes and index counts) · `PUT /connections/:id/live-edits` (admin) |
+| live data | `GET /live/:id/collection?ns=` · `GET /live/:id/documents?ns=&filter=&projection=&sort=&skip=&limit=` (operator) · `POST /live/:id/documents` (insert) · `PUT /live/:id/documents` (replace) · `POST /live/:id/documents/delete` · `POST /live/:id/bulk/preview` · `POST /live/:id/bulk` (job) (`data:write`) |
+| live edits | `GET /live-edits?connectionId=&limit=&before=` · `GET /live-edits/:id` (operator, audited) · `POST /live-edits/:id/undo` (`data:write`) |
 | storage | CRUD · `POST /storage/:id/test` (write, read and delete a probe object) |
 | plans | backup plans = connection + storage + selection + encryption + schedule + retention + notifications · CRUD · `POST /plans/:id/run` · `POST /plans/:id/prune/plan` (dry run) · `POST /plans/:id/prune` (job) |
 | backups | `GET /storage/:id/backups` (catalog) · `GET /…/:backupId` (manifest + annotations) · verify · drill · hold/release |
 | browse | `GET /…/:backupId/namespaces/:ns/documents?filter=&limit=&after=` (read-only, uses `findInBackup`) |
-| restore | `POST /restore/plan` (dry run) · `POST /restore` (job) |
+| restore | `POST /restore/plan` (dry run) · `POST /restore` (job) · `POST /restore/preview` (job) · `GET /restore/preview/:id` · `GET /restore/preview/:id/documents?ns=&category=&limit=&after=` · `POST /restore/preview/:id/document` |
 | jobs | `GET /jobs` · `GET /jobs/:id` · `GET /jobs/:id/events` (SSE) · `POST /jobs/:id/cancel` |
 | audit | `GET /audit` |
 | config | `GET /config/export` (as `mongoshield.config.ts`, secrets left as env references) · `POST /config/import` (dry run, then apply) |
@@ -194,12 +353,16 @@ change journal (read with the library's `journalStatus`, cached for 30 s),
 
 ## UI pages
 
-Overview (last runs, next runs, recovery point, warnings) · Connections · Storage ·
+Overview (last runs, next runs, recovery point, warnings) · Connections (with the live
+edit settings) → Live data (database/collection tree, documents, indexes, stats, and with
+`data:write` the editor with its diff review, insert, duplicate, delete and bulk edits) ·
+Edit history (journal entries, details, undo) · Storage ·
 Backup plans · Backups (list with "Apply retention…" → backup detail with namespaces,
-verification, drills, holds, a document browser and a restore wizard; the wizard
-takes a passphrase or age private keys for backups the console cannot decrypt itself,
+verification, drills, holds, a document browser and a restore wizard: choose, review
+the plan, preview the changes (summary per namespace, the documents of one, one
+document's fields side by side), confirm; the wizard takes a passphrase or age private keys for backups the console cannot decrypt itself,
 used for that restore only and never stored) · Jobs (live
-progress) · Audit · Users (with SSO-only accounts) · Settings (export and import of
+progress) · Audit · Users (with SSO-only accounts and the `data:write` permission) · Settings (export and import of
 the config) · Login (password and "Sign in with single sign-on").
 
 The visual design is calm and information-dense, like an ops tool. Status is shown
@@ -211,6 +374,13 @@ whole UI works with the keyboard.
 - **API tests** run against an in-process server with a real mongod (the test replica
   set) and memory storage. They cover each endpoint's authorization by role, CSRF
   rejection, secret redaction, the setup token's lifecycle and the audit entries.
+- **Live data tests** (`test/integration/live.test.ts`) cover browsing (filters,
+  projections, sorts, counts, stats, indexes, refused operators and namespaces), the
+  settings and their production rules, the `data:write` permission, conditional writes
+  and conflicts (including a change between the check and the write), type preservation,
+  the sealed journal in storage and in the data directory, undo and redo, bulk caps,
+  confirmations and jobs, and the audit entries; `roles.test.ts` checks that every
+  write route refuses every role without the permission.
 - **OIDC tests** run the whole redirect flow against an in-process fake provider
   (`test/helpers/oidc-provider.ts`: a real HTTP server with discovery, JWKS and a token
   endpoint that checks PKCE and client authentication and signs RS256/ES256/EdDSA tokens),
@@ -228,11 +398,13 @@ whole UI works with the keyboard.
   admin journey: first-run setup with the link from the server log, connections (the
   secret is never shown again), storage, a plan (namespace picker, age recipients,
   schedule preview), run now with live progress, verification, the document browser,
-  restoring selected documents and a whole backup into production (typed name, private
-  key) with the data checked in MongoDB, a drill, hold/release, a prune dry run, the
-  audit log and sign-out. The other specs cover what viewers and operators see and what
+  restoring selected documents, a restore preview over them (counts, the effect of
+  upsert, an edited document's fields), and a whole backup into production (preview,
+  typed name, private key) with the data checked in MongoDB, a drill, hold/release, a
+  prune dry run, the audit log and sign-out. The other specs cover what viewers and operators see and what
   the API refuses them, CSRF (including a tab whose token went stale), the theme
-  toggle, keyboard-only use of the restore wizard, and an accessibility smoke check on
+  toggle, keyboard-only use of the restore wizard (through its preview, down to one
+  document), and an accessibility smoke check on
   every page (landmarks, a level-1 heading, labelled controls, named buttons and links,
   `alt` on images). Every test fails on a console error or a CSP violation. Build first
   (`pnpm --filter mongoshield build && pnpm --filter @mongoshield/console build`);

@@ -1,54 +1,110 @@
-# Publishes to npm when changesets are merged to main.
-# Uses npm trusted publishing (OIDC): configure this repository + workflow as a trusted
-# publisher on npmjs.com. No NPM_TOKEN secret is stored anywhere.
+# Versions and publishes the npm packages with Changesets. See RELEASING.md.
+#
+# Every push to main runs changesets/action, which does one of two things:
+#   - there are unreleased changesets in .changeset/  -> open or update the
+#     "chore: version packages" pull request (bumps versions, writes CHANGELOG.md)
+#   - that pull request was just merged (no changesets left, versions not on npm yet)
+#                                                     -> `changeset publish`: publish to
+#     npm, push the git tags (mongoshield@X.Y.Z, @mongoshield/console@X.Y.Z) and create
+#     a GitHub release per package from its changelog
+# Then, if mongoshield was published, the Docker images are built for that version.
+#
+# In pre mode (.changeset/pre.json says "mode": "pre") versions look like 2.0.0-next.3
+# and go to the `next` dist-tag. After `changeset pre exit` and the version PR they are
+# stable and go to `latest`. Nothing in this file changes between the two.
+#
+# Authentication: npm trusted publishing (OIDC). npmjs.com trusts this repository +
+# this workflow file (configure it per package, see RELEASING.md), so no NPM_TOKEN
+# secret exists. `changeset publish` runs `pnpm publish`; pnpm (v11+) does the OIDC
+# token exchange itself and attaches provenance automatically for a public package
+# from a public repository, so the npm CLI version on the runner does not matter.
 name: Release
 
 on:
   push:
     branches: [main]
+  # Re-run a publish that failed half-way (e.g. one package published, the other not).
+  # `changeset publish` skips versions that are already on npm, so this is safe.
+  workflow_dispatch:
 
-concurrency: release-${{ github.ref }}
+# One release at a time, and never cancel one half-way through a publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
+# Nothing by default; each job asks for what it needs.
 permissions:
-  contents: write # create the "Version Packages" PR and tags
-  pull-requests: write
-  id-token: write # npm trusted publishing + provenance
+  contents: read
 
 jobs:
   release:
+    name: Version or publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the version commit, tags and GitHub releases
+      pull-requests: write # open/update the version pull request
+      id-token: write # npm trusted publishing (OIDC) + provenance
     outputs:
-      # Set by changesets/action; used below to build the matching Docker image.
+      # "true" when something was published to npm.
       published: ${{ steps.changesets.outputs.published }}
-      packages: ${{ steps.changesets.outputs.publishedPackages }}
+      # The mongoshield version just published (empty when it was not published).
+      mongoshield-version: ${{ steps.versions.outputs.mongoshield }}
     steps:
       - uses: actions/checkout@v5
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
+      # No `registry-url` on purpose: it writes an .npmrc with a placeholder
+      # NODE_AUTH_TOKEN, and a token (even a fake one) can get in the way of the OIDC
+      # exchange. The default registry is registry.npmjs.org anyway.
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - uses: changesets/action@v1
+      # The same package checks CI runs (publint + attw). Cheap, and a broken
+      # package must never reach npm even if CI was skipped for the merge.
+      - run: pnpm check:package
+
+      # changesets/action v2 needs @changesets/cli v3 (this repository uses v3).
+      - uses: changesets/action@v2
         id: changesets
         with:
-          publish: pnpm release
-          title: "chore: version packages"
-          commit: "chore: version packages"
+          # `pnpm build` already ran above; this only publishes, tags and releases.
+          publish-script: pnpm exec changeset publish
+          pr-title: "chore: version packages"
+          commit-message: "chore: version packages"
+          create-github-releases: true
         env:
+          # Read by @changesets/changelog-github while `changeset version` writes the
+          # changelogs (links to PRs and authors). The action itself uses its
+          # `github-token` input, which defaults to this same token.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Tags pushed with GITHUB_TOKEN don't trigger other workflows, so the image for a
-  # new npm release is built by calling the Docker workflow directly.
+      # `published-packages` is a JSON array like
+      #   [{"name":"mongoshield","version":"2.0.0"},{"name":"@mongoshield/console","version":"2.0.0"}]
+      # in no guaranteed order, so pick mongoshield by name rather than by position.
+      # The value goes through an environment variable, never into the script text.
+      - name: Find the published mongoshield version
+        id: versions
+        if: steps.changesets.outputs.published == 'true'
+        env:
+          PUBLISHED: ${{ steps.changesets.outputs.published-packages }}
+        run: |
+          version="$(jq -r '.[] | select(.name == "mongoshield") | .version' <<< "${PUBLISHED}")"
+          echo "mongoshield=${version}" >> "$GITHUB_OUTPUT"
+          echo "Published: ${PUBLISHED}"
+
+  # Tags pushed with GITHUB_TOKEN don't trigger other workflows, so the images for a
+  # new npm release are built by calling the Docker workflow directly. It builds both
+  # images (CLI and console); they share the version because the two packages are
+  # released in lockstep (`fixed` in .changeset/config.json).
   docker:
     needs: release
-    if: needs.release.outputs.published == 'true'
+    if: needs.release.outputs.mongoshield-version != ''
     uses: ./.github/workflows/docker.yml
     with:
-      version: ${{ fromJSON(needs.release.outputs.packages)[0].version }}
+      version: ${{ needs.release.outputs.mongoshield-version }}
     permissions:
       contents: read
       packages: write

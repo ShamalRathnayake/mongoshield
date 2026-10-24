@@ -1,0 +1,279 @@
+# Opt-in tests against REAL cloud services: AWS (S3, S3 Object Lock, KMS), Cloudflare
+# R2, Google Cloud (GCS, GCS object retention, Cloud KMS), Azure (Blob, Blob
+# immutability, Key Vault) and a remote SFTP server. They run the storage conformance
+# suite, an encrypted backup/restore round trip and KMS round trips
+# (packages/mongoshield/test/cloud), which the normal CI only runs against emulators.
+#
+# Runs on demand (Actions → Cloud → Run workflow) and weekly. Nothing here runs on
+# pull requests: forks must never get cloud credentials, and real clouds cost money.
+#
+# Every job is opt-in. A job runs only when its provider is configured through
+# repository *variables* (Settings → Secrets and variables → Actions → Variables);
+# otherwise it shows as skipped. Inside a job, each suite also skips itself when its
+# own variable is empty (e.g. no lock bucket configured → only the lock suite skips).
+# Setup, IAM policies and the full list of names: docs/testing-real-clouds.md.
+#
+# Credentials: AWS, Google Cloud and Azure use GitHub OIDC (short-lived tokens, no
+# stored keys). R2 and SFTP have no OIDC, so their keys are *secrets*. Secrets are
+# only ever passed through `env:` to the test process and are never echoed; GitHub
+# also masks them in logs.
+name: Cloud
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 05:17 UTC (an odd minute avoids the top-of-hour scheduling rush).
+    - cron: "17 5 * * 1"
+
+# One run at a time, and never cancelled midway: a cancelled run would skip the
+# cleanup in afterAll and leave objects behind until the lifecycle rules expire them.
+concurrency:
+  group: cloud-tests
+  cancel-in-progress: false
+
+# Least privilege by default. Jobs that use OIDC add `id-token: write` for themselves.
+permissions:
+  contents: read
+
+env:
+  # mongodb-memory-server downloads this server version for the round-trip tests.
+  MONGOMS_VERSION: "8.0.13"
+
+jobs:
+  aws:
+    name: AWS (S3, Object Lock, KMS)
+    # Configured = an IAM role for OIDC exists. Job-level `if` can read variables but
+    # not secrets, which is one reason the non-secret settings are variables.
+    if: vars.MONGOSHIELD_CLOUD_AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The OIDC trust policies are scoped to this environment (see the docs), so only
+    # jobs that declare it can assume the cloud roles. It can also require approval.
+    environment: cloud-tests
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for aws-actions/configure-aws-credentials
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      # Exchanges the GitHub OIDC token for temporary credentials of the test role
+      # (exported as AWS_* environment variables for the SDK's default chain).
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.MONGOSHIELD_CLOUD_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.MONGOSHIELD_CLOUD_AWS_REGION }}
+          role-session-name: mongoshield-cloud-tests
+      - name: Run the AWS cloud tests
+        run: pnpm --filter mongoshield test:cloud test/cloud/aws.test.ts
+        env:
+          MONGOSHIELD_TEST_S3_BUCKET: ${{ vars.MONGOSHIELD_TEST_S3_BUCKET }}
+          MONGOSHIELD_TEST_S3_LOCK_BUCKET: ${{ vars.MONGOSHIELD_TEST_S3_LOCK_BUCKET }}
+          MONGOSHIELD_TEST_S3_REGION: ${{ vars.MONGOSHIELD_CLOUD_AWS_REGION }}
+          MONGOSHIELD_TEST_AWS_KMS_KEY: ${{ vars.MONGOSHIELD_TEST_AWS_KMS_KEY }}
+
+  r2:
+    name: Cloudflare R2
+    if: vars.MONGOSHIELD_TEST_R2_BUCKET != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: cloud-tests
+    permissions:
+      contents: read
+    steps:
+      # The bucket variable is set, so the token secrets must be too. Checked without
+      # printing them: a missing secret is a setup mistake and fails loudly instead of
+      # letting the suite skip quietly.
+      - name: Check the R2 secrets are set
+        env:
+          ACCESS_KEY_ID: ${{ secrets.MONGOSHIELD_TEST_R2_ACCESS_KEY_ID }}
+          SECRET_ACCESS_KEY: ${{ secrets.MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$ACCESS_KEY_ID" ] || [ -z "$SECRET_ACCESS_KEY" ]; then
+            echo "::error::Set the secrets MONGOSHIELD_TEST_R2_ACCESS_KEY_ID and MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY (see docs/testing-real-clouds.md)."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      - name: Run the R2 cloud tests
+        run: pnpm --filter mongoshield test:cloud test/cloud/r2.test.ts
+        env:
+          MONGOSHIELD_TEST_R2_ACCOUNT_ID: ${{ vars.MONGOSHIELD_TEST_R2_ACCOUNT_ID }}
+          MONGOSHIELD_TEST_R2_BUCKET: ${{ vars.MONGOSHIELD_TEST_R2_BUCKET }}
+          MONGOSHIELD_TEST_R2_ACCESS_KEY_ID: ${{ secrets.MONGOSHIELD_TEST_R2_ACCESS_KEY_ID }}
+          MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY: ${{ secrets.MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY }}
+
+  gcp:
+    name: Google Cloud (GCS, object retention, Cloud KMS)
+    if: vars.MONGOSHIELD_CLOUD_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: cloud-tests
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for Workload Identity Federation
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      # Writes a short-lived external-account credentials file and points
+      # GOOGLE_APPLICATION_CREDENTIALS at it, which Application Default Credentials
+      # (used by @google-cloud/storage and @google-cloud/kms) pick up.
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.MONGOSHIELD_CLOUD_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MONGOSHIELD_CLOUD_GCP_SERVICE_ACCOUNT }}
+      - name: Run the Google Cloud tests
+        run: pnpm --filter mongoshield test:cloud test/cloud/gcp.test.ts
+        env:
+          MONGOSHIELD_TEST_GCS_BUCKET: ${{ vars.MONGOSHIELD_TEST_GCS_BUCKET }}
+          MONGOSHIELD_TEST_GCS_LOCK_BUCKET: ${{ vars.MONGOSHIELD_TEST_GCS_LOCK_BUCKET }}
+          MONGOSHIELD_TEST_GCP_KMS_KEY: ${{ vars.MONGOSHIELD_TEST_GCP_KMS_KEY }}
+
+  azure:
+    name: Azure (Blob, immutability, Key Vault)
+    if: vars.MONGOSHIELD_CLOUD_AZURE_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: cloud-tests
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for the app registration's federated credential
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      # Logs the Azure CLI in with OIDC; DefaultAzureCredential then uses that login
+      # (AzureCliCredential) for Blob Storage and Key Vault. The tests need no
+      # subscription-level access, hence allow-no-subscriptions.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.MONGOSHIELD_CLOUD_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.MONGOSHIELD_CLOUD_AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Run the Azure cloud tests
+        run: pnpm --filter mongoshield test:cloud test/cloud/azure.test.ts
+        env:
+          MONGOSHIELD_TEST_AZURE_ACCOUNT_URL: ${{ vars.MONGOSHIELD_TEST_AZURE_ACCOUNT_URL }}
+          MONGOSHIELD_TEST_AZURE_CONTAINER: ${{ vars.MONGOSHIELD_TEST_AZURE_CONTAINER }}
+          MONGOSHIELD_TEST_AZURE_LOCK_CONTAINER: ${{ vars.MONGOSHIELD_TEST_AZURE_LOCK_CONTAINER }}
+          MONGOSHIELD_TEST_AZURE_KEY_URL: ${{ vars.MONGOSHIELD_TEST_AZURE_KEY_URL }}
+
+  sftp:
+    name: SFTP (remote server)
+    if: vars.MONGOSHIELD_TEST_SFTP_HOST != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: cloud-tests
+    permissions:
+      contents: read
+    steps:
+      # As for R2: the host is configured, so the key must be too.
+      - name: Check the SFTP secret is set
+        env:
+          PRIVATE_KEY: ${{ secrets.MONGOSHIELD_TEST_SFTP_PRIVATE_KEY }}
+        run: |
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::Set the secret MONGOSHIELD_TEST_SFTP_PRIVATE_KEY (see docs/testing-real-clouds.md)."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      - name: Run the SFTP cloud tests
+        run: pnpm --filter mongoshield test:cloud test/cloud/sftp.test.ts
+        env:
+          MONGOSHIELD_TEST_SFTP_HOST: ${{ vars.MONGOSHIELD_TEST_SFTP_HOST }}
+          MONGOSHIELD_TEST_SFTP_PORT: ${{ vars.MONGOSHIELD_TEST_SFTP_PORT }}
+          MONGOSHIELD_TEST_SFTP_USERNAME: ${{ vars.MONGOSHIELD_TEST_SFTP_USERNAME }}
+          MONGOSHIELD_TEST_SFTP_HOST_FINGERPRINT: ${{ vars.MONGOSHIELD_TEST_SFTP_HOST_FINGERPRINT }}
+          MONGOSHIELD_TEST_SFTP_PATH: ${{ vars.MONGOSHIELD_TEST_SFTP_PATH }}
+          MONGOSHIELD_TEST_SFTP_PRIVATE_KEY: ${{ secrets.MONGOSHIELD_TEST_SFTP_PRIVATE_KEY }}
+
+  # A one-glance table of which providers ran, on the run's summary page. Reads only
+  # variables (never secrets), so it is safe to print.
+  summary:
+    name: Summary
+    if: always()
+    needs: [aws, r2, gcp, azure, sftp]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Write the summary
+        env:
+          AWS: ${{ needs.aws.result }}
+          R2: ${{ needs.r2.result }}
+          GCP: ${{ needs.gcp.result }}
+          AZURE: ${{ needs.azure.result }}
+          SFTP: ${{ needs.sftp.result }}
+        run: |
+          {
+            echo "## Real-cloud tests"
+            echo ""
+            echo "| Provider | Result |"
+            echo "|---|---|"
+            echo "| AWS (S3, Object Lock, KMS) | $AWS |"
+            echo "| Cloudflare R2 | $R2 |"
+            echo "| Google Cloud (GCS, retention, KMS) | $GCP |"
+            echo "| Azure (Blob, immutability, Key Vault) | $AZURE |"
+            echo "| SFTP | $SFTP |"
+            echo ""
+            echo "\`skipped\` means the provider is not configured; see docs/testing-real-clouds.md."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Fail the summary (and so the run) when any configured provider failed.
+          for result in "$AWS" "$R2" "$GCP" "$AZURE" "$SFTP"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then exit 1; fi
+          done

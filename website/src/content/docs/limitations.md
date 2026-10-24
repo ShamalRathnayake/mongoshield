@@ -11,10 +11,10 @@ consequences of taking *logical* backups through the driver.
 - **Logical backups only.** Restores re-insert every document and rebuild every index,
   so restore time grows with data size. For very large deployments, storage snapshots
   or physical backups restore faster (see [Compare](/compare/percona/)).
-- **User data only.** Users, roles, server settings and `system.*` collections are not
-  backed up.
-- **2.0 is pre-release.** It is published on the `next` npm tag while in development.
-- **The web console** ([spec](/specs/console/)) is a design, not yet implemented.
+- **User data first.** Server settings and `system.*` collections are not backed up.
+  Users and custom roles are only included with `includeUsersAndRoles` (off by default).
+- **Release candidate.** Until the first stable release (2.0.0) is out, install from the
+  `next` npm tag.
 
 ## Consistency and point-in-time recovery
 
@@ -45,6 +45,12 @@ consequences of taking *logical* backups through the driver.
   role.
 - The journal refuses passphrase encryption; use recipients or KMS keys.
 - Base backups must include every namespace the journal records.
+- [Incremental backups](/guides/incremental-backups/) need the oplog to reach back to
+  the previous backup, and the same include/exclude selection without `query` filters.
+  Every incremental copies its time series collections whole (in one snapshot read, so
+  a time series that takes longer than the snapshot window to read fails it) and
+  records every namespace's metadata. Long chains restore more slowly (every change
+  since the full backup is replayed).
 
 ## Encryption
 

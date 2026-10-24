@@ -84,6 +84,10 @@ These apply whatever the policy says:
 6. Backups dated in the future are kept.
 7. [Immutable backups](/guides/immutable-backups/) are kept until their lock expires;
    the storage would refuse to delete them anyway.
+8. **Chain integrity**: a backup that a kept [incremental backup](/guides/incremental-backups/)
+   depends on (its parent, the parent's parent, … its full base) is always kept, also when
+   the incremental belongs to another scope. Chains are only ever shortened at their
+   newest end, and go as a whole once nothing keeps any of their backups.
 
 ## Guarding against bad backups
 

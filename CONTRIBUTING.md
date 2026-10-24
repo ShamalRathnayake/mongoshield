@@ -32,6 +32,11 @@ export MONGOMS_SYSTEM_BINARY=$(which mongod)
 | `pnpm build` | build the package into `dist/` |
 | `pnpm check` | everything CI runs |
 
+The storage and KMS adapters are tested against emulators by default. To run the
+same tests against real AWS, Cloudflare R2, Google Cloud, Azure and SFTP
+(`pnpm --filter mongoshield test:cloud`, opt-in, never part of `pnpm test`), see
+[docs/testing-real-clouds.md](./docs/testing-real-clouds.md).
+
 ## How we write code
 
 Read [AGENTS.md](./AGENTS.md). The short version:

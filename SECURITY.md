@@ -16,7 +16,7 @@ acknowledge reports within 48 hours and to agree on a disclosure date with you.
 | Version | Supported |
 |---|---|
 | 2.x | Yes |
-| 1.x (alpha) | No. Please upgrade. |
+| Anything older than 2.0.0 | No. These were unrelated early prototypes; please use 2.x. |
 
 ## Scope
 

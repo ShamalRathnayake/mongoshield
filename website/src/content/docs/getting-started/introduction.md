@@ -9,8 +9,8 @@ copies MongoDB databases. It uses only the official Node.js driver: there is no
 container, a Kubernetes CronJob, GitHub Actions, AWS Lambda or Vercel.
 
 :::note[Status]
-MongoShield 2.0 is in active development and published on the `next` npm tag. The 1.x
-alpha line is deprecated.
+The first stable release, MongoShield 2.0.0, is being prepared. Until it is out,
+install from the `next` npm tag.
 :::
 
 ## What a backup is

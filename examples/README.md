@@ -5,7 +5,7 @@ README; the matching guides are in [`docs/guides`](../docs/guides/).
 
 | Example | What it shows |
 |---|---|
-| [`github-actions`](./github-actions/) | nightly backup + verify + prune with the MongoShield action and AWS OIDC |
+| [`github-actions`](./github-actions/) | nightly backup + verify + prune with the MongoShield action and AWS OIDC; Atlas Free/Flex templates for S3/R2 or GitHub artifacts |
 | [`docker-compose`](./docker-compose/) | app + MongoDB + MinIO + the MongoShield scheduler |
 | [`aws-lambda`](./aws-lambda/) | SAM template: Lambda on an EventBridge schedule, S3 bucket, error alarm |
 | [`vercel-cron`](./vercel-cron/) | Next.js route handler called by Vercel Cron |

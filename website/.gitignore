@@ -3,9 +3,10 @@ dist/
 .astro/
 
 # Pages generated before every dev/build run (see scripts/). Edit the sources instead:
-# docs/guides, docs/specs, docs/errors.md, the CLI command specs and the config schema.
+# docs/guides, docs/specs, docs/errors.md, docs/benchmarks.md, the CLI command specs and the config schema.
 src/content/docs/guides/
 src/content/docs/specs/
 src/content/docs/reference/cli/
 src/content/docs/reference/config.md
 src/content/docs/reference/errors.md
+src/content/docs/compare/benchmarks.md

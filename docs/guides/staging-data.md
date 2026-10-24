@@ -61,10 +61,129 @@ await shield.copy({
 Reads use the `secondaryPreferred` read preference by default (`readPreference`
 in the API), so a copy of a replica set loads a secondary, not the primary.
 
+## Finding what to mask
+
+You cannot mask a field you do not know about. `mongoshield mask suggest`
+samples every collection, finds personal data by value patterns **and** field
+names, and suggests a rule per field in the mask file format:
+
+```sh
+mongoshield mask suggest --from "$PROD_URI" --include 'app.*'
+```
+
+```
+app.users (1,000 documents sampled)
+  FIELD            FOUND                CONFIDENCE  MATCHED  EXAMPLE                  RULE                               STATUS
+  email            email                      1.00     100%  xxx.xxxxx@xxxx.xxx       { fake: "email" }                  new
+  ssn              national ID: us-ssn        1.00      99%  ###-##-####              "hash"                             new
+  firstName        person name                0.90     100%  Xxxx                     { fake: "name" }                   new
+  birthday         date of birth              0.90     100%  ####-##-##               { fake: "date-shift", days: 365 }  new
+  resetToken       secret: token              0.90     100%  [secret, 43 characters]  "hash"                             new
+  addresses.*.zip  postal code                0.75      98%  #####                    "redact"                           new
+
+6 new rules; add to the `rules` of your mask file:
+
+  "app.users": {
+    email: { fake: "email" }, // email · 100% of 1,000 values · confidence 1
+    …
+  },
+```
+
+It is careful with production, where it usually runs: it only reads (one
+`$sample` of at most `--sample` documents per collection, default 1000, at most
+10 000), one collection at a time, from a secondary when there is one, with a
+server-side time limit. Views and empty collections are skipped. Its output
+**never contains a sampled value**: examples are shapes (letters become `x`,
+digits `#`), secrets show only their length, and object keys that are data
+(a document keyed by email or user id) become `*` in paths.
+
+### What it detects
+
+| Found | How | Suggested rule |
+|---|---|---|
+| email | value pattern | `{ fake: "email" }` |
+| phone | E.164 (`+44 20 7946 0958`) and separated national formats; plain digits only when the field name says phone | `{ fake: "phone" }` |
+| person name | field name (`firstName`, `customerName`, `name` in `users` or under `owner`), confirmed by name-like values | `{ fake: "name" }` |
+| address | street patterns (`221B Baker Street`, `Hauptstraße 5`) and field names (`street`, `address.line1`) | `{ fake: "address" }` |
+| postal code | US ZIP+4, UK and Canadian postcodes by value; plain codes (`94105`) only when the field name says zip/postcode | `"redact"` |
+| card number | 13–19 digits passing the Luhn checksum, with a real issuer prefix | `"redact"` |
+| IBAN | country length and mod-97 checksum | `"redact"` |
+| IP address | IPv4 and IPv6 | `{ fake: "ip" }` |
+| national ID | US SSN, UK NI number, Spanish DNI/NIE, Brazilian CPF, Sri Lankan NIC, Indian Aadhaar (Verhoeff); with an id-like field name also Canadian SIN (Luhn), Dutch BSN (11-proef) and plain digit forms | `"hash"` |
+| date of birth | field name (`dob`, `birthDate`), confirmed by date values | `{ fake: "date-shift", days: 365 }` for dates, `"redact"` for strings |
+| secret | JWTs, vendor API keys (Stripe, GitHub, AWS, Slack, …), password hashes (bcrypt, argon2, …); random tokens when the field name says token/secret/key | `"drop"` for passwords, `"hash"` for tokens |
+| geolocation | GeoJSON geometries; `[lng, lat]` pairs and latitude/longitude numbers under location-like names | `"null"`; `{ hash: { range: [-90, 90] } }` for a latitude |
+| text with PII | notes and messages that contain emails or phone numbers | `"redact"` |
+
+When values are not the type an operation needs (a phone stored as a number),
+the rule falls back to `"hash"` for numbers and `"redact"` otherwise.
+
+Each finding has a **confidence** (0–1) and the **share** of sampled values
+that matched; findings below `--min-confidence` (default 0.5) are left out.
+Value evidence counts most where formats have checksums; a field name that
+agrees raises the confidence and lets a smaller share count. To keep the report
+worth reading, ObjectIds, UUIDs, hex digests, numbers (counters, prices),
+booleans and enums (a handful of values repeated across many documents, like
+`status`) never produce a finding on their own.
+
+**Review every rule.** Detection works on samples and patterns: a rare value
+outside the sample, or a format it does not know, is missed, and an unusual
+harmless field can be flagged.
+
+### Checking and updating a mask file
+
+With `--mask`, fields that the file already masks are marked `covered`
+(naming the rule, e.g. `covered by *.* → email (fake:email)`), and `kept` when a
+`keep` rule leaves them alone on purpose. Only the rest are suggested. Coverage
+uses the same rule selection as the copy itself, so a rule on `addresses.zip`
+covers `addresses.*.zip`, and `profile: "drop"` covers `profile.email`.
+
+`--write` adds the new rules to the `--mask` file:
+
+| The file | `--write` |
+|---|---|
+| does not exist | creates it: JSON for `.json`, a `defineMask` module for `.ts`/`.mts`/`.js`/`.mjs` (secret from `MONGOSHIELD_MASK_SECRET`) |
+| is a `.json` file | merges the new rules in; existing rules and keys are never changed |
+| is a TypeScript/JavaScript file | **leaves it untouched** and prints the snippet to paste |
+
+A mask module is a program: it can read `process.env`, compute keys, hold
+custom functions and comments, and rewriting it could silently change what
+gets masked. JSON has none of that, so it is the format to use when you want
+suggestions merged automatically. New rules are keyed by the exact namespace
+that was sampled, so they apply exactly where the data was found.
+
+```sh
+mongoshield mask suggest --include 'app.*' --mask ./mask.json --write
+# review mask.json, then
+mongoshield pull --include 'app.*' --mask ./mask.json
+```
+
+There is deliberately no `copy --mask-suggested`: masking from a fresh sample
+on every copy would make the masking depend on which documents happened to be
+sampled (a field could be masked one day and copied raw the next), and nobody
+would have reviewed the rules. Suggest, review, commit the mask file, then copy
+with it.
+
+From code, `suggestMasks(client, options)` returns the same report (with
+`rules` ready for `defineMask`), and `detectPii(documents)` runs the detectors
+on documents you already have:
+
+```ts
+import { defineMask, suggestMasks } from "mongoshield";
+
+const report = await suggestMasks(client, { include: ["app.*"], sampleSize: 500, mask: current });
+
+// Only `new` suggestions are in report.rules; add them namespace by namespace.
+const rules = { ...current.rules };
+for (const [ns, fields] of Object.entries(report.rules)) rules[ns] = { ...rules[ns], ...fields };
+const mask = defineMask({ ...current, rules });
+```
+
 ## Writing a mask file
 
 A mask file is TypeScript (or JavaScript) whose default export lists, per
-namespace pattern, a rule per field path:
+namespace pattern, a rule per field path (a `.json` file with a `rules`
+object works too, without functions or `process.env`):
 
 ```ts
 // mask.ts

@@ -11,6 +11,9 @@ Two ways to install:
 
 Both need Kubernetes 1.27+ (for the CronJob `timeZone` field).
 
+Prefer backups and restores as Kubernetes objects, with results in `status`, events and
+per-plan metrics? See the [Kubernetes operator](kubernetes-operator.md).
+
 ## 1. Secrets
 
 The chart never creates Secrets, so credentials stay out of Helm's release history.

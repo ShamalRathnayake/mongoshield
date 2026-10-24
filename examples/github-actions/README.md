@@ -27,3 +27,18 @@ Not on AWS? Any S3-compatible store works with
 runner IPs (see [docs/guides/atlas.md](../../docs/guides/atlas.md)).
 
 Full guide: [docs/guides/github-actions.md](../../docs/guides/github-actions.md).
+
+## Atlas Free (M0) and Flex clusters
+
+Two more templates back up an Atlas Free or Flex cluster, which has no (or only limited)
+Atlas backups. Both are linted with actionlint in CI:
+
+- [`atlas-free-tier-s3.yml`](./atlas-free-tier-s3.yml): to Amazon S3 or Cloudflare R2
+  (access keys as secrets), with verify, prune and an optional temporary Atlas IP Access
+  List entry for the runner.
+- [`atlas-free-tier-artifact.yml`](./atlas-free-tier-artifact.yml): no cloud account at
+  all; each night's encrypted backup is kept as a GitHub Actions artifact for 30 days.
+
+The secrets and variables each one needs are listed at the top of the file. Guide:
+[docs/guides/atlas-free-tier.md](../../docs/guides/atlas-free-tier.md).
+

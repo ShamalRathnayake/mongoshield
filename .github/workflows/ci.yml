@@ -65,6 +65,12 @@ jobs:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-${{ matrix.mongodb }}
       - run: pnpm coverage
+      # Smoke test of the benchmark harness (bench/compare.ts) on a tiny dataset: it
+      # only proves the harness still runs end to end; the numbers mean nothing here.
+      # Once per workflow run is enough, so only one cell of the matrix runs it.
+      - name: Benchmark harness smoke test
+        if: matrix.node == 24 && matrix.mongodb == '8.0.13'
+        run: pnpm --filter mongoshield bench --scale tiny --runs 1 --require-tools --output "$RUNNER_TEMP/bench-tiny.json"
 
   # Multi-member replica set, access control and a sharded cluster (Docker): the
   # deployments real users run. Slower than the main suite, so it has its own job.

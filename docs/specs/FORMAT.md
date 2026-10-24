@@ -31,6 +31,12 @@ backups/
       active_users.metadata.json.age      a view: metadata only, no data file
     _changes/
       window.bson.zst.age                 converge backups: the changes made while the backup ran
+  2026-11-14T04-00-02Z_1a2b3c/           an incremental backup: only the changes since its parent
+    manifest.json                         kind "incremental", chain { base, parent, length }
+    app/users.metadata.json.age           every selected namespace's metadata (content "metadata")
+    app/metrics.bson.zst.age              time series collections copied whole (content "full")
+    _changes/
+      window.bson.zst.age                 every change after the parent's end, up to this backup's end
 ```
 
 The layout is the one `mongodump --out` produces (a directory per database, a
@@ -269,17 +275,135 @@ as `changes`; its key is `_changes/window.bson[.zst|.gz][.age]`. (A collection n
 - `changes.events` is the number of events in the file; a reader that decodes the
   file SHOULD compare it.
 
+## Incremental backups
+
+An incremental backup stores only what changed since a previous backup, its **parent**.
+Backups form a **chain**: a full backup (the **base**) followed by incrementals, each
+continuing the one before it:
+
+```
+full (base)          incremental #1           incremental #2
+consistency.to = P0  from = P0, to = P1       from = P1, to = P2
+data files           changes in (P0, P1]      changes in (P1, P2]
+```
+
+- The parent's data is exact at one cluster time, its **end time**: `consistency.to`
+  for a `converge` backup and for an incremental, the read time (`consistency.from` =
+  `to`) for a `snapshot` backup. Backups with consistency `none` have no end time and
+  cannot be continued.
+- An incremental's changes file holds every change event with a cluster time strictly
+  after the parent's end time (`consistency.from`, exclusive) up to and including its
+  own end time (`consistency.to`), in the format of the converge changes file above
+  (same event shape, the same two enrichments, the same `synthesized` records). Readers
+  MUST ignore events after `consistency.to`; an event at exactly `consistency.from`
+  belongs to the parent and is a defect.
+- DDL is recorded like in a converge window: `create`, `drop`, `dropDatabase`,
+  `rename` and `createIndexes` / `dropIndexes`, replayed by the rules of
+  [CONSISTENCY.md](./CONSISTENCY.md#restore). A rename out of a namespace the chain
+  already holds needs no destination snapshot (the restore knows exactly what the
+  source held); a rename from a namespace the chain does not hold (an excluded
+  collection, an older `$out` scratch collection) gets the synthesized records.
+- `namespaces` lists every selected namespace as of the incremental, and every entry
+  says what it holds with `content`:
+  - `"metadata"` for collections and views: the metadata file only (options,
+    validators, collation, indexes with their TTL and hidden flags, a view's
+    definition), read during the window. Change events do not carry `collMod` or view
+    changes, so this is how a chain learns them. No data files, `documents` 0.
+  - `"full"` for time series collections: metadata and every measurement, dumped
+    exactly as a full backup dumps them, all in one snapshot read. Change streams do
+    not report time series writes, so each incremental copies them whole. The
+    snapshot's cluster time is the incremental's end (`consistency.to`), so the copies
+    are exact at it. When the snapshot cannot be read (it outlives the server's
+    snapshot window, `MS_SNAPSHOT_TOO_OLD`), the incremental fails; a time series is
+    never left out.
+  - `"full"` for the users and roles entries of a backup taken with
+    `includeUsersAndRoles` (a fresh copy).
+
+  `content` is required in incremental manifests and not allowed to be `"metadata"`
+  in full ones. `totals` count these entries and the changes file.
+- `selection` (written by every backup, full or incremental) records the
+  include/exclude patterns. A writer MUST only continue a parent from the same
+  deployment (`source.clusterId`) with the same selection and no `query`.
+- Each incremental is a self-contained backup in every other respect: its own
+  compression, its own encryption (its own key envelope for passphrase and KMS
+  backups), its own `immutableUntil`, labels and commit protocol.
+
+Manifest fields of an incremental (format version 2):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `formatVersion` | `2` | an incremental needs a reader that knows chains (see "Versioning") |
+| `kind` | `"incremental"` | absent (or `"full"`) on full backups |
+| `chain.base` | backup id | the full backup the chain starts from |
+| `chain.parent` | backup id | the backup this one continues: the base or the previous incremental |
+| `chain.length` | integer ≥ 1 | position after the base: 1 for the first incremental |
+| `consistency` | `{ mode: "converge", from, to }` | the change range `(from, to]`; `from` is the parent's end time |
+| `changes` | stored file plus `events` | required |
+| `namespaces[].content` | `"metadata"` or `"full"` | required on every entry (see above) |
+
+**Links.** A chain is intact when, from the incremental back to its base, every parent
+exists and is complete, `consistency.from` equals the parent's end time exactly,
+`chain.base` is the parent's base (or the parent itself when it is the full backup),
+`chain.length` is the parent's plus one (1 after the base), and every member records the
+same `source.clusterId`. A reader MUST refuse to restore a broken chain rather than
+restore part of it (`MS_BACKUP_NOT_FOUND` for a missing or incomplete member,
+`MS_INTEGRITY_FAILED` for links that do not line up).
+
+**Restoring a chain.** The restore's **state member** is the newest incremental of the
+chain whose `consistency.to` is at or before the restore's time (without a point in
+time: the selected incremental). To restore incremental *n*:
+
+1. Restore the base's collections as usual, without secondary indexes, and the state
+   member's time series collections from its own copies (not the base's: a time series
+   the state member does not hold was dropped and is not restored).
+2. Replay the base's own window (converge) and then the windows of incrementals 1 … *n*,
+   in order, as one stream (each bounded by its own `consistency.to`). Events of the
+   state member's time series and views are skipped: its copies are already exact.
+3. Build the base's indexes and apply the index changes of all the windows
+   (CONSISTENCY.md, restore steps 2 to 4).
+4. Bring each restored collection up to the state member's metadata with `collMod`:
+   `validator`, `validationLevel`, `validationAction`, `expireAfterSeconds` and
+   `changeStreamPreAndPostImages`, and the TTL and hidden flags of indexes both sides
+   have (src/engine/restore-metadata.ts). This comes last because a validator added
+   after the base may reject documents that were valid when written. Collections
+   restored into existing targets (`insert`, `upsert`) keep the target's options.
+5. Create the state member's views (its definitions; views dropped after the base are
+   not restored, views created after it are).
+
+The windows are back to back, so steps 2 and 3 are the converge argument once more: the
+collections end exactly as of incremental *n*'s `consistency.to`. A restore **to a point
+in time T** inside the chain uses the incrementals up to the first one whose
+`consistency.to` reaches T, stops its window at T, and takes time series, metadata and
+views from the state member as defined above (so they are as of the newest member that
+ends at or before T). Users and roles come from the newest member that holds them.
+
+**Retention.** A backup that a kept incremental depends on MUST NOT be deleted; pruning
+removes chains from their newest end, never from the middle (see
+`src/catalog/retention.ts`, rule 8). Copies to another storage location include the
+whole chain, parents first.
+
+Reference implementation: `src/engine/backup-incremental.ts` (writing),
+`src/catalog/chain.ts` (links), `src/engine/restore-chain.ts` and `restore-plan.ts`
+(restoring).
+
 ## The manifest
 
 `manifest.json` is UTF-8 JSON (plain JSON, not Extended JSON), pretty-printed with two
-spaces and a trailing newline. It is the commit marker and the table of contents of
+spaces and a trailing newline. Object members are written in the order the writer
+gives them; for the Extended JSON values the manifest carries (`files[].range`), that is
+the field order the server stored the value in, which plain `JSON.stringify` would
+change for integer-like keys (`{"b":1,"2":1}` is not `{"2":1,"b":1}`). Readers that
+compare such values MUST keep the order as written (see `src/format/ordered-json.ts`). It is the commit marker and the table of contents of
 the backup. It is never encrypted, so a backup can be listed, inspected and checked
 for integrity without any key; it therefore contains no secrets, but it does reveal
 database and collection names, document counts, sizes and labels.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `formatVersion` | integer | `1` for this specification |
+| `formatVersion` | integer | `1` for full backups, `2` for incremental backups (readers accept `2` for full backups too) |
+| `kind` | string, optional | `incremental` for an incremental backup (see [Incremental backups](#incremental-backups)); absent or `full` otherwise |
+| `chain` | object, optional | incremental backups only: `{ base, parent, length }` |
+| `selection` | object, optional | the backup's selection: `{ include, exclude, query }`, the sorted include and exclude patterns and the namespaces given a `query` (not the filters) |
 | `id` | string | the backup id; equals the backup's directory name |
 | `tool` | string | the writer, e.g. `mongoshield@2.0.0` |
 | `status` | `"complete"` | always `complete`: an incomplete backup has no manifest |
@@ -327,7 +451,10 @@ A stored file is `{ "key", "size", "sha256" }`:
 Entries of `files` may also carry `range` (added in 2.0 without a format bump; readers
 that ignore it lose nothing): the part's `_id` bounds as canonical Extended JSON,
 `{ "from": <inclusive>, "to": <exclusive> }`, with `{ "$minKey": 1 }` / `{ "$maxKey": 1 }`
-for the open ends (the last part also holds a document whose `_id` is `MaxKey`).
+for the open ends (the last part also holds a document whose `_id` is `MaxKey`). An
+`_id` bound that is an embedded document is written in the field order the server
+stored it in (see [The manifest](#the-manifest)), because the `_id` order compares
+embedded documents field by field.
 
 Because `size` and `sha256` cover the bytes as stored, anyone with read access can
 verify a backup's integrity without decrypting it. Readers SHOULD check both while
@@ -437,6 +564,10 @@ Every layer is a standard format, so a backup can be restored with off-the-shelf
    for a database), then run `mongorestore --dir <directory>`. Without the replay the
    result is the documents as read, i.e. consistency `none`.
 
+An incremental backup holds change events only. Without MongoShield, restore its base
+full backup as above; the changes files are standard BSON (`bsondump` prints them), but
+replaying them takes the rules of CONSISTENCY.md.
+
 ## Versioning and compatibility promise
 
 - `formatVersion` changes only when a reader of the previous version would
@@ -454,6 +585,12 @@ Every layer is a standard format, so a backup can be restored with off-the-shelf
 - Example: `immutableUntil` (immutable backups) was added within version 1. A reader
   that ignores it restores the backup normally; only its prune would attempt to delete
   locked objects early, which the storage refuses.
+- Example: incremental backups (`kind`, `chain`) are format version **2**. A version-1
+  reader would ignore `kind` and restore an incremental as an empty backup plus a replay
+  onto nothing, which is wrong data rather than an error, so incrementals carry a version
+  such a reader refuses (`MS_FORMAT_UNSUPPORTED`). Full backups are still written as
+  version 1, so every release keeps reading them. `selection` was added within version 1
+  (readers that ignore it lose nothing).
 - A MongoShield release reads every backup whose `formatVersion` is less than or equal
   to the highest version it knows. On a higher version it stops with
   `MS_FORMAT_UNSUPPORTED` and asks for an upgrade, instead of guessing.
