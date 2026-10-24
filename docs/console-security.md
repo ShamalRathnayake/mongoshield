@@ -12,7 +12,9 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 
 | # | Requirement | Where | Test | Status |
 |---|---|---|---|---|
-| 2.1 | No default credentials. The first admin is created with a single-use setup token printed at startup | `src/state/sessions.ts` (`issueSetupToken`), `src/server/routes/session.ts` (`POST /api/setup`), `src/server/services.ts` | `test/integration/auth.test.ts` "setup token" | ✅ |
+| 2.1 | No default credentials. The first admin is created with a single-use setup token printed at startup, or without it during the setup window (2.1a), or from the environment (2.1b) | `src/state/sessions.ts` (`issueSetupToken`), `src/server/routes/session.ts` (`POST /api/setup`), `src/server/services.ts` | `test/integration/auth.test.ts` "setup token", `test/integration/first-run.test.ts` | ✅ |
+| 2.1a | Setup window: while no user exists, `POST /api/setup` works without the token for `MONGOSHIELD_SETUP_WINDOW_MINUTES` after start (default 15, 0 = off, at most 1440); it closes for good once an admin exists, a given token must still be valid, the origin check and password rules apply, `GET /api/session` reports `tokenRequired`/`windowEndsAt`, the page and the log announce it, and `setup.complete` is audited with `method` and the client address | `routes/session.ts` (`setupWindowOpen`), `services.ts`, `main.ts`, `src/ui/pages/setup.tsx` | `first-run.test.ts` "the setup window" (test clock and fake timers) | ✅ |
+| 2.1b | Environment admin: `MONGOSHIELD_ADMIN_USERNAME` (or `_EMAIL`) + `MONGOSHIELD_ADMIN_PASSWORD` or `_PASSWORD_FILE` create the admin at start only while no user exists (same check-and-set as setup), never change existing accounts, need a ≥ 12-character password, refuse half or contradictory settings, and are audited as actor `environment` | `src/server/config.ts` (`readInitialAdmin`), `services.ts` (`provisionAdmin`) | `config.test.ts`, `first-run.test.ts` "the admin from the environment" | ✅ |
 | 2.2 | The setup token is random (256 bit), stored hashed, expires after 24 h, works once, and is replaced at every start until setup is done | `src/state/sessions.ts` | `auth.test.ts` (expiry, reuse, restart), `src/state/sessions.test.ts` | ✅ |
 | 2.3 | Passwords are at least 12 characters, at most 1024; no composition rules (NIST 800-63B) | `src/server/routes/session.ts` (`passwordField`) | `auth.test.ts` "requires a strong enough password", `resources.test.ts` "weak passwords" | ✅ |
 | 2.4 | Passwords are stored with scrypt, N = 2^17, r = 8, p = 1, a 16-byte random salt, and parameters stored with each hash | `src/state/passwords.ts` | `src/state/passwords.test.ts` | ✅ |
@@ -85,11 +87,12 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 
 | # | Requirement | Where | Test | Status |
 |---|---|---|---|---|
-| 6.1 | The console refuses to start without `MONGOSHIELD_SECRET` (≥ 32 characters) and explains why | `src/server/config.ts`, `src/state/store.ts` | `src/server/config.test.ts`, `store.test.ts` | ✅ |
+| 6.1 | The secret is `MONGOSHIELD_SECRET` or the file in `MONGOSHIELD_SECRET_FILE` (≥ 32 characters; both at once refused; the variable is used exactly as given). Without either, a 256-bit secret is generated once into `<data>/secret.key`: written atomically (temp file, fsync, no-clobber `link`, directory fsync), mode 0600; refused when it is not a regular file, is accessible to group or others, or is not 64 hex characters; never generated for a data directory whose state was created with an operator's secret (refused with an explanation) | `src/server/config.ts` (`readSecret`), `src/state/secret-key.ts`, `src/server/main.ts` | `src/server/config.test.ts`, `src/state/secret-key.test.ts`, `store.test.ts`, `docker/smoke/console-zero-setup.sh` | ✅ |
 | 6.2 | Stored secrets (URIs, storage credentials, passphrases, webhook URLs) are encrypted with AES-256-GCM, random 96-bit IV, key = HKDF-SHA256(secret, per-directory salt, `mongoshield-console/v1`) | `src/state/crypto.ts`, `src/state/secrets.ts` | `crypto.test.ts`, `resources.test.ts` "console.json free of plaintext secrets" | ✅ |
 | 6.3 | Each ciphertext is bound to its record and field (GCM additional data), so ciphertexts cannot be swapped between records | `crypto.ts`, `secrets.ts` | `crypto.test.ts` "moved to another context" | ✅ |
 | 6.4 | Starting with a different secret fails immediately (key check value) | `store.ts` (`assertKeyMatches`) | `store.test.ts`, `resources.test.ts` "refuses a different secret" | ✅ |
 | 6.5 | Only `node:crypto` is used; tokens come from the CSPRNG; secrets are compared in constant time | `crypto.ts` | `crypto.test.ts` | ✅ |
+| 6.6 | Managed backup keys: an age X25519 pair from the library's `generateIdentity`; the private key is sealed like every stored secret (context `plan:<id>:identity`), never in a view, scrubbed from errors; it is handed out only by `POST /api/plans/:id/recovery-key` (admin, CSRF, `no-store`, audited with the public key only); a plan whose recovery key was never downloaded cannot be deleted or switched to another encryption | `src/server/routes/plans.ts`, `src/state/secrets.ts`, `src/jobs/tasks.ts`, `src/server/app.ts` (`knownSecrets`) | `test/integration/onboarding.test.ts` "Back up now" | ✅ |
 
 ## V7 Errors and logging
 
@@ -112,6 +115,8 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 | 8.3 | `console.json` (0600) is written atomically: temp file, fsync, rename, directory fsync | `src/state/atomic.ts` | `store.test.ts` "saves updates atomically" | ✅ |
 | 8.4 | Only one process may own a data directory (heartbeat lock; abandoned locks are taken over after 30 s) | `src/state/lock.ts` | `store.test.ts`, `resources.test.ts` "refuses a second console" | ✅ |
 | 8.4a | The live edit journal (pre-images and post-images) is sealed with AES-256-GCM under the console's key, bound to connection, entry and part (no swapping), stored outside `backups/` in the connection's journal storage or `<data>/live-journal`, never in `console.json` or the audit log; `console.json` keeps only hashes and counts; a storage location holding a journal cannot be deleted | `src/server/live/journal.ts`, `routes/storage.ts` | `journal.test.ts` "the journal", `live.test.ts` "keeps sealed pre-images…", "protect the journal storage…" | ✅ |
+| 8.4b | The connection check (`POST /api/connections/check`) is admin-only, like creating a connection (it can reach exactly what a saved connection can); it reads metadata only, scrubs the URI from every message, refuses placeholders, and audits the redacted URI and the problem kind. Remembered checks are keyed by the URI's SHA-256, per console, for 10 minutes | `src/server/routes/onboarding.ts`, `src/server/connection-check.ts` | `onboarding.test.ts` "checking a pasted connection string" | ✅ |
+| 8.4c | The public IP lookup contacts `https://checkip.amazonaws.com/` only when an admin clicks it (`POST`, CSRF), times out after 5 s, and passes on the answer only if it is an IP address | `routes/onboarding.ts` (`lookUpPublicIp`) | `onboarding.test.ts` "the public IP lookup" | ✅ |
 | 8.5 | `/healthz` reveals nothing but liveness; `/metrics` is off unless `MONGOSHIELD_METRICS_TOKEN` is set, then needs it as a bearer token; journal reads for metrics are cached (30 s) and time out (10 s), so scrapes cannot load the storage | `routes/health.ts` | `auth.test.ts` "metrics", `metrics.test.ts` | ✅ |
 
 ## V9 Communications
@@ -149,6 +154,40 @@ a restore, so it is listed here threat by threat.
 | Silent type corruption by editing relaxed JSON (double → int, Long → int) | Untouched fields keep their stored BSON values; the diff shows exactly which fields change | `documents.test.ts` "mergeEdit", `live.test.ts` "keeps the BSON type…" |
 | Expensive queries degrade the database | Page ≤ 100, `skip` ≤ 100,000, 30 s `maxTimeMS`, bounded counts, one bulk job per connection at a time | `live.test.ts` |
 | Credentials leak through driver errors | Driver messages are scrubbed of the connection URI; unexpected errors stay generic | `errors.ts`, `live.test.ts` "describes MongoDB's refusals" |
+
+## First run: threats and trade-offs
+
+`docker run` plus a browser must be enough, so three things that used to need the operator
+now have defaults: the secret, the first admin, and a storage location. Each default is a
+trade-off, stated here, and each can be replaced by the operator's own choice.
+
+| Threat | Mitigation | Residual risk / trade-off | Test |
+|---|---|---|---|
+| Someone else on the network creates the first admin during the setup window (a race) | The window is short (15 min), opens only while no user exists, closes for good with the first admin, and is announced on the setup page and in the log; setup is audited with the client address and logged; the docs and the Compose example publish on `127.0.0.1` until setup is done; `MONGOSHIELD_SETUP_WINDOW_MINUTES=0` restores token-only setup; `MONGOSHIELD_ADMIN_*` removes the window entirely | A console exposed to the internet during its first 15 minutes can be claimed by whoever finds it first. The operator would notice (their own setup then reports "Setup is already complete", and the audit log names the address) but the console must then be wiped and restarted | `first-run.test.ts` |
+| A web page the admin visits creates the admin through their browser (CSRF on setup) | `POST /api/setup` keeps the same-origin check and JSON-only bodies, window or not | none known | `first-run.test.ts` "still enforces … the origin check" |
+| Brute-forcing the setup token | 256-bit token, hashed, rate-limited (unchanged) | none | `auth.test.ts` |
+| Theft of the volume reveals every stored connection string | — | **Accepted for the default.** The generated `secret.key` lives in the same volume as `console.json`, so a copy of `/data` (a volume backup, a stolen disk) holds both. Encryption at rest still protects `console.json` on its own (support bundles, logs, a misplaced copy of one file). Operators who need the separation pass `MONGOSHIELD_SECRET` / `MONGOSHIELD_SECRET_FILE` from a secret manager on a fresh volume. The log says this when it generates the key | `secret-key.test.ts` |
+| A tampered or loosened `secret.key` (symlink to elsewhere, world-readable after a copy, truncated) | Refused at startup with the fix (`chmod 600`, restore from backup) instead of deriving a different key | none known | `secret-key.test.ts` |
+| An existing deployment restarted without its `MONGOSHIELD_SECRET` silently gets a new key | Never: a key is only generated for a data directory without `console.json`; otherwise the start is refused with an explanation. A changed secret is refused as before (key check) | none | `secret-key.test.ts`, `docker/smoke/console-zero-setup.sh` |
+| The environment admin overwrites an account later (a stale `MONGOSHIELD_ADMIN_PASSWORD`) | Applied only while no user exists; later starts log that it was ignored | The password stays in the environment of the container (use `_PASSWORD_FILE` with a secret mount, and change the password in the console afterwards) | `first-run.test.ts` |
+| Backups with a managed key become unreadable (key lost with the console) | The recovery key is offered after the first backup, the bar reminds until it is downloaded, and plans with an unsaved key cannot be deleted or re-keyed | If the volume is lost before anyone downloaded the key, its backups are lost too (they are usually in the same volume: "Local backups"). Add an off-machine storage location for real disaster recovery | `onboarding.test.ts` |
+| The recovery key leaks through the API | Admin-only `POST` with CSRF, `Cache-Control: no-store`, audited without the key; never in views, errors or the audit log | Anyone with an admin session can download it (as they could restore the backups anyway) | `onboarding.test.ts` |
+| Local backups share the volume with the console | Encrypted by default (managed key); the storage page and docs say where they are | A lost volume loses both. This default favours a working first backup over durability; add S3, GCS, Azure or SFTP | n/a |
+
+**Alternatives considered for the first admin:**
+
+- **Token only (the old behaviour).** Safest against the race, but the token must be copied
+  from `docker logs`, which defeats `docker run` + browser. Still available:
+  `MONGOSHIELD_SETUP_WINDOW_MINUTES=0`.
+- **Loopback only** (allow token-less setup only from 127.0.0.1). Does not work in
+  containers: with `-p 8080:8080` requests arrive from the Docker bridge gateway, not from
+  loopback, and trusting the bridge address would trust every container on it. Rejected.
+- **A generated password printed in the log** (as some appliances do). The same copy step as
+  the token, plus a credential that lives in log aggregation. Rejected.
+- **A default password** that must be changed. Forbidden by 2.1 (no default credentials).
+- **The setup window (chosen)**, the pattern Portainer uses (5 minutes there): no copy step,
+  a bounded and announced risk, and the token as a fallback. With **`MONGOSHIELD_ADMIN_*`**
+  for headless installs (Compose, Kubernetes), where nobody opens the page first.
 
 ## Follow-ups
 

@@ -3,10 +3,20 @@
 #
 # When it runs, and what it pushes:
 #   pull request touching the image  build linux/amd64, smoke-test, Trivy scan; push nothing
-#   push to main                     the above, then push multi-arch `:next` and `:sha-<short>`
+#   push to main                     the above, then push multi-arch `:next` and `:sha-<short>`;
+#                                    the console image also gets `:latest` (see below)
 #   release tag mongoshield@X.Y.Z    push `:X.Y.Z`, `:X.Y`, `:X` and `:latest` (no `latest`,
 #     (or vX.Y.Z)                    `X.Y` or `X` for prereleases such as 2.0.0-next.3)
 #   workflow_call / dispatch         same as a tag, for the version passed in
+#
+# Why the console's `:latest` follows main: its quickstart is the tag-less one-liner
+# `docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console`,
+# which pulls `:latest`. While 2.0 is in prerelease no release ever moves `:latest`
+# (prereleases get only their exact tag), so without this the one-liner would not work
+# at all. The trade-off: between releases `:latest` is the newest main build, not the
+# newest release; pin `:X.Y.Z` for production. After GA, set `latest-on-main: false`
+# for the console entry if `:latest` should track releases only (RELEASING.md). The CLI
+# and operator images keep the release-only `:latest`.
 #
 # Every pushed image gets an SBOM and SLSA provenance attestation (attached by BuildKit)
 # and a keyless cosign signature (Sigstore, using this workflow's GitHub OIDC identity).
@@ -27,10 +37,11 @@ name: Docker
 on:
   pull_request:
     paths:
-      - docker/**
+      - docker/** # includes docker/smoke/ (the console's end-to-end smoke tests)
       - .dockerignore
       - .github/workflows/docker.yml
       - packages/mongoshield/**
+      - packages/console/**
       - packages/operator/**
       - pnpm-lock.yaml
   push:
@@ -79,6 +90,8 @@ jobs:
             dockerfile: docker/Dockerfile
           - image: mongoshield-console
             dockerfile: docker/console.Dockerfile
+            # `:latest` also on pushes to main (see the header): the quickstart needs it.
+            latest-on-main: true
           # The operator has its own 0.x version line (its CRDs are v1alpha1), so a
           # release tags its image with packages/operator/package.json's version.
           - image: mongoshield-operator
@@ -141,6 +154,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
             type=semver,pattern={{major}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
             type=raw,value=next,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' && matrix.latest-on-main == true }}
             type=sha,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' }}
 
       # QEMU lets the amd64 runner build the arm64 image. Only the deps stage runs
@@ -172,19 +186,26 @@ jobs:
           docker run --rm "${LOCAL_IMAGE}" --help
           test "$(docker inspect --format '{{.Config.User}}' "${LOCAL_IMAGE}")" = "65532:65532"
 
-      # The console must refuse to start without its secret, and with one it must
-      # serve /healthz and print the one-time setup link.
-      - name: Smoke test (console)
+      # The console's zero-setup promise, end to end against a real MongoDB 8 replica set:
+      # no env and a fresh volume → generated secret.key, setup window (admin without
+      # the token), connection check, "Back up now" into Local backups (encrypted with a
+      # console-kept key), restore checked with mongosh, recovery key, restart with the
+      # same key, a different MONGOSHIELD_SECRET refused, HEALTHCHECK healthy, SIGINT and
+      # SIGTERM exit 0, and an explicit/too-short MONGOSHIELD_SECRET as before.
+      - name: Smoke test (console, zero setup)
         if: matrix.image == 'mongoshield-console'
-        run: |
-          set -euo pipefail
-          if docker run --rm "${LOCAL_IMAGE}"; then echo "started without MONGOSHIELD_SECRET" >&2; exit 1; fi
-          docker run -d --name console -p 8080:8080 -e MONGOSHIELD_SECRET="$(openssl rand -hex 32)" "${LOCAL_IMAGE}"
-          for attempt in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
-          curl -fsS http://localhost:8080/healthz
-          docker logs console 2>&1 | grep -q "/setup?token="
-          docker stop console
-          test "$(docker inspect --format '{{.Config.User}}' "${LOCAL_IMAGE}")" = "65532:65532"
+        env:
+          SMOKE_PORT: "8080"
+        run: docker/smoke/console-zero-setup.sh "${LOCAL_IMAGE}"
+
+      # Atlas-style `mongodb+srv://` strings from the distroless image: SRV + TXT lookups
+      # (CoreDNS on the Docker network), TLS required by mongod with a private CA mounted
+      # as tlsCAFile, the TXT record's authSource honoured, and TLS/DNS failures explained.
+      - name: Smoke test (console, SRV + TLS)
+        if: matrix.image == 'mongoshield-console'
+        env:
+          SMOKE_PORT: "8081"
+        run: docker/smoke/console-srv-tls.sh "${LOCAL_IMAGE}"
 
       # The operator needs a cluster to do anything, but without one it must still
       # start, serve /healthz and shut down cleanly on SIGTERM.

@@ -180,9 +180,16 @@ per user, and backed by MongoShield: every write is conditional on the document 
 having changed, its pre-image is journaled first so it can be undone, and it is audited.
 
 ```bash
-docker run -p 8080:8080 -v mongoshield-console:/data \
-  -e MONGOSHIELD_SECRET="$(openssl rand -hex 32)" ghcr.io/shamalrathnayake/mongoshield-console
+docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console
 ```
+
+Open http://localhost:8080, create the admin, paste your connection string (Atlas strings
+included) and click **Back up now**: three clicks to an encrypted, verified backup in the
+volume, then one click each to restore it, check it or make it nightly. Nothing to
+configure first: the console generates its secret into the volume, lets the first visitor
+create the admin for 15 minutes after start, and creates a "Local backups" location. Each
+of these can be chosen yourself instead (`MONGOSHIELD_SECRET`, `MONGOSHIELD_ADMIN_*`, …);
+the trade-offs are in the [Docker guide](./docs/guides/docker.md#the-web-console).
 
 See [docs/specs/CONSOLE.md](./docs/specs/CONSOLE.md) and
 [docs/console-security.md](./docs/console-security.md).

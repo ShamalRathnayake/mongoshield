@@ -3,9 +3,17 @@
 # MongoShield Console container image: the self-hosted web UI for backups.
 #
 #   docker build -f docker/console.Dockerfile -t mongoshield-console .
-#   docker run -p 8080:8080 -v mongoshield-console:/data \
-#     -e MONGOSHIELD_SECRET="$(openssl rand -hex 32)" mongoshield-console
-#   # then open the one-time setup link printed in the log
+#   docker run -p 8080:8080 -v mongoshield:/data mongoshield-console
+#   # then open http://localhost:8080 and create the admin (within 15 minutes of start)
+#
+# Zero setup: with no environment at all, the first start generates the secret that
+# encrypts stored credentials (/data/secret.key, mode 0600), creates the "Local backups"
+# storage location (/data/backups), and lets the setup page create the first admin
+# without the token for 15 minutes (the one-time link in the log works any time).
+# Bring your own secret with MONGOSHIELD_SECRET or MONGOSHIELD_SECRET_FILE, and a
+# pre-made admin with MONGOSHIELD_ADMIN_USERNAME + MONGOSHIELD_ADMIN_PASSWORD(_FILE);
+# see docs/guides/docker.md. docker/smoke/console-zero-setup.sh tests all of this
+# against a real MongoDB, and docker/smoke/console-srv-tls.sh tests mongodb+srv:// + TLS.
 #
 # Build from the repository root. Same three-stage layout as docker/Dockerfile (read
 # that file for the reasoning behind each choice); the differences are:
@@ -66,7 +74,9 @@ RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
  && npm install --omit=dev --ignore-scripts --no-audit --no-fund /tmp/console.tgz
 
 # The state volume's mount point, owned by the runtime user so a fresh named
-# volume inherits that ownership and is writable without a chown.
+# volume inherits that ownership and is writable without a chown (Docker copies the
+# image's /data, including its owner 65532, into an empty named volume on first use).
+# A bind-mounted host directory is not prepared that way: chown it to 65532 first.
 RUN mkdir -p /data
 
 
@@ -95,9 +105,10 @@ USER 65532:65532
 WORKDIR /app
 EXPOSE 8080
 
-# The console's state (connections, plans, users, audit log) lives here. Back the
-# volume up too: losing it means re-entering connections, not losing backups, which
-# stay in their storage locations.
+# The console's state (connections, plans, users, audit log, the generated secret.key)
+# and the default "Local backups" location live here. Back the volume up, and keep that
+# copy private: it holds the key next to what it encrypts. Backups that must survive the
+# loss of this machine belong in an off-machine location (S3 and friends).
 VOLUME ["/data"]
 
 # Unlike the CLI image, the console is a long-running web server, so a health check
@@ -106,5 +117,7 @@ VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 
-# The server handles SIGTERM itself (finishes running jobs within a grace period).
+# The server handles SIGTERM and SIGINT itself (finishes running jobs within a grace
+# period, then exits 0), so `docker stop` and Ctrl-C under `docker run -it` stop it
+# promptly without `--init`, even though Node.js runs as PID 1.
 ENTRYPOINT ["/nodejs/bin/node", "/app/node_modules/@mongoshield/console/dist/server/main.mjs"]

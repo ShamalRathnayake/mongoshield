@@ -94,3 +94,44 @@ npx mongoshield@next verify --from ./backups
 
 Then schedule it on your platform: [Docker](./docker.md), [Kubernetes](./kubernetes.md),
 [GitHub Actions](./github-actions.md), [AWS Lambda](./aws-lambda.md) or [Vercel](./vercel.md).
+
+## Atlas in the console
+
+The web console ([Docker guide](./docker.md#the-web-console)) takes an Atlas connection
+string exactly as Atlas hands it out. Paste it on the welcome page (or under
+Connections):
+
+```
+mongodb+srv://shamal:<db_password>@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+```
+
+- **The password.** The `<db_password>` (or `<password>`) placeholder becomes a separate,
+  masked password field; a password that is in the pasted string is moved there too, so it
+  is never shown on screen. Special characters (`@ : / ? # [ ] %`, spaces) are
+  percent-encoded for you. The `mongosh "mongodb+srv://…" --username shamal` command from
+  the Shell tab works as well, and so do strings wrapped over several lines or in quotes.
+- **SRV, TXT and TLS** work from the container as they do anywhere: the SRV record names
+  the hosts, the TXT record adds `replicaSet` and `authSource`, and the certificate is
+  checked against Node.js's bundled certificate authorities.
+- **Defaults.** Atlas clusters are marked production (shown, and you can change it): a
+  restore into them then needs an admin and the cluster's name typed to confirm. The
+  connection gets a badge for its tier, **Atlas Free or Flex** or **Atlas Dedicated**,
+  detected with one read-only probe. Backups adapt to Free and Flex by themselves (two
+  collections at a time, about 4 MiB/s; see [Atlas Free tier backups](./atlas-free-tier.md)),
+  and consistency is chosen automatically.
+- **Users with per-database roles** still see their databases (the console lists them with
+  `authorizedDatabases`), and the check says which ones a backup would include.
+
+When the check fails, it says why and what to do:
+
+| What the console says | What happened | Fix |
+|---|---|---|
+| Atlas did not let this console in | the console's IP address is not on the project's IP access list (Atlas closes the connection right away), or the cluster is paused | Network Access → Add IP Address. **Show my public IP address** asks `checkip.amazonaws.com` for it, only when clicked |
+| Wrong user name or password | `AuthenticationFailed` (18), or Atlas's "bad auth" (8000) | Database Access → edit the user (a database user, not your Atlas login) |
+| The cluster is paused | Atlas paused it (Free clusters after 60 days without connections) | Resume it in Atlas |
+| That server name does not exist | the SRV record was not found: a typo in the cluster name, or a deleted cluster | copy the string again |
+| The secure connection (TLS) failed | a proxy that intercepts TLS, or a certificate the console does not trust | mount its CA file and add `tlsCAFile=/path/ca.pem` |
+| The user is not allowed to do this | the user lacks roles | `readAnyDatabase` for backups; `readWriteAnyDatabase` (or `readWrite` on the targets) for restores |
+
+Atlas manages database users itself: change roles in Atlas (UI, CLI or Terraform), never
+with database commands, which Atlas rolls back.

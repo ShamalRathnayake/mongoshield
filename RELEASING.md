@@ -10,7 +10,7 @@ and the exact steps for the **first stable release, 2.0.0**.
 | `mongoshield` (library + CLI) | npm, dist-tag `latest` (`next` for pre-releases) | `.github/workflows/release.yml` |
 | `@mongoshield/console` | npm, same version as `mongoshield` | `release.yml` |
 | CLI image | `ghcr.io/shamalrathnayake/mongoshield:X.Y.Z`, `:X.Y`, `:X`, `:latest` | `docker.yml`, called by `release.yml` |
-| Console image | `ghcr.io/shamalrathnayake/mongoshield-console:` same tags | `docker.yml`, called by `release.yml` |
+| Console image | `ghcr.io/shamalrathnayake/mongoshield-console:` same tags; also `:latest`, `:next` and `:sha-…` on every push to `main` (see below) | `docker.yml`, called by `release.yml` |
 | `@mongoshield/operator` (Kubernetes operator) | npm, its own 0.x version line | `release.yml` |
 | Operator image | `ghcr.io/shamalrathnayake/mongoshield-operator:` the operator's version | `docker.yml`, called by `release.yml` |
 | Git tags + GitHub releases | `mongoshield@X.Y.Z`, `@mongoshield/console@X.Y.Z` | changesets/action in `release.yml` |
@@ -58,6 +58,35 @@ These need the repository owner; agents and CI cannot do them.
 2. **Settings → Pages → Source:** "GitHub Actions" (for `docs.yml`).
 3. Optional but recommended: protect `main` (require CI), so a release only ever builds
    from reviewed code.
+
+### GitHub Container Registry: make the images public
+
+Images pushed to ghcr.io from a workflow with `GITHUB_TOKEN` start out **private**, even
+for a public repository: `docker pull` and the console quickstart then fail with
+"unauthorized" for everyone else. After the first push of each image (the first `docker.yml`
+run on `main` creates them):
+
+1. GitHub → your profile → **Packages** → `mongoshield-console` (then `mongoshield` and
+   `mongoshield-operator`) → **Package settings**.
+2. **Manage Actions access**: make sure the `mongoshield` repository is listed with the
+   **Write** role (pushing from `docker.yml`), or turn on **Inherit access from source
+   repository**. The `org.opencontainers.image.source` label links the package to the
+   repository automatically.
+3. **Danger Zone → Change visibility → Public**. This cannot be undone for a package that
+   has been public, which is what we want.
+
+Check from a machine that is not logged in to ghcr.io:
+`docker logout ghcr.io && docker pull ghcr.io/shamalrathnayake/mongoshield-console:latest`.
+
+**Console `:latest` follows `main`.** The console's quickstart is the tag-less
+`docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console`,
+so `docker.yml` also pushes `:latest` of the console image on every push to `main`
+(`latest-on-main: true` in its matrix). Pre-GA that is the only way the one-liner works:
+prereleases never move `:latest`. The trade-off is that between releases `:latest` is the
+newest `main` build rather than the newest release; production users should pin `:X.Y.Z`.
+After 2.0.0, decide whether to keep that or set `latest-on-main: false` so `:latest`
+tracks releases only (as for the CLI and operator images). A release always moves
+`:latest` to itself.
 
 ### npm: trusted publisher for `mongoshield` (exists already)
 

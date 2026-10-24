@@ -126,3 +126,4 @@ jobs:
       - uses: actions/checkout@v5 # v5: current major
       # Parses and validates the Compose file without starting anything.
       - run: docker compose -f examples/docker-compose/compose.yaml config --quiet
+      - run: docker compose -f examples/console-compose/compose.yaml config --quiet
