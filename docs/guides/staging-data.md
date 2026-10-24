@@ -126,7 +126,7 @@ almost always a typo (`emial`) or a field that moved.
 
 | Rule | Does | Types |
 |---|---|---|
-| `"hash"` / `{ hash: { range } }` | keyed pseudonym of the same BSON type | strings (base32, length rounded up to 16/32/64), Int32/Long/Double, ObjectId (creation time kept), UUIDs and other binary |
+| `"hash"` / `{ hash: { range } }` | keyed pseudonym of the same BSON type | strings and symbols (base32, length rounded up to 16/32/64), Int32/Long/Double, Decimal128, ObjectId (creation time kept), UUIDs, vectors and other binary (not encrypted binary, subtype 6) |
 | `{ fake: kind }` | realistic fake: `email`, `name`, `phone`, `address`, `ip`, `uuid`, `date-shift` (`days`, default 30) | strings; `uuid` also BSON UUIDs; `date-shift` dates |
 | `"redact"` / `{ redact: "text" }` | fixed text | anything |
 | `"null"` | `null` | anything |
@@ -159,12 +159,22 @@ That is what keeps relationships intact:
 So: **mask both sides of a reference with the same operation.** A `$lookup`
 from orders to users finds exactly the users it found before. More details:
 
-- Numbers are hashed by value, as MongoDB compares them: `Int32(5)`, `Long(5)`
-  and `Double(5)` all become the same number (each keeping its own type).
-- Integer and ObjectId hashing never maps two different ids to the same id
-  (integers go through a keyed permutation), so unique indexes on hashed ids
-  keep building. `range` gives up that guarantee (many values, few outputs):
-  use it for ages and amounts, not for ids.
+- Numbers are hashed by their exact value, as MongoDB compares them: `Int32(5)`,
+  `Long(5)`, `Double(5)` and `Decimal128("5.00")` all become the same number
+  (each keeping its own type). Values that only look alike stay apart:
+  `Double(2^53)` and `Long(2^53 + 1)`, or `Double(0.1)` and `Decimal128("0.1")`
+  (a double cannot hold one tenth exactly).
+- Integer, Decimal128 and ObjectId hashing never maps two different values to the
+  same value (integers, large doubles and decimal digits go through keyed
+  permutations), so unique indexes on hashed ids keep building. Doubles above
+  2^53 stay doubles above 2^53, and a Long that a double can hold exactly hashes to
+  the same number as that Double. A fractional Decimal128 keeps its sign, its number
+  of significant digits and its decimal places (`19.99` → `73.41`). `range` gives up
+  the no-collision guarantee (many values, few outputs): use it for ages and
+  amounts, not for ids. An Int32 whose `range` result does not fit an Int32
+  becomes a Long rather than wrapping around.
+- Vectors (binary subtype 9) stay valid vectors of the same element type and
+  length (float32 elements in [-1, 1)), so vector search indexes still build.
 - Fake emails carry a keyed 8-character tag, so distinct emails stay distinct
   and a unique index on email still builds. Names, addresses and phone numbers
   may repeat, like real ones do.
@@ -206,6 +216,14 @@ What each copied namespace gets:
 | a filter | those matching it |
 | an incoming `follow` (a `to` side) | only those referenced by copied documents |
 | both | the filtered ones plus the referenced ones (references never dangle) |
+
+A **time series** collection can be selected one way only: by a filter, or by
+references through one field (e.g. `"app.metrics.meta.deviceId"`). Its
+measurements have no unique `_id`, so a measurement both matched and referenced,
+or referenced twice, would be copied twice: such a subset is refused before
+anything is written, and a referenced measurement holding several values at the
+followed field stops the copy. There is no measurement identity to deduplicate
+by (two measurements may be identical and must both be copied).
 
 References are followed transitively: orders → users → companies, and
 users → managers → their managers, until nothing new is referenced. Each
@@ -252,9 +270,26 @@ listed at once.
 - **A copy is not atomic.** Documents written during the copy may or may not
   be included, and different collections are read at slightly different
   times. For a point-in-time copy, restore a snapshot backup instead.
-- **Not resumable yet.** If a copy is interrupted, run it again with `--drop`;
-  the error lists the namespaces that were completed and those that may be
-  partial.
+- **Interrupted copies resume.** The CLI records progress in a checkpoint file,
+  `.mongoshield/copy-<id>.json` in the working directory (`--checkpoint <file>`
+  puts it elsewhere; from code, pass `checkpoint: "<file>"`). If a copy stops,
+  run the same command again with `--resume` (`resume: true`): finished
+  namespaces are skipped, and the others continue after the last `_id` known to
+  be written. Large collections are read in `_id` ranges of about 256 MiB, like a
+  backup's parts, in parallel. Masking is keyed by the secret alone and the first
+  run's subset filters are reused (a filter computed from the clock still selects
+  the same slice), so the result is exactly what one uninterrupted copy gives.
+  The mask rules and secret, follow rules, patterns, renames and mode must not
+  change, and the targets must not have been dropped meanwhile; otherwise the
+  resume is refused. Collections without an `_id` index (time series, clustered)
+  cannot continue mid-way: an unfinished one is emptied and copied again. The
+  file is **local on purpose**: it holds source `_id`s (part boundaries and
+  progress), which a masked or subset copy must not put into the target. It is
+  written with owner-only permissions and deleted when the copy completes.
+- **Atlas Search and Vector Search indexes** are copied like restore recreates
+  them: after the regular indexes, building in the background on Atlas. A target
+  without Atlas Search gets a warning and the result lists the indexes in
+  `searchIndexes.notCreated`. `--skip-search-indexes` skips them.
 - **Indexes are built after the data**, one bulk build per collection. If
   masking makes values collide on a uniquely indexed field (e.g. `fake: name`
   on a unique field, or `hash` with a `range`), that index build fails and the

@@ -25,16 +25,24 @@ consequences of taking *logical* backups through the driver.
   default).
 - **Time series collections** are not converged or journaled: change streams do not
   report their writes. They are restored as read.
-- Index, collection-option (`collMod`) and view changes made during a backup, or after a
-  base backup, are not replayed; the dumped metadata is used.
-- Collections created during a backup, or after a base backup, are restored without
-  secondary indexes.
-- A change event larger than 16 MiB fails a converge backup, as does a transient network
-  error during capture (no resume yet).
+- Collection-option (`collMod`, such as hiding an index or changing a TTL) and view
+  changes made during a backup, or after a base backup, are not replayed; the dumped
+  metadata is used. Index builds and drops are replayed after the documents.
+- A change event over MongoDB's 16 MiB limit (a document close to 16 MiB with a large
+  `_id`) fails a converge backup and stops the journal writer: the server cannot send
+  it, even with `$changeStreamSplitLargeEvent`.
+- A connection that stays down for more than a few seconds fails a converge backup;
+  shorter interruptions are resumed from the last change received.
 - On MongoDB 6.0 (before `disambiguatedPaths` in 6.1), an update to a field name that
   contains a dot looks like an update to a nested field (the manifest records a warning).
 - In restore modes `insert` and `upsert`, the converge replay can overwrite target
   documents that share an `_id` with a document changed during the backup.
+- On sharded clusters, a `$out` or `renameCollection` that replaces a backed-up
+  collection during a converge backup can fail it with `MS_UNSUPPORTED_TOPOLOGY`
+  (timing-dependent; run it again or use `none`), and restores create unsharded
+  collections: shard the targets first and restore with `--mode insert`.
+- Backing up users and roles needs `viewUser` and `viewRole` on top of the `backup`
+  role.
 - The journal refuses passphrase encryption; use recipients or KMS keys.
 - Base backups must include every namespace the journal records.
 

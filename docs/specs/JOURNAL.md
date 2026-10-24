@@ -9,9 +9,10 @@ after that moment, so a restore can stop at any second: just before the bad depl
 the accidental `deleteMany`, or the ransomware.
 
 It reuses the `converge` machinery (docs/specs/CONSISTENCY.md): the same change stream
-(`allChangesForCluster`, `showExpandedEvents`, raw events), the same enrichment of
-events replay could not express, and the same replay rules. Capture works the same way;
-it just never stops.
+(`allChangesForCluster`, `showExpandedEvents`, raw events, split events reassembled,
+transient errors resumed; `src/engine/converge-stream.ts`), the same enrichment of
+events replay could not express, and the same replay rules, index changes included.
+Capture works the same way; it just never stops.
 
 ## Concepts
 
@@ -45,7 +46,8 @@ locks/journal/<generation>.json    the writer's lease (the scheduler's storage l
 - **Encryption and compression** follow the configured backup settings. Segments are
   encrypted directly to the configured recipients and/or KMS keys (one KMS call per
   segment; no per-journal key file), so each segment is its own age file and never
-  depends on another. **Passphrases are refused** (`MS_CONFIG_INVALID`): age runs scrypt
+  depends on another. The KMS call of each segment takes the writer's (or reader's)
+  abort signal, so a stopping writer never waits on a slow KMS. **Passphrases are refused** (`MS_CONFIG_INVALID`): age runs scrypt
   for every file, and a journal writes a file every few minutes forever.
 
 ### Segment content
@@ -125,11 +127,15 @@ returns a handle with `stop()`, `status()` and `done`) or as `mongoshield journa
    refused (`MS_CONFIG_INVALID`) rather than guessed at.
    The change stream is opened with `startAtOperationTime` = the cluster time right after
    the resume point, which returns exactly the later events because segments never end
-   inside a cluster time (step 3).
+   inside a cluster time (step 3). Its cursor carries the comment `mongoshield journal`,
+   and the server filters by database like the converge capture does (only the
+   databases the include patterns name, when every pattern names one literally).
 3. **Segments.** Events stream into the current segment (getMore → compress → encrypt →
    SHA-256 → `storage.put`; memory stays flat). A segment closes once it is
    `segmentSeconds` old (default 300) or holds `segmentBytes` of events (default 64 MiB),
-   and on `stop()`. It may only end at a cluster time T with every event up to T in it
+   and on `stop()`. `mongoshield journal start` takes both, and `onGap` (step 5), from
+   the config file's `journal` section (`{ segmentSeconds, segmentBytes, onGap }`); its
+   flags `--segment-seconds`, `--segment-size` and `--on-gap` override them. It may only end at a cluster time T with every event up to T in it
    and none after:
    - an event with a later cluster time than the previous one arrives → T is the
      previous one (the events of a transaction share a cluster time and are never split);
@@ -147,10 +153,15 @@ returns a handle with `stop()`, `status()` and `done`) or as `mongoshield journa
    - `onGap: "fail"` (the default otherwise): stop with `MS_CHANGE_HISTORY_LOST`. A
      restarted writer continues after the recorded gap.
    A brand-new journal that cannot start at an old base backup simply starts now (no gap).
-6. **Transient failures** (connection drops, storage errors) abandon the open segment
-   (its upload is discarded) and restart from the last commit after 1 s, 2 s, 4 s … up to
-   60 s. Missing privileges, invalid settings, forbidden storage and a lost lease stop
-   the writer.
+6. **Transient failures.** A dropped connection or a killed session on the change
+   stream is first handled by the stream itself: it reopens after the last batch's
+   resume token (up to 5 attempts over about 3 s, see CONSISTENCY.md, "Interruptions"),
+   and the segment being written goes on as if nothing happened. Only when that fails,
+   and on storage errors, the writer abandons the open segment (its upload is
+   discarded) and restarts from the last commit after 1 s, 2 s, 4 s … up to 60 s.
+   Missing privileges, invalid settings, forbidden storage, a lost lease and a change
+   event over the server's size limit (`MS_UNSUPPORTED_TOPOLOGY`, CONSISTENCY.md,
+   "Large events": retrying would fail on the same event) stop the writer.
 7. **Metrics.** `status()`: recovery point, RPO, segments/events/bytes written, events
    per second, last segment latency (closing → committed), gaps, last transient error.
    Every committed segment pings the configured heartbeat URL and calls `onSegment`.
@@ -193,8 +204,12 @@ cluster time for exact control.
    decryption, parsing) before writing anything, maps namespaces with the restore's
    rules (src/engine/converge-targets.ts; collections created after the base backup are
    conflict-checked with `mode`), then replays with the converge rules
-   (src/engine/converge-replay.ts).
-4. Report the exact cluster time restored to (`restoredTo`) and the number of events.
+   (src/engine/converge-replay.ts). Index changes after the base backup (the indexes of
+   collections created after it included) are applied once the documents are in, with
+   the converge rules (src/engine/converge-indexes.ts; the base restore has built the
+   base backup's indexes already); `skipIndexes` leaves them out.
+4. Report the exact cluster time restored to (`restoredTo`), the number of events and
+   the indexes created and dropped (`indexesCreated`, `indexesDropped`).
 
 `mongoshield journal status` shows the recovery point, the RPO, the covered ranges and
 any gaps (`--json` for scripts, `--max-rpo 10m` exits 1 when the journal is further
@@ -209,11 +224,10 @@ run it after pruning backups with the oldest remaining base backup's cluster tim
 
 ## Limits
 
-- The same as `converge` (CONSISTENCY.md): DDL other than create, drop and rename is not
-  replayed; time series collections are not journaled (change streams do not report
-  their writes).
-- Collections created after the base backup are restored without secondary indexes
-  (the replay runs after the base restore built its indexes).
+- The same as `converge` (CONSISTENCY.md): DDL other than create, drop, rename,
+  `createIndexes` and `dropIndexes` is not replayed; time series collections are not
+  journaled (change streams do not report their writes); a change event over the
+  server's size limit stops the writer.
 - Base backups must include every namespace the journal records (same include/exclude).
 - The two enrichments (dotted field names, rename destinations) are snapshot reads at the
   event's cluster time: a writer catching up from further behind than the server's

@@ -78,6 +78,12 @@ helm install mongoshield ./deploy/helm/mongoshield -n backups -f my-values.yaml
 copies `schedule` and `timeZone` into `config.schedule`, so the time lives in one place.
 Every value is documented in [`values.yaml`](../../deploy/helm/mongoshield/values.yaml).
 
+`retention` is applied after every good run, to **this release's backups only**: those
+of the same source deployment and the same `backup.include`/`exclude` selection. Several
+releases (one per cluster or database, or an hourly CronJob next to a nightly one) can
+therefore share one bucket and prefix without pruning each other's backups. To prune the
+whole bucket on purpose, run a one-off `mongoshield prune --all-sources --yes` job.
+
 ## 4. Test it
 
 ```bash

@@ -182,7 +182,17 @@ Restoring needs only permission to use the key for decryption, no keys or secret
 |---|---|---|
 | AWS | `kms:Encrypt` | `kms:Decrypt` |
 | Google Cloud | `cloudkms.cryptoKeyVersions.useToEncrypt` (`roles/cloudkms.cryptoKeyEncrypter`) | `cloudkms.cryptoKeyVersions.useToDecrypt` (`roles/cloudkms.cryptoKeyDecrypter`) |
-| Azure | `keys/wrapKey` | `keys/unwrapKey` (e.g. role *Key Vault Crypto Service Encryption User*) |
+| Azure | `keys/wrapKey`, plus `keys/get` to detect the key type | `keys/unwrapKey` (e.g. role *Key Vault Crypto Service Encryption User*) |
+
+Azure picks the wrapping algorithm from the key type, read once per backup with
+`getKey`: RSA keys (`RSA`, `RSA-HSM`) use `RSA-OAEP-256`, Managed HSM symmetric keys
+(`oct-HSM`, AES-256) use `A256KW`. Without `keys/get` it uses `RSA-OAEP-256`; pass
+`algorithm` to `createAzureKmsClient` for symmetric keys then (and for AES-128/192
+keys: `A128KW`/`A192KW`). Restores always use the algorithm recorded in the stanza.
+
+KMS calls honour the run's `signal`: AWS and Azure requests are cancelled, and since
+the Google client cannot cancel a request, MongoShield stops waiting for it. Either
+way the run fails with `MS_ABORTED` at once.
 
 So the machine that takes backups can be given encrypt-only rights and cannot read
 them. A refused call fails with `MS_ENCRYPTION_FAILED` (backup) or `MS_DECRYPTION_FAILED`

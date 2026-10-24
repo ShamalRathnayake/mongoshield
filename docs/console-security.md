@@ -21,7 +21,14 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 | 2.7 | Login (and setup) are rate limited: 10 failures per 15 min per username and per client address, `429` + `Retry-After` | `src/server/rate-limit.ts`, `routes/session.ts` | `auth.test.ts` "rate-limits", `src/server/rate-limit.test.ts` | ✅ |
 | 2.8 | Changing a user's password ends all of that user's sessions | `src/server/routes/users.ts` | `auth.test.ts` "signs a user out everywhere" | ✅ |
 | 2.9 | SSO via a trusted reverse proxy: `X-Forwarded-User` is accepted only with the shared secret in `X-MongoShield-Proxy-Secret` (constant-time compare, ≥ 32 characters); a wrong secret is refused; new proxy users start as `viewer` | `src/server/auth.ts`, `src/server/config.ts` | `auth.test.ts` "trusted reverse proxy" | ✅ |
-| 2.10 | OIDC (authorization code + PKCE) | n/a | n/a | ⏳ use the proxy mode (oauth2-proxy, Authelia, Pomerium) meanwhile |
+| 2.10 | OIDC: authorization code flow with PKCE (S256); `state` and `nonce` are 256-bit random values; the pending login is bound to the browser by an `HttpOnly`, `SameSite=Lax`, 10-minute cookie (`__Host-` when secure), is single use and expires after 10 minutes; at most 1000 are pending | `src/server/oidc/client.ts`, `src/server/routes/oidc.ts` | `test/integration/oidc.test.ts` "the state, the transaction cookie and the code" (login CSRF, wrong/missing state, replay, expiry, foreign PKCE challenge, cap) | ✅ |
+| 2.11 | ID tokens are verified with `node:crypto` against the provider's JWKS: RS256 (≥ 2048 bit), ES256 (P-256, r‖s) or EdDSA (Ed25519) only; `none`, HMAC and unknown algorithms are refused; the key type must fit the algorithm; `use: enc` keys and keys pinned to another `alg` are ignored; `crit` headers are refused | `src/server/oidc/jose.ts`, `client.ts` (`verifyIdToken`) | `oidc.test.ts` "ID token verification", `src/server/oidc/jose.test.ts` | ✅ |
+| 2.12 | Claims: `iss` exact, `aud` contains the client id, `azp` required with several audiences and must be the client id, `exp`/`nbf`/`iat` within a clock skew (default 60 s, at most 300 s), `nonce` matches (constant time), `sub` present; RFC 9207 `iss` on the callback is checked when sent | `client.ts` (`#checkClaims`, `complete`) | `oidc.test.ts` (one test per claim) | ✅ |
+| 2.13 | Discovery `issuer` must equal the configured issuer (mix-up defence); endpoints must be https (http only on loopback); requests time out after 10 s, never follow redirects and are capped at 1 MiB; keys are cached for an hour and an unknown `kid` refreshes them at most once a minute | `src/server/oidc/provider.ts` | `oidc.test.ts` "the token endpoint and the provider", "follows key rotation", "at most once per cooldown" | ✅ |
+| 2.14 | Accounts are bound to an identity by issuer + `sub`, never by name; a password account is never linked to an OIDC identity; with auto-provisioning off only existing (linked or SSO-only) accounts sign in; an unmapped role with default `none` refuses sign-in; a role sync never demotes the last admin | `src/server/routes/oidc.ts` (`signInOidcUser`) | `oidc.test.ts` "roles and accounts" | ✅ |
+| 2.15 | Failed OIDC sign-ins redirect with a fixed error code only; the reason goes to the server log and the audit log (`session.login_failed`, `method: oidc`); the client secret is never logged | `routes/oidc.ts` (`failedSignIn`), `src/server/main.ts` | `oidc.test.ts` "refuses identities without a mapped role…" | ✅ |
+| 2.16 | SSO-only accounts (no password) cannot sign in with a password, and cost the same dummy scrypt run as unknown users (no enumeration); they can only be created while SSO is configured | `routes/session.ts`, `routes/users.ts` (`initialPasswordHash`) | `oidc.test.ts` "does not let SSO-only accounts sign in with a password", "refuses SSO-only accounts when no single sign-on is configured" | ✅ |
+| 2.17 | OIDC configuration is checked at startup: issuer and client id both set, https issuer and redirect URL (path `/api/oidc/callback`), known roles, bounded clock skew, and no unknown `MONGOSHIELD_OIDC_*` variables | `src/server/config.ts` (`readOidcEnvironment`) | `src/server/oidc/settings.test.ts` | ✅ |
 
 ## V3 Session management
 
@@ -48,6 +55,8 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 | 4.7 | CSRF: every state-changing request of a signed-in principal carries `x-csrf-token` = HMAC(key from `MONGOSHIELD_SECRET`, session) | `src/server/auth.ts` (`csrfProtection`), `sessions.ts` | `auth.test.ts` "CSRF and origin checks" | ✅ |
 | 4.8 | State-changing requests with a foreign `Origin` are refused (also for login and setup) | `src/server/security.ts` (`sameOriginOnly`) | `auth.test.ts` "refuses cross-site requests" | ✅ |
 | 4.9 | Local storage paths must stay inside the data directory | `src/jobs/storage.ts` (`localPathOf`) | `resources.test.ts` "refuses local paths outside" | ✅ |
+| 4.10 | Pruning needs an admin, shows a dry run first, and the job refuses to delete any backup the admin did not confirm; it runs under the storage lock that backup runs hold | `routes/plans.ts`, `jobs/tasks.ts` (`planPrune`, `pruneJob`) | `test/integration/prune.test.ts`, `roles.test.ts` | ✅ |
+| 4.11 | Config import needs an admin, shows a dry run first and applies all or nothing (planned again inside the state update) | `routes/config.ts`, `src/server/config-import.ts` | `test/integration/config-import.test.ts`, `roles.test.ts` | ✅ |
 
 ## V5 Validation, sanitization and encoding
 
@@ -58,7 +67,9 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 | 5.3 | Backup ids in URLs are checked against the id format before reaching storage | `validate.ts` (`backupIdParam`) | `roles.test.ts` / `backups.test.ts` 404 cases | ✅ |
 | 5.4 | Document filters are parsed as Extended JSON and run in-process by the library (no queries against live databases); page size ≤ 100, 60 s scan limit | `routes/backups.ts` | `backups.test.ts` "browsing documents" | ✅ |
 | 5.5 | The exported `mongoshield.config.ts` cannot be used for code injection: all values are `JSON.stringify`-escaped, identifiers are `[A-Za-z0-9]` with a `plan` prefix | `src/server/config-export.ts` | `src/server/config-export.test.ts` (hostile plan name) | ✅ |
-| 5.6 | Prometheus label values are escaped | `routes/health.ts` (`escapeLabel`) | review | 🟡 |
+| 5.6 | Prometheus label values are escaped; the output is valid text exposition format | `routes/health.ts` (`escapeLabel`) | `test/integration/metrics.test.ts` (format parser, hostile plan name) | ✅ |
+| 5.7 | Config import never takes secrets inside the document: connection strings with a password or secret options, passphrases, notification URLs and `decryption` are refused; secrets come only as explicit `secrets` fields, are sealed like any other stored secret, and are never echoed in diffs, errors or the audit log | `src/server/config-import.ts` | `config-import.test.ts` "what an import refuses", "applying an import" (state file and transcript checked) | ✅ |
+| 5.8 | Config import validates strictly (unknown keys are errors) and refuses settings it cannot honour that protect backups (KMS, `retainDays`, drill verification) instead of silently weakening the plan; imported connections default to production | `config-import.ts` | `config-import.test.ts` | ✅ |
 
 ## V6 Stored cryptography
 
@@ -88,7 +99,7 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 | 8.2 | API responses are `Cache-Control: no-store` | `security.ts` | `auth.test.ts` "security headers" | ✅ |
 | 8.3 | `console.json` (0600) is written atomically: temp file, fsync, rename, directory fsync | `src/state/atomic.ts` | `store.test.ts` "saves updates atomically" | ✅ |
 | 8.4 | Only one process may own a data directory (heartbeat lock; abandoned locks are taken over after 30 s) | `src/state/lock.ts` | `store.test.ts`, `resources.test.ts` "refuses a second console" | ✅ |
-| 8.5 | `/healthz` reveals nothing but liveness; `/metrics` is off unless `MONGOSHIELD_METRICS_TOKEN` is set, then needs it as a bearer token | `routes/health.ts` | `auth.test.ts` "metrics" | ✅ |
+| 8.5 | `/healthz` reveals nothing but liveness; `/metrics` is off unless `MONGOSHIELD_METRICS_TOKEN` is set, then needs it as a bearer token; journal reads for metrics are cached (30 s) and time out (10 s), so scrapes cannot load the storage | `routes/health.ts` | `auth.test.ts` "metrics", `metrics.test.ts` | ✅ |
 
 ## V9 Communications
 
@@ -109,7 +120,4 @@ Status: ✅ implemented and tested · 🟡 implemented, tested only in part or b
 
 ## Follow-ups
 
-- OIDC login (authorization code + PKCE, JWKS verification with `node:crypto`).
-- `POST /api/config/import`.
-- A recovery-point metric from the journal (`mongoshield_recovery_point_timestamp_seconds`).
-- Optional Playwright end-to-end tests (setup → connection → plan → backup → browse → restore).
+- OIDC RP-initiated logout (signing out at the provider too); today logout ends the console session only.

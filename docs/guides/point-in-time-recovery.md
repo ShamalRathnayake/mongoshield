@@ -110,6 +110,25 @@ await journal.done;                         // rejects if the writer stops on an
 | `--segment-seconds` / `segmentSeconds` | 300 | the normal worst-case RPO: changes are safe in storage once their segment is committed |
 | `--segment-size` / `segmentBytes` | 64 MiB | a busy database closes segments early so each stays a manageable download |
 
+The same settings can live in the config file, next to the backup settings; the flags
+override them:
+
+```ts
+// mongoshield.config.ts
+export default defineConfig({
+  source: { uri: process.env.MONGODB_URI },
+  storage: "s3://acme-backups/prod",
+  encryption: { recipients: [process.env.BACKUP_PUBLIC_KEY] },
+  journal: {
+    segmentSeconds: 60,         // --segment-seconds
+    segmentBytes: 32 * 1024 ** 2, // --segment-size (at least 1 KiB)
+    onGap: "backup",            // --on-gap: "backup" (default) or "fail"
+  },
+});
+```
+
+`journal start` prints the settings it uses when it starts.
+
 Shorter segments mean a smaller RPO but more objects: 300 s is 288 segments a day,
 60 s is 1,440. Each segment is one PUT (and one KMS call with KMS encryption). Restores
 read only the segments after the chosen base backup, so frequent base backups keep
@@ -245,7 +264,15 @@ console.log(`restored to ${result.restoredTo.t}:${result.restoredTo.i}, ${result
 | `MS_INTEGRITY_FAILED` "segment chain is broken" | a segment is missing or was modified | restore to a time before the damaged segment, or from a newer base backup |
 | `MS_PERMISSION_DENIED` | the user cannot open a deployment-wide change stream | grant `readAnyDatabase` (or `changeStream` + `find` on all databases) |
 | `MS_CONFIG_INVALID` "cannot be encrypted with a passphrase" | the journal needs recipients or KMS keys | add an `age1…` recipient (`mongoshield keygen`) |
+| `MS_UNSUPPORTED_TOPOLOGY` "larger than MongoDB's 16 MiB limit" | a change produced an event the server cannot send (a document close to 16 MiB with a large `_id`); the writer stops | find the change by the cluster time in the message, shrink that document's `_id`, and take a new base backup once the writer runs again |
 
-Known limits (also in the spec): collections created after the base backup come back
-without secondary indexes; time series collections are not journaled; collection
-option and index changes after the base backup are not replayed.
+Brief network problems do not interrupt the journal: the writer reopens its change
+stream where it left off and keeps writing the same segment (`journal.status()` shows no
+error). Only when the server stays unreachable for a few seconds does it start again
+from its last committed segment.
+
+Index changes after the base backup (`createIndex`, `dropIndex`, and the indexes of
+collections created after it) are replayed after the documents; `--skip-indexes` leaves
+them out. Known limits (also in the spec): time series collections are not journaled;
+collection option changes after the base backup (`collMod`, such as hiding an index or
+changing a TTL) are not replayed.

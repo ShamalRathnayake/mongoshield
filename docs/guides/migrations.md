@@ -34,15 +34,23 @@ that already exists is fine: rollback always uses the newest one.
 3. asks for confirmation (`--yes` in scripts; without a terminal and without `--yes` it
    refuses with exit code 3);
 4. takes a **safety snapshot** labelled `pre-rollback-<label>` of the live collections it
-   is about to replace (skip it with `--no-safety-snapshot`), so the rollback itself can
-   be undone with `mongoshield rollback pre-rollback-<label>`;
+   is about to replace or drop (skip it with `--no-safety-snapshot`), so the rollback
+   itself can be undone with `mongoshield rollback pre-rollback-<label>`;
 5. restores the snapshot over the live data in `drop` mode: each collection is dropped
    and recreated with its documents, options and indexes exactly as snapshotted;
-6. re-applies the [GDPR erasure ledger](gdpr-erasure.md), so nobody erased since the
+6. drops the collections (and views) the migration **created**: those in the
+   snapshot's databases that the snapshot does not hold. The plan lists them as
+   `new … drop (created after the snapshot)`;
+7. re-applies the [GDPR erasure ledger](gdpr-erasure.md), so nobody erased since the
    snapshot comes back (`--skip-erasures` to opt out).
 
-Collections the migration **created** are not in the snapshot and are left alone; drop
-them yourself if needed. Use `--include` to roll back only some collections, and
+Which collections count as created by the migration: a snapshot records its
+`--include`/`--exclude` patterns (labels `mongoshield.snapshot.include` and
+`.exclude`), so a collection it deliberately left out (`--exclude app.cache`) is never
+dropped, and a rollback's own `--include`/`--exclude` narrow the set further. A plain
+backup rolled back to with `--id` (or a snapshot taken before the patterns were
+recorded) counts as having captured its databases whole. Pass `--keep-new` to leave
+the new collections alone. Use `--include` to roll back only some collections, and
 `--dry-run` to see the plan without writing anything.
 
 A rollback replaces data: writes your application made after the snapshot, to the
@@ -68,7 +76,9 @@ try {
 
 `rollback(shield, options)` takes `label` or `backupId`, `include`/`exclude`, `mode`
 (default `"drop"`), `dryRun`, `decryption` (for encrypted snapshots), `safetySnapshot`
-(default `true`) and `skipErasures`.
+(default `true`), `keepNew` (default `false`: collections created since the snapshot are
+dropped) and `skipErasures`. Its result lists those collections in `newCollections`
+(`dropsNew` says whether they were dropped).
 
 ## Recipes
 

@@ -51,7 +51,8 @@ snapshot window. Choose `snapshot` explicitly for small databases where that is 
 ## Limits
 
 - Time series collections are restored as read: change streams do not report their writes.
-- Index and collection-option changes made during the backup are not replayed.
-- Collections created during the backup are restored without secondary indexes.
+- Collection-option changes (`collMod`) made during the backup are not replayed; index
+  builds and drops are, after the documents, including the indexes of collections
+  created during the backup.
 
 See [Limitations](/limitations/) for the full list.

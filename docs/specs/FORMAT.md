@@ -251,6 +251,10 @@ as `changes`; its key is `_changes/window.bson[.zst|.gz][.age]`. (A collection n
   and `operationDescription` for DDL events, and the other standard fields.
 - Events are in the order the stream returned them, which is cluster-time order;
   none is earlier than `consistency.from` or later than `consistency.to`.
+- Events the server split into fragments (`$changeStreamSplitLargeEvent`, MongoDB 7.0+)
+  are stored whole: every top-level field of every fragment in order, without
+  `splitEvent`, with the last fragment's `_id`. Such an event, and an enriched one
+  (below), can be larger than 16 MiB; readers must accept documents up to 64 MiB.
 - Two kinds of events are written by MongoShield rather than taken verbatim:
   - an `update` whose changed paths cannot be expressed with update operators
     (field names containing `.` or starting with `$`) carries `fullDocument`, the
@@ -374,8 +378,10 @@ mongorestore, which keeps the password hashes. See `src/engine/restore-authz.ts`
 1. The writer picks a new backup id and writes every data, metadata and changes file under
    `backups/<id>/`, in any order and in parallel, recording each file's size and
    SHA-256 as it streams.
-2. Only after every file has been stored successfully, the writer writes
-   `manifest.json`. When the storage supports conditional writes, the manifest is
+2. Only after every file has been stored successfully, the writer deletes every
+   object under `backups/<id>/` that the manifest will not reference (e.g. a part of a
+   collection dropped mid-backup that finished uploading late; best effort), then
+   writes `manifest.json`. When the storage supports conditional writes, the manifest is
    written with "if none match" (`If-None-Match: *` on S3), so an existing manifest
    can never be overwritten.
 3. Each object write is atomic: readers see either the whole object or nothing.
@@ -411,7 +417,10 @@ erasures/<time>-<random>.json         the GDPR erasure ledger (append-only)
   verification then reports the rewritten files as changed, which is safe.
 - **Erasure records** (`formatVersion: 1`) name a namespace or pattern, a reason, and a
   match: either an Extended JSON filter, or per-field HMAC-SHA-256 digests of an exact
-  match on strings (see `src/extras/erasure-match.ts`). MongoShield deletes matching
+  match on strings (see `src/extras/erasure-match.ts`). Hashed matches carry
+  `matchVersion` (1: values made canonical by their exact value, so numbers of every
+  BSON type that are equal hash alike); a record without it is version 1, and a reader
+  refuses versions it does not know. MongoShield deletes matching
   documents after every restore, rollback and copy. Records are never rewritten; a record
   that cannot be read fails the restore rather than being skipped.
 

@@ -13,9 +13,15 @@ answer them from your backups, without restoring a whole deployment.
 | Give me this collection as JSON Lines or CSV | [`export --format jsonl\|csv`](#exporting-as-json-lines-or-csv) |
 
 All of them read backups in-process: filters are evaluated by MongoShield, not by the
-server. The supported operators are equality, `$eq $ne $gt $gte $lt $lte $in $nin
+server. Backups taken with consistency `converge` are read as they were at the end of the
+backup: the changes recorded while the backup ran are applied to the dumped documents
+first, exactly as a full restore would replay them. The supported operators are equality, `$eq $ne $gt $gte $lt $lte $in $nin
 $exists $type $regex $and $or $nor $not $elemMatch $size`; anything else fails with
-`MS_CONFIG_INVALID` instead of matching the wrong documents. Filters and ids on the
+`MS_CONFIG_INVALID` instead of matching the wrong documents. Regexes accept the options
+`i m s u x` (and `(?i)`-style options at the start of the pattern); they run on
+JavaScript's engine, so PCRE-only syntax such as possessive quantifiers or atomic groups
+is not supported, and `l` is rejected. Strings always compare with the simple (binary)
+collation. Filters and ids on the
 command line are [Extended JSON](https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/):
 `'{"_id":{"$oid":"6523f1c2a1b2c3d4e5f60718"}}'`, `'{"createdAt":{"$gte":{"$date":"2026-10-01T00:00:00Z"}}}'`.
 
@@ -127,8 +133,8 @@ Notes:
   others the backup's collection is scanned until the document is found.
 - `update` events show the changed fields; the next full version (a backup, an insert or
   a replace) is diffed against the last full one.
-- Backups taken with consistency `converge` are read as dumped, so a document changed
-  while such a backup ran may show its earlier version there (the journal has the change).
+- Backups taken with consistency `converge` show the document as it was at the end of
+  the backup (the changes recorded while it ran are applied).
 
 ```ts
 const history = await shield.history({ namespace: "app.users", id: new ObjectId("…") });

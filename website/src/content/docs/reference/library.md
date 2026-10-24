@@ -51,7 +51,8 @@ const shield = new MongoShield({
 | `find(options)` | Streams the documents of one backed-up collection that match a filter. |
 | `restoreDocuments(options)` | Restores only the matching documents. |
 | `list()` | The catalog: every backup with status, size and verification results. |
-| `prune(policy, options?)` | Deletes what the retention policy no longer keeps. |
+| `prune(policy, options?)` | Deletes what the retention policy no longer keeps. `options.scope` (`{ clusterId?, labels? }`) limits it to one source/selection; other backups are left alone and listed in `outOfScope`. See [scopes](/concepts/retention/#scopes-whose-backups-a-policy-covers). |
+| `sourceClusterId()` | The source deployment's stable id (the `source.clusterId` its backups record), for prune scopes. |
 | `hold(id, { reason })` / `release(id)` | Protects a backup from pruning, and lifts that. |
 | `close()` | Releases the storage adapter's resources. |
 

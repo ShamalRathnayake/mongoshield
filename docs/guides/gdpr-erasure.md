@@ -58,8 +58,10 @@ a secret, filters are still hashed (unreadable), but with a public key. Records 
 key they used; when the ledger holds keyed records, a restore without the secret, or with
 a different one, **refuses to start** rather than restore data it then could not erase.
 
-Hashed matching follows MongoDB's equality where it matters: numbers compare by value
-whatever their type, a field holding an array matches when any element does, and dotted
+Hashed matching follows MongoDB's equality where it matters: numbers compare by their
+exact value whatever their type (`Long(5)`, `5.0` and `Decimal128("5.00")` match; a
+double cannot stand in for a 64-bit integer it cannot hold exactly), a field holding an
+array matches when any element does, and dotted
 paths (`contacts.email`) descend into sub-documents and arrays of them.
 
 ## From code

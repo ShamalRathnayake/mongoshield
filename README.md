@@ -35,7 +35,8 @@ npx mongoshield@next restore latest --rename 'app.*=app_restored.*'
 - **Verifiable.** Every file's SHA-256 is recorded in a manifest. `mongoshield verify`
   checks a backup without a key; `--deep` decrypts and parses every document.
 - **Safe retention.** Keep the last N backups plus hourly/daily/weekly/monthly/yearly ones,
-  with safety floors that never delete your newest backup.
+  with safety floors that never delete your newest backup. Retention is scoped per source
+  and selection, so jobs sharing a bucket never prune each other's backups.
 - **Flat memory.** Everything streams; memory use does not grow with database size.
 
 ## Install
@@ -79,8 +80,12 @@ await shield.restore({
   decryption: { identities: [process.env.BACKUP_SECRET_KEY!] },
 });
 
-// Keep 7 daily, 4 weekly and 12 monthly backups.
-await shield.prune({ daily: 7, weekly: 4, monthly: 12 });
+// Keep 7 daily, 4 weekly and 12 monthly backups of this deployment. The scope leaves
+// backups of other sources/selections in the same storage alone (omit it to prune all).
+await shield.prune(
+  { daily: 7, weekly: 4, monthly: 12 },
+  { scope: { clusterId: await shield.sourceClusterId() } },
+);
 ```
 
 Storage adapters:

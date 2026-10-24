@@ -63,6 +63,13 @@ docker run -d --name mongoshield --restart unless-stopped \
 A TypeScript config with `import { defineConfig } from "mongoshield"` works too: the
 package is resolvable from `/app`.
 
+Several containers may share one bucket (one per database or cluster, say). Retention
+is scoped: each scheduler only prunes backups of its own source deployment and its own
+`backup.include`/`exclude` selection, never the other containers' backups. To apply a
+policy to everything in the bucket at once, run
+`docker run --rm … mongoshield prune --all-sources --daily 7` (it lists what it would
+delete per source and needs `--yes` without a terminal).
+
 On `docker stop`, the scheduler lets a running backup finish (up to a grace period) or
 aborts it cleanly. Give it time with `docker stop -t 120`.
 

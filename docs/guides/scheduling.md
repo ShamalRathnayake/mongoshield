@@ -14,6 +14,24 @@ Every scheduled run does the same job, in this order:
 A failed step stops the run: nothing is pruned after a backup that failed or
 did not verify.
 
+## Retention when jobs share a storage location
+
+The prune step only covers **this job's** backups: those from the same source
+deployment (`clusterId`, recorded in every manifest) with the same selection (the
+`mongoshield.shape` label, a hash of `backup.include`/`exclude`, which every scheduled
+backup carries). So two jobs can safely write to one bucket, for example a nightly
+full backup with `retention: { daily: 7 }` next to an hourly backup of `app.orders`
+with `retention: { last: 24 }`, or two clusters with the same selection: neither job
+ever prunes the other's backups. The run report counts the backups it left alone
+(`prune.outOfScope`).
+
+A run that cannot tell which deployment its backup came from skips the prune with a
+warning instead of guessing. Backups taken before scoped retention, or by code that
+calls `shield.backup()` without the shape label, are outside every job's scope; remove
+them once with `mongoshield prune --all-sources` (it lists them per source and asks).
+The "Retention & safety" concept page of the documentation site explains scopes in
+full.
+
 ## The config
 
 ```ts
@@ -321,7 +339,7 @@ function isAuthentic(rawBody, headers, secret) {
               "bytesRaw": 2147483648, "bytesStored": 402653184, "durationMs": 140000, "attempts": 1 },
   "guard": { "ok": true, "action": "fail", "baselineId": "2026-10-20T01-15-02Z_19be04", "findings": [] },
   "verify": { "mode": "fast", "ok": true, "problems": [], "attempts": 1 },
-  "prune": { "deletedBackups": 1, "deletedBytes": 398458880, "kept": 14 }
+  "prune": { "deletedBackups": 1, "deletedBytes": 398458880, "kept": 14, "outOfScope": 9 }
 }
 ```
 
