@@ -8,8 +8,10 @@
  *   picker, age-recipient encryption and a schedule preview → run it now and watch
  *   the job live → the backup appears, verified → browse documents (filter, paging)
  *   of a passphrase-encrypted backup → restore the selected documents into renamed
- *   collections and check them in MongoDB → restore the whole recipient-encrypted
- *   backup into the production connection (typed name, private key) → drill into
+ *   collections and check them in MongoDB → edit one of them and preview a restore
+ *   over them (counts, the effect of upsert, the edited document's fields) → preview
+ *   and restore the whole recipient-encrypted backup into the production connection
+ *   (typed name, private key) → drill into
  *   the scratch connection → hold and release → scoped retention → the audit log shows
  *   each action → sign out.
  *
@@ -18,6 +20,7 @@
 
 import type { Page } from "@playwright/test";
 import { generateIdentity } from "mongoshield";
+import { accessibilityProblems } from "./a11y.ts";
 import { ADMIN, E2E_MONGO_PASSWORD, mongoUri, NAMES, SEED } from "./env.ts";
 import {
   expect,
@@ -43,6 +46,8 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
   test.setTimeout(10 * 60_000);
   let recipientBackupId = "";
   let passphraseBackupId = "";
+  /** The `_id`s restored as "selected documents", previewed again afterwards. */
+  const selectedIds: number[] = [];
 
   await test.step("first-run setup with the link from the server log", async () => {
     const link = await setupLinkFromServerLog();
@@ -232,7 +237,6 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
 
   await test.step("restore two selected documents into renamed collections", async () => {
     const firstPage = page.getByRole("list", { name: "Documents on page 1" });
-    const selectedIds: number[] = [];
     for (const index of [0, 1]) {
       const choice = firstPage.getByRole("listitem").nth(index).locator(".document-select");
       selectedIds.push(Number(await choice.textContent()));
@@ -251,6 +255,8 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
     await expect(
       page.getByText(`Plan: 1 namespace, 2 documents into ${NAMES.scratch}`),
     ).toBeVisible();
+    // Selected documents have no preview step: their plan already counts them.
+    await page.getByRole("button", { name: "Continue" }).click();
     await page.getByRole("button", { name: "Start restore" }).click();
     expect(await waitForJob(page)).toBe("Succeeded");
 
@@ -265,6 +271,55 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
         status: "open",
       });
     }
+  });
+
+  await test.step("preview what a restore would change, down to one document's fields", async () => {
+    // One of the documents restored above is edited in the target afterwards.
+    const [editedId] = selectedIds;
+    await withMongo((client) =>
+      client
+        .db("shop_selected")
+        .collection<{ _id: number }>(SEED.orders)
+        .updateOne({ _id: editedId ?? -1 }, { $set: { status: "edited after the restore" } }),
+    );
+    await openBackup(page, passphraseBackupId);
+    await page.getByRole("link", { name: "Restore…" }).click();
+    await page.getByLabel("Rename rules (optional)").fill(`${SEED.database}.*=shop_selected.*`);
+    await page.getByLabel("If a target collection already has data").selectOption("upsert");
+    await page.getByRole("button", { name: "Review plan" }).click();
+    await page.getByRole("button", { name: "Preview changes" }).click();
+
+    // 120 orders backed up; the target has 2 of them, one edited since.
+    const summary = page.getByRole("table", { name: "Changes per namespace" });
+    const orders = summary.getByRole("row", { name: new RegExp(`${SEED.database}\\.orders`) });
+    await expect(orders).toContainText("Exact");
+    await expect(orders).toContainText(
+      `${SEED.orderCount - 2} new, 1 replaced, 0 deleted, 1 unchanged`,
+    );
+    await expect(page.getByText("1 namespace would change")).toBeVisible();
+    expect(await accessibilityProblems(page, { shell: true }), "preview summary").toEqual([]);
+
+    // Down to the edited document: the one changed field, both values.
+    await page
+      .getByRole("button", { name: `Documents of ${SEED.database}.${SEED.orders}` })
+      .click();
+    const changed = page.getByRole("list", { name: "Changed: ids" });
+    await changed.getByRole("button", { name: `_id ${editedId}` }).click();
+    const fields = page.getByRole("table", { name: "Fields that differ" });
+    const status = fields.getByRole("row", { name: /status/ });
+    await expect(status).toContainText("edited after the restore");
+    await expect(status).toContainText("open");
+    await expect(fields.getByRole("row")).toHaveCount(2);
+    await expect(page.getByText("In the target now (shop_selected.orders)")).toBeVisible();
+    expect(await accessibilityProblems(page, { shell: true }), "document diff").toEqual([]);
+    // Previewing wrote nothing.
+    const stored = await withMongo((client) =>
+      client
+        .db("shop_selected")
+        .collection<{ _id: number; status?: string }>(SEED.orders)
+        .findOne({ _id: editedId ?? -1 }),
+    );
+    expect(stored?.status).toBe("edited after the restore");
   });
 
   await test.step("restore the whole recipient-encrypted backup into production", async () => {
@@ -282,6 +337,13 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
         `Plan: 2 namespaces, ${SEED.orderCount + SEED.customerCount} documents into ${NAMES.production}`,
       ),
     ).toBeVisible();
+
+    // The preview reads the backup with the typed private key too: new collections only.
+    await page.getByRole("button", { name: "Preview changes" }).click();
+    const summary = page.getByRole("table", { name: "Changes per namespace" });
+    await expect(summary.getByText("shop_full.orders")).toBeVisible();
+    await expect(summary.getByText("(new)", { exact: false })).toHaveCount(2);
+    await page.getByRole("button", { name: "Continue" }).click();
 
     // Production needs its name typed exactly.
     const start = page.getByRole("button", { name: "Start restore" });
@@ -368,6 +430,9 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
       "plan.run",
       "backup.browse",
       "restore.start",
+      "restore.preview",
+      "restore.preview_documents",
+      "restore.preview_document",
       "backup.drill",
       "backup.hold",
       "backup.release",

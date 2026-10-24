@@ -7,6 +7,7 @@
  *   DELETE /api/connections/:id               admin   (refused while a plan uses it)
  *   POST   /api/connections/:id/test          operator
  *   GET    /api/connections/:id/namespaces    viewer
+ *   PUT    /api/connections/:id/live-edits    admin   (routes/live.ts)
  *
  * The URI (with its password) is encrypted at rest and never returned; views
  * carry a redacted preview computed when the URI is saved.
@@ -94,6 +95,7 @@ export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): 
         ...(uri === undefined
           ? {}
           : { uri: sealConnectionUri(store, id, uri), uriPreview: redactMongoUri(uri) }),
+        ...liveEditsAfterUpdate(existing, production, principal.user.username, services.now()),
       };
       state.connections = state.connections.map((connection) =>
         connection.id === id ? next : connection,
@@ -105,7 +107,12 @@ export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): 
       action: "connection.update",
       target: name,
       outcome: "success",
-      details: { id, production, uriChanged: uri !== undefined },
+      details: {
+        id,
+        production,
+        uriChanged: uri !== undefined,
+        liveEditsEnabled: updated.liveEdits?.enabled === true,
+      },
     });
     return c.json(connectionView(updated));
   });
@@ -176,6 +183,31 @@ function uriField(body: Fields): string | undefined {
     throw invalid('"uri" must start with mongodb:// or mongodb+srv://.');
   }
   return uri.trim();
+}
+
+/**
+ * Live edits were confirmed for the connection as it was. Marking it production
+ * afterwards turns them off: production needs its own confirmation (name + reason),
+ * which only `PUT /api/connections/:id/live-edits` takes.
+ */
+function liveEditsAfterUpdate(
+  existing: ConnectionRecord,
+  production: boolean,
+  username: string,
+  now: Date,
+): Pick<ConnectionRecord, "liveEdits"> {
+  const settings = existing.liveEdits;
+  if (settings === undefined || !settings.enabled) return {};
+  if (!production || settings.productionConfirmed) return {};
+  return {
+    liveEdits: {
+      ...settings,
+      enabled: false,
+      changedBy: username,
+      changedAt: now.toISOString(),
+      reason: "Turned off because the connection was marked production.",
+    },
+  };
 }
 
 /** Connection names are unique: a production restore is confirmed by typing the name. */

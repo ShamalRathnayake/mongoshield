@@ -32,6 +32,18 @@ export type Role = "viewer" | "operator" | "admin";
 
 export const ROLES: readonly Role[] = ["viewer", "operator", "admin"];
 
+/**
+ * Permissions granted per user on top of the role. They are separate from roles on
+ * purpose: being an admin does not by itself allow changing live data.
+ *
+ * - `data:write`: insert, edit and delete documents of live databases in the data
+ *   browser (and undo such edits), on connections where an admin turned on "Allow live
+ *   edits". Only operators and admins can hold it.
+ */
+export type Permission = "data:write";
+
+export const PERMISSIONS: readonly Permission[] = ["data:write"];
+
 /** A secret the console stores encrypted. Only this summary ever leaves the server. */
 export interface SecretSummary {
   readonly configured: boolean;
@@ -118,6 +130,8 @@ export interface UserView {
   readonly signIn: "password" | "sso";
   readonly createdAt: string;
   readonly lastLoginAt?: string;
+  /** Extra permissions on top of the role (see {@link Permission}). */
+  readonly permissions: readonly Permission[];
 }
 
 export interface UserInput {
@@ -129,6 +143,8 @@ export interface UserInput {
    * signs in only through SSO (useful with OIDC auto-provisioning turned off).
    */
   readonly password?: string;
+  /** Omit when updating to keep the user's permissions. `data:write` needs operator or admin. */
+  readonly permissions?: readonly Permission[];
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +158,8 @@ export interface ConnectionView {
   /** Restores into a production connection require typing its name to confirm. */
   readonly production: boolean;
   readonly createdAt: string;
+  /** Whether the live data browser may change documents here (off unless an admin turned it on). */
+  readonly liveEdits: LiveEditSettingsView;
 }
 
 export interface ConnectionInput {
@@ -230,6 +248,8 @@ export interface PlanView {
     readonly type: "webhook" | "slack" | "discord";
     readonly url: SecretSummary;
   }[];
+  /** Incremental backups between full ones, a full one every `fullEveryDays` days. */
+  readonly incremental?: { readonly fullEveryDays: number };
   readonly nextRunAt?: string;
   readonly lastRun?: JobSummary;
 }
@@ -260,6 +280,12 @@ export interface BackupSummary {
   readonly bytesStored?: number;
   readonly encrypted?: boolean;
   readonly consistency?: string;
+  /**
+   * Incremental backups (only the changes since their parent): `"incremental"` and
+   * their position after the chain's full backup. Absent for full backups.
+   */
+  readonly kind?: "incremental";
+  readonly chainLength?: number;
   readonly verification?: {
     readonly mode: string;
     readonly ok: boolean;
@@ -276,6 +302,11 @@ export interface BackupDetail extends BackupSummary {
     readonly drilledAt: string;
     readonly ok: boolean;
     readonly rtoMs: number;
+    /**
+     * Upgrade rehearsals only: the MongoDB version the backup was restored into and
+     * proved on (e.g. `8.0.13`). Absent for ordinary drills.
+     */
+    readonly targetVersion?: string;
   }[];
 }
 
@@ -336,6 +367,164 @@ export interface RestorePlanView {
     readonly action: string;
     readonly reason?: string;
   }[];
+}
+
+// ---------------------------------------------------------------------------
+// Restore preview ("what would this restore change in the target?")
+// ---------------------------------------------------------------------------
+
+/**
+ * A restore preview compares the chosen backup namespaces with the namespaces they
+ * would be restored into (after `rename`), using the library's `diff` against the live
+ * target. It only reads the target. `POST /api/restore/preview` takes the same body as
+ * the dry-run plan (without `filter` and `confirmName`) and starts a `preview` job;
+ * `GET /api/restore/preview/:id` (the job id) returns this view, with `namespaces` once
+ * the job has succeeded. Results are kept in memory for a while (see `expiresAt`).
+ */
+export interface RestorePreviewView {
+  readonly jobId: string;
+  readonly status: JobStatus;
+  readonly storageId: string;
+  readonly backupId: string;
+  readonly targetConnectionId: string;
+  readonly mode: RestoreRequest["mode"];
+  /** Per selected backup namespace, sorted by name; present once the job has succeeded. */
+  readonly namespaces?: readonly PreviewNamespaceView[];
+  readonly error?: ApiError["error"];
+  /**
+   * Whether the caller may list changed documents and open their field-level diff
+   * (the document browser's role). Counts are shown to everyone who may plan the restore.
+   */
+  readonly documentsVisible: boolean;
+  /** The bounds this preview ran with, so the UI can explain estimates and short lists. */
+  readonly limits: PreviewLimits;
+  /** When the server forgets this preview (ISO date); run it again after that. */
+  readonly expiresAt: string;
+}
+
+/** The bounds of a restore preview (server defaults, see `src/jobs/preview.ts`). */
+export interface PreviewLimits {
+  /** Namespaces with more documents than this (either side) are compared by a sample. */
+  readonly sampleAbove: number;
+  /** Backed-up documents compared per sampled namespace. */
+  readonly sampleSize: number;
+  /** Document ids kept per namespace and category for the drill-down list. */
+  readonly listedPerCategory: number;
+  /** The preview job is stopped after this long. */
+  readonly timeoutMs: number;
+}
+
+/** Document categories of a preview (backup vs. the live target). */
+export type PreviewCategory = "backup-only" | "live-only" | "changed";
+
+/** What a restore would do to one target namespace. */
+export interface PreviewNamespaceView {
+  /** The namespace in the backup. */
+  readonly from: string;
+  /** Where it would be restored (after rename rules). */
+  readonly to: string;
+  /** False when the target namespace does not exist yet (the restore creates it). */
+  readonly targetExists: boolean;
+  /** The restore plan's action for it (create, drop-and-create, insert, upsert, skip, conflict). */
+  readonly action: string;
+  readonly reason?: string;
+  /**
+   * `exact`: every document was compared. `sampled`: the first `sample.documents` of
+   * `sample.of` backed-up documents were looked up in the target by `_id`, and the
+   * counts are estimates extrapolated from them.
+   */
+  readonly accuracy: "exact" | "sampled";
+  readonly sample?: { readonly documents: number; readonly of: number };
+  /** Documents by where they are, matched by `_id`. */
+  readonly documents: {
+    readonly backup: number;
+    readonly live: number;
+    /** In the backup only: the restore would add them. */
+    readonly backupOnly: number;
+    /** In the target only. */
+    readonly liveOnly: number;
+    /** In both, but different. */
+    readonly changed: number;
+    readonly identical: number;
+  };
+  /**
+   * What the restore in the chosen mode would do with the target's documents, or
+   * absent when it would not run for this namespace (`conflict`, `skip`):
+   * `inserted` new documents, `replaced` changed ones, `deleted` target-only ones,
+   * and `kept` target documents that stay as they are.
+   */
+  readonly effect?: {
+    readonly inserted: number;
+    readonly replaced: number;
+    readonly deleted: number;
+    readonly kept: number;
+  };
+  /** Index names that differ: only in the backup, only in the target, or defined differently. */
+  readonly indexes: {
+    readonly backupOnly: readonly string[];
+    readonly liveOnly: readonly string[];
+    readonly different: readonly string[];
+  };
+  /** Collection options (validator, collation, …) that differ. */
+  readonly options: readonly string[];
+  /** Document ids kept per category for the drill-down (at most `limits.listedPerCategory`). */
+  readonly listed: Readonly<Record<PreviewCategory, number>>;
+  readonly identical: boolean;
+}
+
+/** A page of document ids of one preview category (`GET …/preview/:id/documents`). */
+export interface PreviewDocumentPage {
+  readonly documents: readonly {
+    /** The `_id` as canonical Extended JSON: pass it back to open the document's diff. */
+    readonly id: string;
+    /** The `_id` as relaxed Extended JSON, for display. */
+    readonly label: string;
+  }[];
+  /** How many ids the preview kept for this category (the total may be larger). */
+  readonly listed: number;
+  /** Pass back as `after` for the next page; absent on the last page. */
+  readonly next?: string;
+}
+
+/** Opens one document of a preview (`POST …/preview/:id/document`). */
+export interface PreviewDocumentRequest {
+  /** The namespace in the backup (`PreviewNamespaceView.from`). */
+  readonly ns: string;
+  /** The `_id` as canonical Extended JSON, as listed in a `PreviewDocumentPage`. */
+  readonly id: string;
+  /** Keys for an encrypted backup, as for the restore itself (never stored). */
+  readonly passphrase?: string;
+  readonly identities?: readonly string[];
+}
+
+/** One document in the backup and in the target, with the fields that differ. */
+export interface PreviewDocumentDiff {
+  readonly ns: string;
+  readonly to: string;
+  /** The `_id` as relaxed Extended JSON. */
+  readonly label: string;
+  /** The backed-up version (what the restore writes), relaxed Extended JSON; absent if none. */
+  readonly backup?: string;
+  /** The target's current version, relaxed Extended JSON; absent if none. */
+  readonly live?: string;
+  /** True when a version is larger than 1 MiB as JSON: it is left out, the field list is not. */
+  readonly documentsOmitted?: boolean;
+  /**
+   * Fields that differ, by dotted path (array elements by index), named from the
+   * target's side: `added` only in the backed-up version, `removed` only in the target's,
+   * `changed` in both with different values (BSON types count). Values are relaxed
+   * Extended JSON. Values of fields that look like secrets (password, token, apiKey, …)
+   * are replaced by `"***"` here and in `backup`/`live`, and marked `redacted`.
+   */
+  readonly fields: readonly {
+    readonly path: string;
+    readonly change: "added" | "removed" | "changed";
+    readonly backup?: string;
+    readonly live?: string;
+    readonly redacted?: boolean;
+  }[];
+  /** True when there were more differing fields than are listed. */
+  readonly truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +629,15 @@ export interface ConfigImportResult {
 // Jobs
 // ---------------------------------------------------------------------------
 
-export type JobKind = "backup" | "restore" | "verify" | "drill" | "prune";
+export type JobKind =
+  | "backup"
+  | "restore"
+  | "verify"
+  | "drill"
+  | "prune"
+  | "preview"
+  /** "Update many" / "delete many" in the live data browser, or undoing one. */
+  | "live-edit";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface JobSummary {
@@ -498,6 +695,265 @@ export interface AuditEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Live data: browsing and (opt-in) editing the databases of a connection
+// ---------------------------------------------------------------------------
+
+/**
+ * The live data browser reads documents straight from a connection's databases
+ * (operator role, like the backup document browser). Changing them is off by default
+ * and needs three things at once:
+ *
+ * 1. an admin turned on "Allow live edits" for the connection (for a connection marked
+ *    production: with its name typed again and a reason, both recorded);
+ * 2. the user holds the `data:write` permission (granted per user by an admin);
+ * 3. every write is conditional: the document must still be exactly the version the
+ *    user loaded (`version`), or the write is refused with `409 CONSOLE_LIVE_CONFLICT`.
+ *
+ * Before any write the console stores the document's pre-image in the live edit
+ * journal (sealed with the console's key, in the connection's journal storage), so
+ * every edit can be undone from the Edit history page. Undo is itself a conditional
+ * write and is journaled too (undoing an undo redoes the edit).
+ */
+
+/** Most documents a bulk edit may touch, whatever a connection's setting says. */
+export const LIVE_BULK_HARD_LIMIT = 10_000;
+/** Default "max documents per bulk edit" for a connection. */
+export const LIVE_BULK_DEFAULT_LIMIT = 1_000;
+
+/** A connection's live edit settings. */
+export interface LiveEditSettingsView {
+  readonly enabled: boolean;
+  /** For connections marked production: an admin confirmed with the name and a reason. */
+  readonly productionConfirmed: boolean;
+  /** Who last changed the settings, when, and why. */
+  readonly changedBy?: string;
+  readonly changedAt?: string;
+  readonly reason?: string;
+  /**
+   * The storage location that keeps the edit journal (the pre-images used for undo).
+   * Absent: the journal is kept in the console's data directory.
+   */
+  readonly journalStorageId?: string;
+  /** Most documents one "update many" / "delete many" may touch (≤ {@link LIVE_BULK_HARD_LIMIT}). */
+  readonly maxBulkDocuments: number;
+}
+
+/** Changes a connection's live edit settings (admin, `PUT /api/connections/:id/live-edits`). */
+export interface LiveEditSettingsInput {
+  readonly enabled: boolean;
+  /** A storage location id for the journal; omit to keep the journal in the data directory. */
+  readonly journalStorageId?: string;
+  readonly maxBulkDocuments?: number;
+  /** Turning edits on for a production connection: its name, typed again. */
+  readonly confirmName?: string;
+  /** Why edits are turned on. Required for production connections; recorded in the audit log. */
+  readonly reason?: string;
+}
+
+/** One live document as the browser shows it. */
+export interface LiveDocument {
+  /** The document as relaxed Extended JSON (what the editor shows). */
+  readonly json: string;
+  /** The `_id` as canonical Extended JSON; absent when the projection left it out. */
+  readonly id?: string;
+  /**
+   * SHA-256 of the document as read (its BSON). Send it back with an edit or delete: the
+   * write only happens while the stored document still has this version. Absent for
+   * documents read with a projection, which are partial and cannot be edited.
+   */
+  readonly version?: string;
+}
+
+/** How many documents match a live query. */
+export interface LiveCount {
+  readonly value: number;
+  /**
+   * `estimated`: the collection's metadata count (no filter); `exact`: counted;
+   * `at-least`: counting stopped at `value` (there are more).
+   */
+  readonly kind: "estimated" | "exact" | "at-least";
+}
+
+/**
+ * A page of live documents (`GET /api/live/:id/documents`).
+ * Query: `ns` (required), `filter`, `projection`, `sort` (Extended JSON objects),
+ * `skip` (≤ 100 000), `limit` (≤ 100).
+ */
+export interface LiveDocumentPage {
+  readonly documents: readonly LiveDocument[];
+  readonly skip: number;
+  readonly limit: number;
+  readonly count: LiveCount;
+  /** True when more documents follow this page. */
+  readonly hasMore: boolean;
+  /** True when a projection was applied (the documents are partial and read-only). */
+  readonly projected: boolean;
+}
+
+/** One index of a live collection. */
+export interface LiveIndexView {
+  readonly name: string;
+  /** The key pattern as relaxed Extended JSON, e.g. `{"email":1}`. */
+  readonly key: string;
+  readonly unique: boolean;
+  readonly sparse: boolean;
+  readonly hidden: boolean;
+  readonly expireAfterSeconds?: number;
+  /** The partial filter expression, as relaxed Extended JSON. */
+  readonly partialFilter?: string;
+  readonly sizeBytes?: number;
+}
+
+/** Statistics and indexes of a live collection (`GET /api/live/:id/collection?ns=`). */
+export interface LiveCollectionInfo {
+  readonly ns: string;
+  readonly type: "collection" | "view" | "timeseries";
+  readonly estimatedDocuments: number;
+  /** Uncompressed size of the documents, storage size on disk, and the indexes' size. */
+  readonly sizeBytes?: number;
+  readonly storageSizeBytes?: number;
+  readonly averageDocumentBytes?: number;
+  readonly totalIndexBytes?: number;
+  readonly capped: boolean;
+  readonly indexes: readonly LiveIndexView[];
+  /** Whether the caller may change documents here right now. */
+  readonly writable: boolean;
+  /** Why not, in words, when `writable` is false. */
+  readonly readOnlyReason?: string;
+}
+
+/** Inserts one document (`POST /api/live/:id/documents`). */
+export interface LiveInsertRequest {
+  readonly ns: string;
+  /** Extended JSON (relaxed or canonical). Without `_id`, the console adds an ObjectId. */
+  readonly document: string;
+}
+
+/** Replaces one document with an edited version (`PUT /api/live/:id/documents`). */
+export interface LiveReplaceRequest {
+  readonly ns: string;
+  /** The `_id` as canonical Extended JSON (`LiveDocument.id`); the edit may not change it. */
+  readonly id: string;
+  /** The version the edit was made from (`LiveDocument.version`). */
+  readonly version: string;
+  /**
+   * The edited document as Extended JSON. Fields whose value is unchanged keep their exact
+   * BSON type (a double stays a double even if it reads `1`); changed fields take the type
+   * their new value has (use `{"$numberLong": "…"}` and friends to choose one).
+   */
+  readonly document: string;
+}
+
+/** Deletes one document (`POST /api/live/:id/documents/delete`). */
+export interface LiveDeleteRequest {
+  readonly ns: string;
+  readonly id: string;
+  readonly version: string;
+}
+
+/** What a single-document write did. */
+export interface LiveWriteResult {
+  readonly entry: LiveEditEntryView;
+  /** The document as stored now (absent after a delete). */
+  readonly document?: LiveDocument;
+  /** Dotted paths of the fields that changed (edits only). */
+  readonly changedFields?: readonly string[];
+}
+
+/** "Update many" / "delete many": what to change. */
+export interface LiveBulkRequest {
+  readonly ns: string;
+  readonly op: "update" | "delete";
+  /** The filter, as Extended JSON. An empty filter (all documents) is allowed but must be typed. */
+  readonly filter: string;
+  /**
+   * For `update`: update operators as Extended JSON, e.g. `{"$set": {"status": "archived"}}`.
+   * Only operators are allowed (no replacement documents, no pipelines).
+   */
+  readonly update?: string;
+}
+
+/** The mandatory preview of a bulk edit (`POST /api/live/:id/bulk/preview`). */
+export interface LiveBulkPreview {
+  readonly ns: string;
+  readonly op: "update" | "delete";
+  /** Documents the filter matches now. */
+  readonly matched: number;
+  /** The connection's cap (`maxBulkDocuments`). */
+  readonly max: number;
+  /** False when `matched` is over the cap (narrow the filter or raise the cap). */
+  readonly allowed: boolean;
+  /** What the user has to type to confirm, e.g. `delete 42 documents in app.users`. */
+  readonly confirmText: string;
+}
+
+/** Starts a bulk edit as a job (`POST /api/live/:id/bulk`). */
+export interface LiveBulkConfirm extends LiveBulkRequest {
+  /** `LiveBulkPreview.matched`: the job refuses to run if the count has changed since. */
+  readonly expectedCount: number;
+  /** Exactly `LiveBulkPreview.confirmText`. */
+  readonly confirm: string;
+}
+
+/** What a live edit journal entry records. */
+export type LiveEditOp = "insert" | "update" | "delete" | "bulk-update" | "bulk-delete" | "undo";
+
+/**
+ * `pending`: the pre-image is journaled, the write has not been confirmed (still running,
+ * or the console stopped); `applied`: done; `partial`: a bulk edit or undo skipped
+ * documents that had changed; `conflict`: nothing was written because the document had
+ * changed; `failed`: an error stopped it.
+ */
+export type LiveEditStatus = "pending" | "applied" | "partial" | "conflict" | "failed";
+
+/** One entry of the Edit history page (`GET /api/live-edits`). */
+export interface LiveEditEntryView {
+  readonly id: string;
+  readonly connectionId: string;
+  /** The connection's name (absent if the connection was deleted since). */
+  readonly connectionName?: string;
+  readonly ns: string;
+  readonly op: LiveEditOp;
+  readonly by: string;
+  readonly at: string;
+  readonly status: LiveEditStatus;
+  /** Documents whose pre-image was journaled, then changed, then skipped as changed meanwhile. */
+  readonly documents: number;
+  readonly applied: number;
+  readonly conflicts: number;
+  /** The `_id` (relaxed Extended JSON) of a single-document entry. */
+  readonly documentId?: string;
+  readonly beforeHash?: string;
+  readonly afterHash?: string;
+  /** The entry this one undid, and the entry that undid this one. */
+  readonly undoOf?: string;
+  readonly undoneBy?: string;
+  readonly jobId?: string;
+  /** Where the journal objects are kept. */
+  readonly journal: { readonly kind: "storage" | "console"; readonly storageId?: string };
+  /** True when undo can be attempted (it is still checked document by document). */
+  readonly undoable: boolean;
+  readonly error?: ApiError["error"];
+}
+
+/** An entry with its journaled documents (`GET /api/live-edits/:id`, audited). */
+export interface LiveEditEntryDetail extends LiveEditEntryView {
+  /** The first journaled documents, relaxed Extended JSON; `before` absent for inserts, `after` for deletes. */
+  readonly records: readonly {
+    readonly id: string;
+    readonly before?: string;
+    readonly after?: string;
+  }[];
+  /** True when the entry has more documents than `records` lists. */
+  readonly truncated: boolean;
+}
+
+/** Undoing an entry: single documents are undone at once, bulk entries by a job. */
+export type LiveUndoResult =
+  | { readonly kind: "applied"; readonly entry: LiveEditEntryView }
+  | { readonly kind: "job"; readonly job: JobSummary };
+
+// ---------------------------------------------------------------------------
 // The route table
 // ---------------------------------------------------------------------------
 
@@ -522,6 +978,11 @@ export interface ApiRoutes {
   "DELETE /api/connections/:id": { request: undefined; response: { ok: true } };
   "POST /api/connections/:id/test": { request: undefined; response: ConnectionTestResult };
   "GET /api/connections/:id/namespaces": { request: undefined; response: readonly DatabaseNode[] };
+  /** Live edit settings (admin; production connections need `confirmName` and `reason`). */
+  "PUT /api/connections/:id/live-edits": {
+    request: LiveEditSettingsInput;
+    response: ConnectionView;
+  };
 
   "GET /api/storage": { request: undefined; response: readonly StorageView[] };
   "POST /api/storage": { request: StorageInput; response: StorageView };
@@ -562,6 +1023,30 @@ export interface ApiRoutes {
 
   "POST /api/restore/plan": { request: RestoreRequest; response: RestorePlanView };
   "POST /api/restore": { request: RestoreRequest; response: JobSummary };
+  /** Starts a restore preview job (same rules as the dry-run plan; no `filter`). */
+  "POST /api/restore/preview": { request: RestoreRequest; response: JobSummary };
+  "GET /api/restore/preview/:id": { request: undefined; response: RestorePreviewView };
+  /** Query: `ns` (backup namespace), `category`, `limit` (≤ 100), `after`. */
+  "GET /api/restore/preview/:id/documents": { request: undefined; response: PreviewDocumentPage };
+  "POST /api/restore/preview/:id/document": {
+    request: PreviewDocumentRequest;
+    response: PreviewDocumentDiff;
+  };
+
+  /** Query: `ns` (required). Operator. */
+  "GET /api/live/:id/collection": { request: undefined; response: LiveCollectionInfo };
+  /** Query: `ns` (required), `filter`, `projection`, `sort`, `skip`, `limit`. Operator. */
+  "GET /api/live/:id/documents": { request: undefined; response: LiveDocumentPage };
+  /** The write routes need `data:write` and live edits turned on for the connection. */
+  "POST /api/live/:id/documents": { request: LiveInsertRequest; response: LiveWriteResult };
+  "PUT /api/live/:id/documents": { request: LiveReplaceRequest; response: LiveWriteResult };
+  "POST /api/live/:id/documents/delete": { request: LiveDeleteRequest; response: LiveWriteResult };
+  "POST /api/live/:id/bulk/preview": { request: LiveBulkRequest; response: LiveBulkPreview };
+  "POST /api/live/:id/bulk": { request: LiveBulkConfirm; response: JobSummary };
+  /** Query: `connectionId`, `limit` (≤ 200), `before` (an entry id, for older pages). Operator. */
+  "GET /api/live-edits": { request: undefined; response: readonly LiveEditEntryView[] };
+  "GET /api/live-edits/:id": { request: undefined; response: LiveEditEntryDetail };
+  "POST /api/live-edits/:id/undo": { request: undefined; response: LiveUndoResult };
 
   "GET /api/jobs": { request: undefined; response: readonly JobSummary[] };
   "GET /api/jobs/:id": { request: undefined; response: JobSummary };

@@ -337,7 +337,14 @@ describe("context hooks", () => {
           session={{
             setupComplete: true,
             authMethods: ["password"],
-            user: { id: "u", username: "a", role: "viewer", signIn: "password", createdAt: "x" },
+            user: {
+              id: "u",
+              username: "a",
+              role: "viewer",
+              signIn: "password",
+              createdAt: "x",
+              permissions: [],
+            },
           }}
           onChange={onChange}
         >

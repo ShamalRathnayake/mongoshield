@@ -15,6 +15,8 @@ import { openStorageCredentials } from "../state/secrets.ts";
 import { issueSetupToken } from "../state/sessions.ts";
 import { StateStore } from "../state/store.ts";
 import type { ConsoleServices, ConsoleSettings } from "./context.ts";
+import { LiveClients } from "./live/clients.ts";
+import { LiveJournal } from "./live/journal.ts";
 import { OidcClient, type OidcClientOptions } from "./oidc/client.ts";
 import { LoginRateLimiter } from "./rate-limit.ts";
 
@@ -126,6 +128,10 @@ export async function openConsole(options: OpenConsoleOptions): Promise<OpenedCo
     oidc,
     passwordCost: options.passwordCost ?? DEFAULT_PASSWORD_COST,
     now,
+    live: {
+      clients: new LiveClients(store),
+      journal: new LiveJournal({ store, storage, dataDir: options.dataDir }),
+    },
   };
 
   // No admin yet: issue a fresh setup token (only its hash is stored, so an
@@ -146,6 +152,8 @@ export async function closeConsole(services: ConsoleServices, graceMs?: number):
   const grace = graceMs ?? services.settings.shutdownGraceMs;
   await services.schedules.stop(grace);
   await services.runner.shutdown(grace);
+  await services.live.clients.closeAll();
+  await services.live.journal.close();
   await services.storage.closeAll();
   await services.store.close();
 }

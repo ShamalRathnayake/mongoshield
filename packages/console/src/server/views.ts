@@ -9,6 +9,7 @@
 
 import type { ConnectionView, JobSummary, PlanView, StorageView, UserView } from "../shared/api.ts";
 import type { ConnectionRecord, PlanRecord, StorageRecord, UserRecord } from "../state/types.ts";
+import { liveEditSettingsView } from "./live/access.ts";
 
 /** A user, without the password hash. */
 export function userView(user: UserRecord): UserView {
@@ -20,6 +21,7 @@ export function userView(user: UserRecord): UserView {
     signIn: user.passwordHash === "" ? "sso" : "password",
     createdAt: user.createdAt,
     ...(user.lastLoginAt === undefined ? {} : { lastLoginAt: user.lastLoginAt }),
+    permissions: user.permissions ?? [],
   };
 }
 
@@ -31,6 +33,7 @@ export function connectionView(connection: ConnectionRecord): ConnectionView {
     uri: { configured: true, preview: connection.uriPreview },
     production: connection.production,
     createdAt: connection.createdAt,
+    liveEdits: liveEditSettingsView(connection),
   };
 }
 
@@ -69,6 +72,7 @@ export function planView(
     consistency: plan.consistency,
     ...(plan.schedule === undefined ? {} : { schedule: plan.schedule }),
     ...(plan.retention === undefined ? {} : { retention: plan.retention }),
+    ...(plan.incremental === undefined ? {} : { incremental: plan.incremental }),
     verify: plan.verify,
     notify: plan.notify.map((target) => ({
       type: target.type,

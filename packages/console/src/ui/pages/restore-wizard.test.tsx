@@ -1,6 +1,7 @@
 /**
  * Page tests for the restore wizard: conflict display in the dry-run plan, the typed
- * confirmation for production targets, and starting the job.
+ * confirmation for production targets, and starting the job. The "Preview changes"
+ * step has its own tests (restore-preview.test.tsx); these skip it.
  */
 
 import { screen, within } from "@testing-library/react";
@@ -35,7 +36,13 @@ describe("restore wizard", () => {
     expect(within(usersRow as HTMLElement).getByText("Conflict: fail")).toBeTruthy();
     expect(within(usersRow as HTMLElement).getByText("1,200")).toBeTruthy();
     expect(screen.getByText(/conflicts? with existing data/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start restore" })).toHaveProperty("disabled", true);
+    // A plan that would fail goes no further: neither a preview nor the confirmation.
+    expect(screen.getByRole("button", { name: "Preview changes" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(screen.getByRole("button", { name: "Skip preview" })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: "Start restore" })).toBeNull();
   });
 
   it("restores next to the original data with a rename rule", async () => {
@@ -47,6 +54,7 @@ describe("restore wizard", () => {
     expect(within(table).getByText("shop_restored.users")).toBeTruthy();
     expect(within(table).queryByText(/Conflict/)).toBeNull();
 
+    await user.click(screen.getByRole("button", { name: "Skip preview" }));
     await user.click(screen.getByRole("button", { name: "Start restore" }));
     expect(await screen.findByRole("heading", { name: "Restore job" })).toBeTruthy();
     const [start] = requestsTo(backend, "POST", "/api/restore");
@@ -78,6 +86,7 @@ describe("restore wizard", () => {
       .closest("tr");
     expect(usersRow?.className).toBe("row-conflict");
 
+    await user.click(screen.getByRole("button", { name: "Skip preview" }));
     const start = screen.getByRole("button", { name: "Start restore" });
     expect(start).toHaveProperty("disabled", true);
     const confirm = screen.getByLabelText("Type Production cluster to confirm");

@@ -121,6 +121,7 @@ test("a viewer can look but not touch, and the API refuses every change", async 
     ["POST", `${backupPath}/hold`, { reason: "no" }],
     ["POST", `${backupPath}/drill`, { targetConnectionId: ids.scratch }],
     ["POST", "/api/restore/plan", restoreBody(ids.scratch)],
+    ["POST", "/api/restore/preview", restoreBody(ids.scratch)],
     ["POST", "/api/users", { username: "eve", password: "long enough password", role: "admin" }],
   ];
   for (const [method, path, body] of refused) {
@@ -169,6 +170,7 @@ test("an operator runs and restores, but not into production, and cannot adminis
   const backupPath = `/api/storage/${ids.storage}/backups/${ids.backup}`;
   const refused: [method: "POST" | "PUT" | "DELETE", path: string, body?: object][] = [
     ["POST", "/api/restore/plan", restoreBody(ids.production)],
+    ["POST", "/api/restore/preview", restoreBody(ids.production)],
     ["POST", "/api/restore", { ...restoreBody(ids.production), confirmName: NAMES.production }],
     ["POST", "/api/connections", { name: "x", uri: "mongodb://h/", production: false }],
     ["DELETE", `/api/connections/${ids.scratch}`],

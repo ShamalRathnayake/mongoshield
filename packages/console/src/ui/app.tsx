@@ -22,8 +22,10 @@ import { BackupDetailPage } from "./pages/backup-detail.tsx";
 import { BackupsPage } from "./pages/backups.tsx";
 import { ConnectionDetailPage } from "./pages/connection-detail.tsx";
 import { ConnectionsPage } from "./pages/connections.tsx";
+import { EditHistoryPage } from "./pages/edit-history.tsx";
 import { JobDetailPage } from "./pages/job-detail.tsx";
 import { JobsPage } from "./pages/jobs.tsx";
+import { LiveBrowserPage } from "./pages/live-browser.tsx";
 import { LoginPage } from "./pages/login.tsx";
 import { OverviewPage } from "./pages/overview.tsx";
 import { PlanEditorPage } from "./pages/plan-editor.tsx";
@@ -150,6 +152,15 @@ const ROUTES: readonly RouteDefinition[] = [
     section: "connections",
     render: (params) => <ConnectionDetailPage connectionId={params.id ?? ""} />,
   },
+  {
+    pattern: "/connections/:id/data",
+    title: "Live data",
+    section: "connections",
+    role: "operator",
+    render: (params, query) => (
+      <LiveBrowserPage connectionId={params.id ?? ""} ns={query.get("ns") ?? undefined} />
+    ),
+  },
   { pattern: "/storage", title: "Storage", section: "storage", render: () => <StoragePage /> },
   { pattern: "/plans", title: "Backup plans", section: "plans", render: () => <PlansPage /> },
   {
@@ -210,6 +221,15 @@ const ROUTES: readonly RouteDefinition[] = [
     section: "jobs",
     render: (params) => <JobDetailPage jobId={params.id ?? ""} />,
   },
+  {
+    pattern: "/edit-history",
+    title: "Edit history",
+    section: "edit-history",
+    role: "operator",
+    render: (_params, query) => (
+      <EditHistoryPage connectionId={query.get("connection") ?? undefined} />
+    ),
+  },
   { pattern: "/audit", title: "Audit log", section: "audit", render: () => <AuditPage /> },
   {
     pattern: "/users",
@@ -227,6 +247,7 @@ const NAV_ITEMS: readonly { section: string; label: string; href: string; role?:
   { section: "plans", label: "Backup plans", href: "#/plans" },
   { section: "backups", label: "Backups", href: "#/backups" },
   { section: "jobs", label: "Jobs", href: "#/jobs" },
+  { section: "edit-history", label: "Edit history", href: "#/edit-history", role: "operator" },
   { section: "connections", label: "Connections", href: "#/connections" },
   { section: "storage", label: "Storage", href: "#/storage" },
   { section: "audit", label: "Audit log", href: "#/audit" },

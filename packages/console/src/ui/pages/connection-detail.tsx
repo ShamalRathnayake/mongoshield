@@ -1,7 +1,8 @@
 /**
  * One connection: its details, a connection test, and the namespace tree (databases and
  * collections with estimated document and index counts), marked with the backup plans
- * that include each collection.
+ * that include each collection, plus the Live data panel (browse link and the
+ * "Allow live edits" settings, see live-settings.tsx).
  */
 
 import { useState } from "react";
@@ -21,6 +22,7 @@ import { useApi, useLoad, useSession } from "../context.tsx";
 import { isSelected } from "../namespaces.ts";
 import { buildHref, segment } from "../router.ts";
 import { ConnectionTestReport } from "./connections.tsx";
+import { LiveDataPanel } from "./live-settings.tsx";
 
 /** Props for `ConnectionDetailPage`. */
 export interface ConnectionDetailPageProps {
@@ -141,6 +143,7 @@ export function ConnectionDetailPage(props: ConnectionDetailPageProps) {
           )}
         </Panel>
       </div>
+      <LiveDataPanel connection={connection} onSaved={() => details.reload()} />
       <Panel
         title="Databases and collections"
         actions={

@@ -225,6 +225,7 @@ interface ImportedConfig {
   readonly include: readonly string[];
   readonly exclude: readonly string[];
   readonly consistency: PlanRecord["consistency"];
+  readonly incremental: PlanRecord["incremental"];
   readonly schedule: PlanRecord["schedule"];
   readonly retention: PlanRecord["retention"];
   readonly verify: PlanRecord["verify"];
@@ -243,7 +244,9 @@ const MANAGED_KEYS: readonly string[] = [
   "notify",
 ];
 /** Keys of `backup`, `retention` and `schedule` that a console plan holds. */
-const MANAGED_BACKUP_KEYS: readonly string[] = ["include", "exclude", "consistency"];
+const MANAGED_BACKUP_KEYS: readonly string[] = ["include", "exclude", "consistency", "incremental"];
+/** The library's default `backup.incremental.fullEveryDays` (src/schedule/runner.ts). */
+const DEFAULT_FULL_EVERY_DAYS = 7;
 const RETENTION_BUCKETS = ["last", "daily", "weekly", "monthly", "yearly"] as const;
 const MANAGED_SCHEDULE_KEYS: readonly string[] = ["cron", "timezone", "verify"];
 
@@ -299,6 +302,11 @@ function readConfig(
     include: checkPatterns(where("backup.include"), config.backup?.include ?? []),
     exclude: checkPatterns(where("backup.exclude"), config.backup?.exclude ?? []),
     consistency: config.backup?.consistency ?? "auto",
+    // A plan holds the full-backup interval; the library's default when only `{}` is given.
+    incremental:
+      config.backup?.incremental === undefined
+        ? undefined
+        : { fullEveryDays: config.backup.incremental.fullEveryDays ?? DEFAULT_FULL_EVERY_DAYS },
     schedule: schedule.schedule,
     verify: schedule.verify,
     retention: readRetention(where, config.retention),
@@ -658,6 +666,7 @@ export function planImport(
       createdAt: existing?.createdAt ?? at,
       ...(config.schedule === undefined ? {} : { schedule: config.schedule }),
       ...(config.retention === undefined ? {} : { retention: config.retention }),
+      ...(config.incremental === undefined ? {} : { incremental: config.incremental }),
     };
 
     if (existing === undefined) {
@@ -907,6 +916,9 @@ function planSummary(
       plan.schedule === undefined ? "manual" : `${plan.schedule.cron} (${plan.schedule.timezone})`,
     verify: plan.verify,
     retention: plan.retention === undefined ? "keep everything" : JSON.stringify(plan.retention),
+    ...(plan.incremental === undefined
+      ? {}
+      : { incremental: `full every ${plan.incremental.fullEveryDays} days, incrementals between` }),
     notify: plan.notify.length === 0 ? "none" : plan.notify.map((target) => target.type).join(", "),
   };
 }

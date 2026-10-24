@@ -230,3 +230,45 @@ describe("scheduled jobs", () => {
     expect(entry).toMatchObject({ target: ids.plan, outcome: "success" });
   });
 });
+
+describe("incremental plans", () => {
+  it("take a full backup first, then an incremental of the changes", async () => {
+    const plan = await admin.request("POST", "/api/plans", {
+      name: "incremental",
+      connectionId: ids.source,
+      storageId: ids.storage,
+      include: [`${db}.*`],
+      exclude: [],
+      compression: "gzip",
+      encryption: { kind: "none" },
+      consistency: "auto",
+      verify: "fast",
+      notify: [],
+      incremental: { fullEveryDays: 7 },
+    });
+    expect(plan.status, plan.text).toBe(200);
+
+    const first = await waitForJob(
+      testConsole,
+      (await admin.request("POST", `/api/plans/${plan.body.id}/run`)).body.id,
+    );
+    expect(first.status, JSON.stringify(first.error)).toBe("succeeded");
+    await seed(db, "added", 2);
+    const second = await waitForJob(
+      testConsole,
+      (await admin.request("POST", `/api/plans/${plan.body.id}/run`)).body.id,
+    );
+    expect(second.status, JSON.stringify(second.error)).toBe("succeeded");
+    expect(second.summary).toContain(`Incremental backup ${second.backupId} succeeded`);
+
+    const detail = await admin.request(
+      "GET",
+      `/api/storage/${ids.storage}/backups/${second.backupId}`,
+    );
+    expect(detail.body).toMatchObject({ kind: "incremental", chainLength: 1 });
+    expect(detail.body.manifest).toMatchObject({
+      kind: "incremental",
+      chain: { parent: first.backupId, base: first.backupId, length: 1 },
+    });
+  });
+});

@@ -43,6 +43,7 @@ const SESSION: SessionInfo = {
     role: "admin",
     signIn: "password",
     createdAt: "2026-01-01T00:00:00Z",
+    permissions: [],
   },
 };
 

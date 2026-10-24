@@ -6,7 +6,7 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, requestsTo } from "../testing.tsx";
-import { emptyPlanForm, validatePlanForm } from "./plan-editor.tsx";
+import { emptyPlanForm, planToForm, validatePlanForm } from "./plan-editor.tsx";
 
 const RECIPIENT = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p";
 
@@ -49,6 +49,53 @@ describe("validatePlanForm", () => {
     });
     expect(result.input?.encryption).toEqual({ kind: "passphrase" });
     expect(result.input?.schedule).toBeUndefined();
+  });
+});
+
+describe("incremental backups in the plan form", () => {
+  const valid = {
+    ...emptyPlanForm(),
+    name: "x",
+    connectionId: "c",
+    storageId: "s",
+    encryptionKind: "none" as const,
+  };
+
+  it("sends incremental: { fullEveryDays } only when the box is ticked", () => {
+    expect(validatePlanForm(valid).input?.incremental).toBeUndefined();
+    const ticked = validatePlanForm({ ...valid, incremental: true, fullEveryDays: "0.5" });
+    expect(ticked.input?.incremental).toEqual({ fullEveryDays: 0.5 });
+  });
+
+  it.each(["", "0", "-1", "400", "weekly"])("refuses a full-backup interval of %j", (days) => {
+    const result = validatePlanForm({ ...valid, incremental: true, fullEveryDays: days });
+    expect(result.errors?.fullEveryDays).toMatch(/number of days/);
+  });
+
+  it("round-trips an incremental plan through the form", () => {
+    const form = planToForm({
+      id: "p",
+      name: "x",
+      connectionId: "c",
+      storageId: "s",
+      include: [],
+      exclude: [],
+      compression: "zstd",
+      encryption: { kind: "none" },
+      consistency: "auto",
+      verify: "fast",
+      notify: [],
+      incremental: { fullEveryDays: 7 },
+    });
+    expect(form).toMatchObject({ incremental: true, fullEveryDays: "7" });
+  });
+
+  it("shows the interval field once the box is ticked", async () => {
+    const { user } = renderApp({ signedInAs: "admin", hash: "#/plans/new" });
+    await screen.findByRole("heading", { name: "New backup plan" });
+    expect(screen.queryByLabelText("Full backup every (days)")).toBeNull();
+    await user.click(screen.getByLabelText("Incremental backups between full ones"));
+    expect((screen.getByLabelText("Full backup every (days)") as HTMLInputElement).value).toBe("7");
   });
 });
 

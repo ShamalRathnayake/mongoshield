@@ -74,6 +74,9 @@ describe("plan validation", () => {
     ["an empty retention policy", { retention: { last: 0 } }, /at least one positive count/],
     ["an invalid schedule", { schedule: { cron: "never" } }, /cron|schedule/i],
     ["an unknown connection", { connectionId: "missing" }, /connection was not found/],
+    ["a zero full-backup interval", { incremental: { fullEveryDays: 0 } }, /fullEveryDays/],
+    ["a non-numeric interval", { incremental: { fullEveryDays: "7" } }, /fullEveryDays/],
+    ["an interval over a year", { incremental: { fullEveryDays: 400 } }, /at most 366/],
   ])("refuses %s", async (_name, overrides, message) => {
     const response = await admin.request("POST", "/api/plans", plan(overrides));
     expect([400, 404], response.text).toContain(response.status);
@@ -88,6 +91,31 @@ describe("plan validation", () => {
     );
     expect(response.status, response.text).toBe(200);
     expect(response.body.schedule).toEqual({ cron: "0 3 * * *", timezone: "UTC" });
+  });
+});
+
+describe("incremental plans", () => {
+  it("stores incremental: { fullEveryDays } and runs the job with backup.incremental", async () => {
+    const response = await admin.request(
+      "POST",
+      "/api/plans",
+      plan({ name: "hourly-incremental", incremental: { fullEveryDays: 7 } }),
+    );
+    expect(response.status, response.text).toBe(200);
+    expect(response.body.incremental).toEqual({ fullEveryDays: 7 });
+    const record = testConsole.services.store.current.plans.find(
+      (candidate) => candidate.id === response.body.id,
+    );
+    expect(record?.incremental).toEqual({ fullEveryDays: 7 });
+
+    // Without the field the plan takes full backups only.
+    const updated = await admin.request(
+      "PUT",
+      `/api/plans/${response.body.id}`,
+      plan({ name: "hourly-incremental" }),
+    );
+    expect(updated.status, updated.text).toBe(200);
+    expect(updated.body.incremental).toBeUndefined();
   });
 });
 

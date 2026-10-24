@@ -10,10 +10,13 @@
  * Safety rules: the last admin can be neither demoted nor deleted (the console
  * would become unmanageable), you cannot delete yourself, and changing a
  * password signs that user out everywhere.
+ *
+ * Permissions (`permissions`, e.g. `data:write`) are granted per user on top of the
+ * role. Only operators and admins can hold them; making a user a viewer removes them.
  */
 
 import type { Hono } from "hono";
-import { ROLES, type Role } from "../../shared/api.ts";
+import { PERMISSIONS, type Permission, ROLES, type Role } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
 import { hashPassword } from "../../state/passwords.ts";
 import { withoutSessionsOf } from "../../state/sessions.ts";
@@ -23,7 +26,7 @@ import { requireRole } from "../auth.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
 import { ConsoleError, invalid, notFound } from "../errors.ts";
 import { readJson } from "../security.ts";
-import { asObject, oneOf } from "../validate.ts";
+import { asObject, type Fields, oneOf } from "../validate.ts";
 import { userView } from "../views.ts";
 import { passwordField, usernameField } from "./session.ts";
 
@@ -41,6 +44,7 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
     const body = asObject(await readJson(c));
     const username = usernameField(body.username);
     const role: Role = oneOf(body, "role", ROLES);
+    const permissions = permissionsField(body, role) ?? [];
     const passwordHash = await initialPasswordHash(services, body.password);
     const user: UserRecord = {
       id: randomId(),
@@ -48,6 +52,7 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       role,
       passwordHash,
       createdAt: services.now().toISOString(),
+      ...(permissions.length === 0 ? {} : { permissions }),
     };
     await store.update((state) => {
       assertUsernameFree(state.users, username, undefined);
@@ -58,7 +63,11 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       action: "user.create",
       target: username,
       outcome: "success",
-      details: { role, signIn: passwordHash === "" ? "sso" : "password" },
+      details: {
+        role,
+        signIn: passwordHash === "" ? "sso" : "password",
+        permissions: permissions.join(","),
+      },
     });
     return c.json(userView(user));
   });
@@ -69,6 +78,7 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
     const body = asObject(await readJson(c));
     const username = usernameField(body.username);
     const role: Role = oneOf(body, "role", ROLES);
+    const requestedPermissions = permissionsField(body, role);
     const newHash =
       body.password === undefined || body.password === null
         ? undefined
@@ -82,11 +92,16 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       if (existing === undefined) throw notFound("The user");
       assertUsernameFree(state.users, username, id);
       if (existing.role === "admin" && role !== "admin") assertNotLastAdmin(state.users, id);
+      // Omitted permissions are kept, except that viewers can hold none.
+      const permissions =
+        requestedPermissions ?? (role === "viewer" ? [] : (existing.permissions ?? []));
+      const { permissions: _previous, ...withoutPermissions } = existing;
       const next: UserRecord = {
-        ...existing,
+        ...withoutPermissions,
         username,
         role,
         ...(newHash === undefined ? {} : { passwordHash: newHash }),
+        ...(permissions.length === 0 ? {} : { permissions }),
       };
       state.users = state.users.map((user) => (user.id === id ? next : user));
       // A new password ends every session of that user (a reset after a suspected compromise).
@@ -98,7 +113,11 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       action: "user.update",
       target: updated.username,
       outcome: "success",
-      details: { role, passwordChanged: newHash !== undefined },
+      details: {
+        role,
+        passwordChanged: newHash !== undefined,
+        permissions: (updated.permissions ?? []).join(","),
+      },
     });
     return c.json(userView(updated));
   });
@@ -145,6 +164,29 @@ async function initialPasswordHash(services: ConsoleServices, password: unknown)
     );
   }
   return "";
+}
+
+/**
+ * The optional `permissions` field: known permissions only, no duplicates, and none for
+ * viewers (`data:write` needs at least the operator role). `undefined` when absent.
+ */
+function permissionsField(body: Fields, role: Role): Permission[] | undefined {
+  const raw = body.permissions;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw))
+    throw invalid(`"permissions" must be a list of ${PERMISSIONS.join(", ")}.`);
+  const permissions: Permission[] = [];
+  for (const item of raw) {
+    const permission = PERMISSIONS.find((candidate) => candidate === item);
+    if (permission === undefined) {
+      throw invalid(`"permissions" may only contain ${PERMISSIONS.join(", ")}.`);
+    }
+    if (!permissions.includes(permission)) permissions.push(permission);
+  }
+  if (role === "viewer" && permissions.length > 0) {
+    throw invalid("Viewers cannot hold extra permissions.", "Make the user an operator first.");
+  }
+  return permissions;
 }
 
 function assertUsernameFree(

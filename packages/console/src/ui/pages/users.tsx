@@ -8,6 +8,10 @@
  * With single sign-on enabled (OIDC or the trusted proxy), a new user may be created
  * without a password: such an account can only sign in through SSO. That is how admins
  * let people in when OIDC auto-provisioning is turned off.
+ *
+ * Permissions are granted on top of the role: "Can edit live data" (`data:write`) lets
+ * an operator or admin change documents in the live data browser, on connections where
+ * live edits are allowed. Being an admin does not include it; viewers cannot hold it.
  */
 
 import { type FormEvent, useState } from "react";
@@ -15,7 +19,7 @@ import { ROLES, type Role, type UserInput, type UserView } from "../../shared/ap
 import { describeError } from "../api.ts";
 import { Button } from "../components/button.tsx";
 import { Dialog } from "../components/dialog.tsx";
-import { SelectField, TextField } from "../components/field.tsx";
+import { CheckboxField, SelectField, TextField } from "../components/field.tsx";
 import { EmptyState, ErrorNotice, Loading, PageHeader, Time } from "../components/layout.tsx";
 import { Table } from "../components/table.tsx";
 import { useToast } from "../components/toast.tsx";
@@ -93,6 +97,17 @@ export function UsersPage() {
               header: "Role",
               sortValue: (user) => ROLES.indexOf(user.role),
               render: (user) => user.role,
+            },
+            {
+              key: "permissions",
+              header: "Permissions",
+              hideOnNarrow: true,
+              render: (user) =>
+                user.permissions.includes("data:write") ? (
+                  "Edits live data"
+                ) : (
+                  <span className="muted">None</span>
+                ),
             },
             {
               key: "signIn",
@@ -188,6 +203,7 @@ function UserDialog(props: {
   const [username, setUsername] = useState(existing?.username ?? "");
   const [role, setRole] = useState<Role>(existing?.role ?? "viewer");
   const [password, setPassword] = useState("");
+  const [dataWrite, setDataWrite] = useState(existing?.permissions.includes("data:write") ?? false);
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(undefined);
@@ -211,6 +227,8 @@ function UserDialog(props: {
       username: username.trim(),
       role,
       ...(password === "" ? {} : { password }),
+      // Viewers cannot hold permissions; the server refuses them.
+      permissions: dataWrite && role !== "viewer" ? ["data:write"] : [],
     };
     try {
       const saved =
@@ -253,6 +271,17 @@ function UserDialog(props: {
           value={role}
           options={ROLES.map((value) => ({ value, label: ROLE_DESCRIPTIONS[value] }))}
           onValue={setRole}
+        />
+        <CheckboxField
+          label="Can edit live data (data:write)"
+          checked={dataWrite && role !== "viewer"}
+          disabled={role === "viewer"}
+          onChecked={setDataWrite}
+          hint={
+            role === "viewer"
+              ? "Viewers cannot edit live data. Choose the operator or admin role first."
+              : "Insert, edit and delete documents in the live data browser, on connections where an admin allowed live edits. Every change is journaled and can be undone."
+          }
         />
         <TextField
           label={existing === undefined ? "Initial password" : "New password"}

@@ -202,6 +202,7 @@ function parsePlan(
 
   const schedule = parseSchedule(body.schedule);
   const retention = parseRetention(body.retention);
+  const incremental = parseIncremental(body.incremental);
   return {
     id,
     name: requiredString(body, "name", 100),
@@ -217,7 +218,32 @@ function parsePlan(
     createdAt: existing?.createdAt ?? services.now().toISOString(),
     ...(schedule === undefined ? {} : { schedule }),
     ...(retention === undefined ? {} : { retention }),
+    ...(incremental === undefined ? {} : { incremental }),
   };
+}
+
+/** The longest full-backup interval a plan may ask for (the library allows up to a year). */
+const MAX_FULL_EVERY_DAYS = 366;
+
+/**
+ * `incremental: { fullEveryDays }`: incremental backups between full ones, a full one
+ * every that many days (fractions allowed, e.g. 0.5 for every 12 hours).
+ */
+function parseIncremental(value: unknown): PlanRecord["incremental"] {
+  if (value === undefined || value === null) return undefined;
+  const fields = asObject(value, '"incremental"');
+  const days: unknown = fields.fullEveryDays;
+  if (
+    typeof days !== "number" ||
+    !Number.isFinite(days) ||
+    days <= 0 ||
+    days > MAX_FULL_EVERY_DAYS
+  ) {
+    throw invalid(
+      `"incremental.fullEveryDays" must be a number of days greater than 0 and at most ${MAX_FULL_EVERY_DAYS}.`,
+    );
+  }
+  return { fullEveryDays: days };
 }
 
 function parseEncryption(

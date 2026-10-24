@@ -77,6 +77,10 @@ export interface PlanForm {
   readonly retention: Readonly<Record<RetentionKey, string>>;
   readonly verify: PlanInput["verify"];
   readonly notify: readonly NotifyRow[];
+  /** Incremental backups between full ones (`PlanInput.incremental`). */
+  readonly incremental: boolean;
+  /** A full backup every this many days, as typed. */
+  readonly fullEveryDays: string;
 }
 
 /** Field → error message. */
@@ -107,6 +111,8 @@ export function emptyPlanForm(): PlanForm {
     retention: { last: "3", daily: "7", weekly: "4", monthly: "12", yearly: "" },
     verify: "fast",
     notify: [],
+    incremental: false,
+    fullEveryDays: "7",
   };
 }
 
@@ -142,6 +148,8 @@ export function planToForm(plan: PlanView): PlanForm {
       url: "",
       storedPreview: target.url.preview ?? (target.url.configured ? "configured" : undefined),
     })),
+    incremental: plan.incremental !== undefined,
+    fullEveryDays: String(plan.incremental?.fullEveryDays ?? 7),
   };
 }
 
@@ -224,6 +232,17 @@ export function validatePlanForm(
     }
   }
 
+  const fullEveryDays = Number(form.fullEveryDays.trim());
+  if (
+    form.incremental &&
+    (form.fullEveryDays.trim() === "" ||
+      !Number.isFinite(fullEveryDays) ||
+      fullEveryDays <= 0 ||
+      fullEveryDays > 366)
+  ) {
+    errors.fullEveryDays = "Use a number of days between 0 and 366, e.g. 7 for weekly.";
+  }
+
   form.notify.forEach((row, index) => {
     if (row.url === "" && row.storedPreview === undefined) {
       errors[`notify.${index}`] = "Enter the webhook URL.";
@@ -263,6 +282,7 @@ export function validatePlanForm(
       ? { schedule: { cron: form.cron.trim(), timezone: form.timezone.trim() } }
       : {}),
     ...(Object.keys(retention).length === 0 ? {} : { retention }),
+    ...(form.incremental ? { incremental: { fullEveryDays } } : {}),
   };
   return { input, errors: undefined };
 }
@@ -605,6 +625,22 @@ function PlanEditorForm(props: {
                     <TimeZoneList />
                     <SchedulePreview cron={form.cron} timezone={form.timezone} />
                   </>
+                ) : null}
+                <CheckboxField
+                  label="Incremental backups between full ones"
+                  checked={form.incremental}
+                  onChecked={(value) => update("incremental", value)}
+                  hint="Each run stores only what changed since the previous backup; a full backup starts a new chain. Needs a replica set or sharded cluster."
+                />
+                {form.incremental ? (
+                  <TextField
+                    label="Full backup every (days)"
+                    inputMode="decimal"
+                    value={form.fullEveryDays}
+                    onValue={(value) => update("fullEveryDays", value)}
+                    hint="E.g. an hourly schedule with 7 here: full weekly, incremental hourly."
+                    error={errors.fullEveryDays}
+                  />
                 ) : null}
               </FieldGroup>
 

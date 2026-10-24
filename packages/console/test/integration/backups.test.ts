@@ -5,6 +5,7 @@
  * verify → drill → hold → audit trail.
  */
 
+import { resolveStorage } from "mongoshield";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { JobEvent, JobSummary } from "../../src/shared/api.ts";
 import {
@@ -31,6 +32,8 @@ let viewer: TestClient;
 let mongoPassword: string;
 const db = uniqueDb("src");
 const ids = { scratch: "", production: "", storage: "", plan: "", backup: "" };
+/** The storage location's URL: an in-process store the test can also write to. */
+const storageUrl = `memory://${uniqueDb("store")}`;
 
 beforeAll(async () => {
   testConsole = await startConsole();
@@ -50,7 +53,7 @@ beforeAll(async () => {
   ids.storage = (
     await admin.request("POST", "/api/storage", {
       name: "mem",
-      url: `memory://${uniqueDb("store")}`,
+      url: storageUrl,
     })
   ).body.id;
   const plan = await admin.request("POST", "/api/plans", {
@@ -261,6 +264,44 @@ describe("verify, drill and hold", () => {
     const detail = await viewer.request("GET", base());
     expect(detail.body.drills).toHaveLength(1);
     expect(detail.body.drills[0]).toMatchObject({ ok: true, rtoMs: expect.any(Number) });
+  });
+
+  it("shows an upgrade rehearsal with the MongoDB version it proved", async () => {
+    // Written by `mongoshield rehearse-upgrade` (the library); the console only reads it.
+    const storage = await resolveStorage(storageUrl);
+    const drilledAt = new Date().toISOString();
+    const record = {
+      backupId: ids.backup,
+      drilledAt,
+      ok: true,
+      restored: true,
+      restoreDurationMs: 1000,
+      durationMs: 2000,
+      namespaces: 1,
+      documentsRestored: DOCUMENTS,
+      problemCount: 0,
+      tool: "mongoshield@test",
+      targetVersion: "8.0.13",
+      sourceVersion: "7.0.32",
+      compatibility: { problems: 0, warnings: 1 },
+    };
+    const stamp = drilledAt.replaceAll(":", "-").replace(".", "-");
+    await storage.put(
+      `annotations/${ids.backup}/drills/${stamp}.json`,
+      Buffer.from(JSON.stringify(record)),
+      {},
+    );
+    const detail = await viewer.request("GET", base());
+    expect(detail.body.drills).toContainEqual({
+      drilledAt,
+      ok: true,
+      rtoMs: 1000,
+      targetVersion: "8.0.13",
+    });
+    // Ordinary drills carry no version.
+    expect(
+      detail.body.drills.filter((drill: { targetVersion?: string }) => !drill.targetVersion),
+    ).toHaveLength(1);
   });
 
   it("does not let operators drill into production", async () => {

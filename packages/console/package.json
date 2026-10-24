@@ -2,6 +2,14 @@
   "name": "@mongoshield/console",
   "version": "0.0.0",
   "description": "Self-hosted web console for MongoShield: connections, scheduled backups, verification, browsing and restoring backups.",
+  "keywords": [
+    "mongodb",
+    "backup",
+    "restore",
+    "console",
+    "dashboard",
+    "self-hosted"
+  ],
   "license": "MIT",
   "author": "Shamal Rathnayake",
   "homepage": "https://github.com/ShamalRathnayake/mongoshield#readme",
@@ -18,7 +26,8 @@
     "mongoshield-console": "./dist/server/main.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/ui/**/*.map"
   ],
   "publishConfig": {
     "access": "public",

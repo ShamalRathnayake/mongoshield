@@ -1,8 +1,9 @@
 /**
  * Keyboard-only use of the restore wizard: from the backup page to a finished
- * restore without the mouse. Every control is reached with Tab, changed with
- * the keyboard, and focus goes somewhere sensible when the wizard changes step
- * (a step that unmounts the focused button must not drop focus on <body>).
+ * restore without the mouse, through the "Preview changes" step down to one
+ * document. Every control is reached with Tab, changed with the keyboard, and focus
+ * goes somewhere sensible when the wizard changes step or opens a detail (a step
+ * that unmounts the focused button must not drop focus on <body>).
  */
 
 import type { Locator, Page } from "@playwright/test";
@@ -66,6 +67,31 @@ test("the restore wizard works with the keyboard alone", async ({ page }) => {
   const planHeading = page.getByRole("heading", { name: /^Plan: / });
   await expect(planHeading).toBeVisible();
   await expect(planHeading, `focus is on ${await focused(page)}`).toBeFocused();
+
+  // The preview: its heading, then one namespace, then one document, each focused.
+  await tabTo(page, page.getByRole("button", { name: "Preview changes" }));
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("table", { name: "Changes per namespace" })).toBeVisible();
+  const previewHeading = page.getByRole("heading", { name: /^Preview: / });
+  await expect(previewHeading, `focus is on ${await focused(page)}`).toBeFocused();
+  const orders = `${SEED.database}.${SEED.orders}`;
+  await tabTo(page, page.getByRole("button", { name: `Documents of ${orders}` }));
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: `Documents of ${orders}` })).toBeFocused();
+  // The renamed targets do not exist yet: every document is only in the backup.
+  const firstId = page
+    .getByRole("list", { name: "Only in the backup: ids" })
+    .getByRole("button")
+    .first();
+  await tabTo(page, firstId);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: /^Document _id / })).toBeFocused();
+  await tabTo(page, page.getByRole("button", { name: "Continue" }));
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Confirm restore into production" }),
+    `focus is on ${await focused(page)}`,
+  ).toBeFocused();
 
   const confirm = page.getByLabel(`Type ${NAMES.production} to confirm`);
   await tabTo(page, confirm);

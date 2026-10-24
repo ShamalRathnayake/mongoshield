@@ -31,6 +31,25 @@ describe("backups", () => {
     expect(screen.getByText("Replica set, MongoDB 8.0.4")).toBeTruthy();
   });
 
+  it("marks incremental backups instead of showing a document count", async () => {
+    renderApp({
+      signedInAs: "admin",
+      hash: "#/backups/st-s3",
+      prepare: (backend) => {
+        const newest = backend.data.backups.find((backup) => backup.storageId === "st-s3");
+        if (newest === undefined) throw new Error("fixtures have no backup");
+        backend.data.backups.unshift({
+          ...newest,
+          id: newest.id.replace(/_[0-9a-f]{6}$/, "_1a2b3c"),
+          kind: "incremental",
+          chainLength: 3,
+        });
+      },
+    });
+    const table = await screen.findByRole("table", { name: "Backups in S3 primary" });
+    expect(within(table).getByText("Incremental #3")).toBeTruthy();
+  });
+
   it("filters the catalog", async () => {
     const { user } = renderApp({ signedInAs: "sam", hash: "#/backups/st-s3" });
     const table = await screen.findByRole("table", { name: "Backups in S3 primary" });

@@ -139,7 +139,8 @@ describe("restore wizard", () => {
     });
     await user.type(screen.getByLabelText("Rename rules (optional)"), "shop.*=shop_copy.*");
     await user.click(screen.getByRole("button", { name: "Review plan" }));
-    await user.click(await screen.findByRole("button", { name: "Start restore" }));
+    await user.click(await screen.findByRole("button", { name: "Skip preview" }));
+    await user.click(screen.getByRole("button", { name: "Start restore" }));
     expect(await screen.findByText("Could not start the restore")).toBeTruthy();
     expect(screen.getByText("Target busy.")).toBeTruthy();
   });
@@ -188,7 +189,8 @@ describe("restore wizard", () => {
     expect(
       await screen.findByText("The server did not limit the restore to the selected documents"),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start restore" })).toHaveProperty("disabled", true);
+    // Selected documents have no preview step; the review refuses to go on.
+    expect(screen.getByRole("button", { name: "Continue" })).toHaveProperty("disabled", true);
   });
 
   it("ignores a selection that is not a JSON array", async () => {

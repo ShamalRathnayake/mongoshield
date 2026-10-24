@@ -17,7 +17,7 @@ import { inject } from "vitest";
 import { type ConsoleAppOptions, createConsoleApp } from "../../src/server/app.ts";
 import type { AppEnv, ConsoleServices, ConsoleSettings } from "../../src/server/context.ts";
 import { closeConsole, type OpenConsoleOptions, openConsole } from "../../src/server/services.ts";
-import type { Role, SessionInfo } from "../../src/shared/api.ts";
+import type { Permission, Role, SessionInfo } from "../../src/shared/api.ts";
 
 declare module "vitest" {
   export interface ProvidedContext {
@@ -230,17 +230,22 @@ export async function setupAdmin(
   return client;
 }
 
-/** Creates a user with a role (via the admin client) and returns a logged-in client. */
+/**
+ * Creates a user with a role (via the admin client) and returns a logged-in client.
+ * `permissions` grants extra permissions such as `data:write`.
+ */
 export async function userWithRole(
   testConsole: TestConsole,
   admin: TestClient,
   role: Role,
   username = `${role}-${randomBytes(3).toString("hex")}`,
+  permissions: readonly Permission[] = [],
 ): Promise<TestClient> {
   const created = await admin.request("POST", "/api/users", {
     username,
     role,
     password: TEST_PASSWORD,
+    ...(permissions.length === 0 ? {} : { permissions }),
   });
   if (created.status !== 200) throw new Error(`Creating ${role} failed: ${created.text}`);
   const client = testConsole.client();

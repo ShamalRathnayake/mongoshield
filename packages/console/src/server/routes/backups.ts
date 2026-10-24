@@ -11,6 +11,8 @@
  *
  * The document browser shows customer data, not console metadata, so it needs
  * the operator role (the people who may restore that data anyway) rather than viewer.
+ * The restore preview's document lists and diffs need the same role
+ * (`DOCUMENT_BROWSE_ROLE`, see restore-preview.ts).
  */
 
 import type { Hono } from "hono";
@@ -24,7 +26,7 @@ import {
   storageById,
   verifyJob,
 } from "../../jobs/tasks.ts";
-import type { BackupDetail, BackupSummary, DocumentPage } from "../../shared/api.ts";
+import type { BackupDetail, BackupSummary, DocumentPage, Role } from "../../shared/api.ts";
 import { recordAudit } from "../audit.ts";
 import { hasRole, requireRole } from "../auth.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
@@ -39,6 +41,9 @@ import {
   queryInt,
   requiredString,
 } from "../validate.ts";
+
+/** Who may read documents: the document browser, and the restore preview's drill-down. */
+export const DOCUMENT_BROWSE_ROLE: Role = "operator";
 
 /** Largest page of the document browser. */
 const MAX_PAGE_SIZE = 100;
@@ -82,6 +87,8 @@ export function backupRoutes(app: Hono<AppEnv>, services: ConsoleServices): void
         drilledAt: drill.drilledAt,
         ok: drill.ok,
         rtoMs: drill.restoreDurationMs,
+        // Upgrade rehearsals (`mongoshield rehearse-upgrade`): the version they proved.
+        ...(drill.targetVersion === undefined ? {} : { targetVersion: drill.targetVersion }),
       })),
     };
     return c.json(detail);
@@ -165,7 +172,7 @@ export function backupRoutes(app: Hono<AppEnv>, services: ConsoleServices): void
   });
 
   app.get("/api/storage/:id/backups/:backupId/documents", async (c) => {
-    const principal = requireRole(c, "operator");
+    const principal = requireRole(c, DOCUMENT_BROWSE_ROLE);
     const storage = storageById(store, c.req.param("id"));
     const backupId = backupIdParam(c.req.param("backupId"));
     const namespace = c.req.query("ns");
@@ -220,6 +227,9 @@ function backupSummary(entry: CatalogEntry): BackupSummary {
           bytesStored: manifest.totals.bytesStored,
           encrypted: manifest.encryption !== undefined,
           consistency: manifest.consistency.mode,
+          ...(manifest.chain === undefined
+            ? {}
+            : { kind: "incremental" as const, chainLength: manifest.chain.length }),
           ...(manifest.immutableUntil === undefined
             ? {}
             : { immutableUntil: manifest.immutableUntil }),

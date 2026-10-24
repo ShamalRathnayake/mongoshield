@@ -79,6 +79,30 @@ describe("the dry run", () => {
     expect(testConsole.services.store.current.connections).toHaveLength(0);
   });
 
+  it("maps backup.incremental onto the plan (the library's default interval when empty)", async () => {
+    const response = await importConfig({
+      document: config({
+        backup: { include: ["app.*"], consistency: "auto", incremental: { fullEveryDays: 3 } },
+      }),
+      planName: "incremental",
+      dryRun: false,
+    });
+    expect(response.status, response.text).toBe(200);
+    expect(response.body.warnings ?? []).not.toContainEqual(expect.stringContaining("incremental"));
+    expect(testConsole.services.store.current.plans[0]?.incremental).toEqual({ fullEveryDays: 3 });
+
+    const defaults = await importConfig({
+      document: config({ backup: { include: ["app.*"], incremental: {} } }),
+      planName: "incremental",
+      dryRun: true,
+    });
+    expect(defaults.body.changes.at(-1)?.fields).toContainEqual({
+      field: "incremental",
+      from: "full every 3 days, incrementals between",
+      to: "full every 7 days, incrementals between",
+    });
+  });
+
   it("names the default plan when the document is a single config without a name", async () => {
     const response = await importConfig({ document: config(), dryRun: true });
     expect(response.body.changes.at(-1)).toMatchObject({ kind: "plan", name: "Imported plan" });

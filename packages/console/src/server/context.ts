@@ -11,6 +11,8 @@ import type { TaskDeps } from "../jobs/tasks.ts";
 import type { AuditLog } from "../state/audit.ts";
 import type { StateStore } from "../state/store.ts";
 import type { UserRecord } from "../state/types.ts";
+import type { LiveClients } from "./live/clients.ts";
+import type { LiveJournal } from "./live/journal.ts";
 import type { OidcClient } from "./oidc/client.ts";
 import type { OidcSettings } from "./oidc/settings.ts";
 import type { LoginRateLimiter } from "./rate-limit.ts";
@@ -57,6 +59,8 @@ export interface ConsoleServices {
   readonly passwordCost: number;
   /** The clock; tests move it. */
   readonly now: () => Date;
+  /** The live data browser: pooled MongoDB clients and the live edit journal. */
+  readonly live: { readonly clients: LiveClients; readonly journal: LiveJournal };
 }
 
 /** Who is making a request, once authenticated. */

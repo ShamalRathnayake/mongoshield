@@ -137,6 +137,18 @@ export function storageRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
           "Delete or change that plan first.",
         );
       }
+      // The live edit journal (pre-images for undo) of a connection may live here too.
+      const journalOf = state.connections.find(
+        (connection) => connection.liveEdits?.journalStorageId === id,
+      );
+      if (journalOf !== undefined) {
+        throw new ConsoleError(
+          409,
+          "CONSOLE_IN_USE",
+          `The storage location keeps the live edit journal of the connection "${journalOf.name}".`,
+          "Choose another journal location in that connection's live edit settings first.",
+        );
+      }
       state.storage = state.storage.filter((storage) => storage.id !== id);
       return existing;
     });

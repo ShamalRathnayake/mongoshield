@@ -7,6 +7,10 @@
  * Requests use ids that do not exist and empty bodies: an authorized caller then
  * gets 400/404 (validation or lookup, which run after the role check), an
  * unauthorized one 403, and an anonymous one 401. Nothing is changed.
+ *
+ * `"data:write"` routes (live data edits) need the operator role AND the `data:write`
+ * permission: every role is refused without the permission, admins included, and an
+ * operator who holds it gets through.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -20,7 +24,7 @@ import {
   userWithRole,
 } from "../helpers/console.ts";
 
-type Access = Role | "public" | "signed-in";
+type Access = Role | "public" | "signed-in" | "data:write";
 
 const MATRIX: Record<keyof ApiRoutes, Access> = {
   "GET /api/session": "public",
@@ -39,6 +43,7 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
   "DELETE /api/connections/:id": "admin",
   "POST /api/connections/:id/test": "operator",
   "GET /api/connections/:id/namespaces": "viewer",
+  "PUT /api/connections/:id/live-edits": "admin",
 
   "GET /api/storage": "viewer",
   "POST /api/storage": "admin",
@@ -64,6 +69,21 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
 
   "POST /api/restore/plan": "operator",
   "POST /api/restore": "operator",
+  "POST /api/restore/preview": "operator",
+  "GET /api/restore/preview/:id": "operator",
+  "GET /api/restore/preview/:id/documents": "operator",
+  "POST /api/restore/preview/:id/document": "operator",
+
+  "GET /api/live/:id/collection": "operator",
+  "GET /api/live/:id/documents": "operator",
+  "POST /api/live/:id/documents": "data:write",
+  "PUT /api/live/:id/documents": "data:write",
+  "POST /api/live/:id/documents/delete": "data:write",
+  "POST /api/live/:id/bulk/preview": "data:write",
+  "POST /api/live/:id/bulk": "data:write",
+  "GET /api/live-edits": "operator",
+  "GET /api/live-edits/:id": "operator",
+  "POST /api/live-edits/:id/undo": "data:write",
 
   "GET /api/jobs": "viewer",
   "GET /api/jobs/:id": "viewer",
@@ -87,13 +107,16 @@ function concrete(route: string): { method: string; path: string } {
 const RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 
 let testConsole: TestConsole;
-const clients = {} as Record<Role, TestClient>;
+const clients = {} as Record<Role | "writer", TestClient>;
 
 beforeAll(async () => {
   testConsole = await startConsole();
   clients.admin = await setupAdmin(testConsole);
   clients.operator = await userWithRole(testConsole, clients.admin, "operator");
   clients.viewer = await userWithRole(testConsole, clients.admin, "viewer");
+  clients.writer = await userWithRole(testConsole, clients.admin, "operator", "writer", [
+    "data:write",
+  ]);
 });
 
 afterAll(async () => {
@@ -103,8 +126,12 @@ afterAll(async () => {
 
 describe("role matrix", () => {
   const protectedRoutes = Object.entries(MATRIX).filter(
-    (entry): entry is [string, Role] => entry[1] !== "public" && entry[1] !== "signed-in",
+    (entry): entry is [string, Role] =>
+      entry[1] !== "public" && entry[1] !== "signed-in" && entry[1] !== "data:write",
   );
+  const dataWriteRoutes = Object.entries(MATRIX)
+    .filter((entry) => entry[1] === "data:write")
+    .map(([route]) => route);
 
   it.each(protectedRoutes)("%s needs %s", async (route, minimum) => {
     const { method, path } = concrete(route);
@@ -123,6 +150,22 @@ describe("role matrix", () => {
         expect(response.body.error.code).toBe("CONSOLE_FORBIDDEN");
       }
     }
+  });
+
+  it.each(dataWriteRoutes)("%s needs the data:write permission", async (route) => {
+    const { method, path } = concrete(route);
+    const body = method === "POST" || method === "PUT" ? {} : undefined;
+
+    const anonymous = await testConsole.client().request(method, path, body);
+    expect(anonymous.status, `${route} anonymous`).toBe(401);
+    // Without the permission every role is refused, admins included.
+    for (const role of ["viewer", "operator", "admin"] as const) {
+      const response = await clients[role].request(method, path, body);
+      expect(response.status, `${route} as ${role}`).toBe(403);
+      expect(response.body.error.code).toBe("CONSOLE_FORBIDDEN");
+    }
+    const writer = await clients.writer.request(method, path, body);
+    expect([401, 403], `${route} with data:write: ${writer.text}`).not.toContain(writer.status);
   });
 
   it("lets every signed-in user log out, and nobody else", async () => {

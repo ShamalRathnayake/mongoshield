@@ -37,8 +37,14 @@ const RESTORE_ACTIONS = [
   "listCollections",
 ];
 
-/** Opens a short-lived client for an inspection and always closes it. */
-async function withClient<T>(uri: string, task: (client: MongoClient) => Promise<T>): Promise<T> {
+/**
+ * Opens a short-lived client for an inspection and always closes it. Also used by
+ * the restore preview (src/jobs/preview.ts), which reads documents, but only those.
+ */
+export async function withClient<T>(
+  uri: string,
+  task: (client: MongoClient) => Promise<T>,
+): Promise<T> {
   // Options passed here override the URI's, so only add our timeout when the URI sets none.
   const ownTimeout = /[?&]serverSelectionTimeoutMS=/i.test(uri);
   const client = new MongoClient(uri, {

@@ -1,14 +1,21 @@
 /**
- * The restore wizard: choose → review the dry-run plan → confirm → live job.
+ * The restore wizard: choose → review the dry-run plan → preview the changes → confirm
+ * → live job.
  *
  * 1. Choose what to restore (namespaces), where to (target connection), rename rules
  *    (`shop.*=shop_restored.*`, like the CLI's --rename) and the mode for existing data.
  * 2. The server computes a dry-run plan (`POST /api/restore/plan`): every source → target
  *    namespace with document counts and what will happen. Conflicts (a target that
  *    already has documents) are highlighted, and a plan that would fail cannot be started.
- * 3. A restore into a connection marked "production" needs the connection's name typed
- *    exactly, and the admin role.
- * 4. Starting creates a job; the browser goes to its live progress page.
+ * 3. "Preview changes" compares the backup with the target's live data, read only
+ *    (`POST /api/restore/preview`, a job; restore-preview.tsx shows it): per namespace
+ *    which documents would be added, replaced or deleted, index and option differences,
+ *    and a field-by-field view of single documents. It can be skipped (big restores
+ *    take a while to compare), and it is not offered for selected documents, whose plan
+ *    already counts them. Leaving the step cancels a preview that is still running.
+ * 4. Confirm: a restore into a connection marked "production" needs the connection's
+ *    name typed exactly, and the admin role.
+ * 5. Starting creates a job; the browser goes to its live progress page.
  *
  * Restoring selected documents (from the document browser) sends an `_id: {$in: …}`
  * Extended JSON filter (`RestoreRequest.filter`). As a safety net the review step still
@@ -22,7 +29,13 @@
  */
 
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import type { ConnectionView, RestorePlanView, RestoreRequest } from "../../shared/api.ts";
+import type {
+  ConnectionView,
+  JobStatus,
+  RestorePlanView,
+  RestoreRequest,
+} from "../../shared/api.ts";
+import { isJobFinished } from "../api.ts";
 import { Button } from "../components/button.tsx";
 import {
   CheckboxField,
@@ -41,6 +54,7 @@ import { summarizeManifest } from "../manifest.ts";
 import { patternProblem } from "../namespaces.ts";
 import { navigate, segment } from "../router.ts";
 import { lines } from "./plan-editor.tsx";
+import { RestorePreviewStep } from "./restore-preview.tsx";
 
 /** Why a typed private key is not an age identity, or undefined when every key is one. */
 export function identitiesProblem(identities: readonly string[]): string | undefined {
@@ -103,7 +117,7 @@ export interface RestoreWizardPageProps {
   readonly documentIds?: string | undefined;
 }
 
-type Step = "choose" | "review";
+type Step = "choose" | "review" | "preview" | "confirm";
 
 /** The restore wizard page. */
 export function RestoreWizardPage(props: RestoreWizardPageProps) {
@@ -178,6 +192,11 @@ function RestoreWizard(
   const [passphrase, setPassphrase] = useState("");
   const [identitiesText, setIdentitiesText] = useState("");
   const [plan, setPlan] = useState<RestorePlanView | undefined>(undefined);
+  /** The running or finished preview, with the request it compared. */
+  const [preview, setPreview] = useState<
+    { readonly jobId: string; readonly request: RestoreRequest } | undefined
+  >(undefined);
+  const [previewStatus, setPreviewStatus] = useState<JobStatus>("queued");
   const [confirmName, setConfirmName] = useState("");
   const [errors, setErrors] = useState<{
     namespaces?: string;
@@ -189,6 +208,8 @@ function RestoreWizard(
   const [busy, setBusy] = useState(false);
 
   const reviewHeading = useRef<HTMLHeadingElement>(null);
+  const previewHeading = useRef<HTMLHeadingElement>(null);
+  const confirmHeading = useRef<HTMLHeadingElement>(null);
   const reviewButton = useRef<HTMLButtonElement>(null);
   const stepChanged = useRef(false);
 
@@ -201,6 +222,8 @@ function RestoreWizard(
       return;
     }
     if (step === "review") reviewHeading.current?.focus();
+    else if (step === "preview") previewHeading.current?.focus();
+    else if (step === "confirm") confirmHeading.current?.focus();
     else reviewButton.current?.focus();
   }, [step]);
 
@@ -246,12 +269,43 @@ function RestoreWizard(
     try {
       setPlan(await client.call("POST /api/restore/plan", request));
       setConfirmName("");
+      // A new plan needs a new preview.
+      setPreview(undefined);
       setStep("review");
     } catch (error) {
       setRequestError(error);
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Starts the preview job of the reviewed plan's request and opens its step. */
+  const startPreview = async () => {
+    const request = buildRequest();
+    if (request === undefined) return;
+    setBusy(true);
+    setRequestError(undefined);
+    try {
+      const job = await client.call("POST /api/restore/preview", request);
+      setPreview({ jobId: job.id, request });
+      setPreviewStatus(job.status);
+      setStep("preview");
+    } catch (error) {
+      setRequestError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Leaves the preview step; a preview still running is cancelled (it would only load the target). */
+  const leavePreview = (next: Step) => {
+    if (preview !== undefined && !isJobFinished({ status: previewStatus })) {
+      client
+        .call("POST /api/jobs/:id/cancel", undefined, { params: { id: preview.jobId } })
+        .catch(() => undefined);
+    }
+    setRequestError(undefined);
+    setStep(next);
   };
 
   const start = async () => {
@@ -283,20 +337,23 @@ function RestoreWizard(
   const selectionIgnored = selectedIds !== undefined && plannedDocuments > selectedIds.length;
   const needsAdmin = target?.production === true && !hasRole("admin");
   const confirmed = target?.production !== true || confirmName === target.name;
-  const canStart =
-    plan !== undefined &&
-    blocking.length === 0 &&
-    !selectionIgnored &&
-    !needsAdmin &&
-    confirmed &&
-    !busy;
+  // A plan that would fail (or ignored the selection) goes no further than the review.
+  const canProceed =
+    plan !== undefined && blocking.length === 0 && !selectionIgnored && !needsAdmin;
+  const canStart = canProceed && confirmed && !busy;
+  // Selected documents have no preview: their plan already counts what is replaced.
+  const previewAvailable = selectedIds === undefined;
 
   return (
     <>
       <ol className="stepper" aria-label="Restore steps">
         <li aria-current={step === "choose" ? "step" : undefined}>1. Choose</li>
-        <li aria-current={step === "review" ? "step" : undefined}>2. Review plan and confirm</li>
-        <li>3. Watch progress</li>
+        <li aria-current={step === "review" ? "step" : undefined}>2. Review plan</li>
+        <li aria-current={step === "preview" ? "step" : undefined}>
+          3. Preview changes{previewAvailable ? "" : " (not for selected documents)"}
+        </li>
+        <li aria-current={step === "confirm" ? "step" : undefined}>4. Confirm</li>
+        <li>5. Watch progress</li>
       </ol>
 
       {selectedIds === undefined ? null : (
@@ -495,38 +552,96 @@ function RestoreWizard(
             />
           </Panel>
 
-          {target?.production ? (
-            <Panel title="Confirm restore into production">
-              {needsAdmin ? (
-                <Notice tone="danger" title="Admin role required">
-                  Only admins can restore into a production connection.
-                </Notice>
-              ) : (
-                <TextField
-                  label={
-                    <>
-                      Type <strong>{target.name}</strong> to confirm
-                    </>
-                  }
-                  value={confirmName}
-                  onValue={setConfirmName}
-                  autoComplete="off"
-                  spellCheck={false}
-                  error={
-                    confirmName !== "" && confirmName !== target.name
-                      ? "The name does not match."
-                      : undefined
-                  }
-                />
-              )}
-            </Panel>
-          ) : null}
+          {requestError === undefined ? null : (
+            <ErrorNotice error={requestError} title="Could not start the preview" />
+          )}
+          <div className="form-actions">
+            <Button onClick={() => setStep("choose")}>Back</Button>
+            {previewAvailable ? (
+              <>
+                <Button disabled={!canProceed || busy} onClick={() => setStep("confirm")}>
+                  Skip preview
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={!canProceed}
+                  busy={busy}
+                  onClick={() => void startPreview()}
+                >
+                  Preview changes
+                </Button>
+              </>
+            ) : (
+              <Button variant="primary" disabled={!canProceed} onClick={() => setStep("confirm")}>
+                Continue
+              </Button>
+            )}
+          </div>
+        </>
+      ) : null}
+
+      {step === "preview" && preview !== undefined ? (
+        <>
+          <RestorePreviewStep
+            jobId={preview.jobId}
+            request={preview.request}
+            targetName={target?.name ?? "the target"}
+            titleRef={previewHeading}
+            onStatus={setPreviewStatus}
+          />
+          <div className="form-actions">
+            <Button onClick={() => leavePreview("review")}>Back</Button>
+            <Button variant="primary" onClick={() => leavePreview("confirm")}>
+              {isJobFinished({ status: previewStatus }) ? "Continue" : "Skip the rest"}
+            </Button>
+          </div>
+        </>
+      ) : null}
+
+      {step === "confirm" && plan !== undefined ? (
+        <>
+          <Panel
+            titleRef={confirmHeading}
+            title={target?.production ? "Confirm restore into production" : "Confirm restore"}
+          >
+            <p>
+              Restore {plural(plan.entries.length, "namespace")} ({formatNumber(plannedDocuments)}{" "}
+              documents) from <span className="mono">{plan.backupId}</span> into{" "}
+              <strong>{target?.name ?? "?"}</strong>, mode <code>{plan.mode}</code>.
+            </p>
+            {/* Only admins get this far for production targets (see canProceed). */}
+            {target?.production ? (
+              <TextField
+                label={
+                  <>
+                    Type <strong>{target.name}</strong> to confirm
+                  </>
+                }
+                value={confirmName}
+                onValue={setConfirmName}
+                autoComplete="off"
+                spellCheck={false}
+                error={
+                  confirmName !== "" && confirmName !== target.name
+                    ? "The name does not match."
+                    : undefined
+                }
+              />
+            ) : null}
+          </Panel>
 
           {requestError === undefined ? null : (
             <ErrorNotice error={requestError} title="Could not start the restore" />
           )}
           <div className="form-actions">
-            <Button onClick={() => setStep("choose")}>Back</Button>
+            <Button
+              onClick={() => {
+                setRequestError(undefined);
+                setStep(preview === undefined ? "review" : "preview");
+              }}
+            >
+              Back
+            </Button>
             <Button
               variant={target?.production ? "danger" : "primary"}
               disabled={!canStart}

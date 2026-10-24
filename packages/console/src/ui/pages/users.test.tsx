@@ -42,6 +42,7 @@ describe("users", () => {
       username: "riley",
       role: "operator",
       password: "a long passphrase",
+      permissions: [],
     });
   });
 
@@ -60,6 +61,7 @@ describe("users", () => {
     expect(requestsTo(backend, "POST", "/api/users")[0]?.body).toEqual({
       username: "jo@example.com",
       role: "viewer",
+      permissions: [],
     });
     const table = screen.getByRole("table", { name: "Users" });
     expect(within(table).getByText("Single sign-on")).toBeTruthy();
@@ -76,7 +78,52 @@ describe("users", () => {
     expect(requestsTo(backend, "PUT", "/api/users/user-sam")[0]?.body).toEqual({
       username: "sam",
       role: "operator",
+      permissions: [],
     });
+  });
+
+  it("grants the data:write permission, which viewers cannot hold", async () => {
+    const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/users" });
+    const table = await screen.findByRole("table", { name: "Users" });
+    // Maya (operator) already edits live data; the others have no permissions.
+    expect(within(table).getByText("Edits live data")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Edit sam" }));
+    const dialog = await screen.findByRole("dialog");
+    const checkbox = within(dialog).getByLabelText(
+      "Can edit live data (data:write)",
+    ) as HTMLInputElement;
+    // Sam is a viewer: the permission is unavailable until the role allows it.
+    expect(checkbox.disabled).toBe(true);
+    expect(within(dialog).getByText(/Viewers cannot edit live data/)).toBeTruthy();
+    await user.selectOptions(within(dialog).getByLabelText("Role"), "operator");
+    expect(checkbox.disabled).toBe(false);
+    await user.click(checkbox);
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Saved sam.")).toBeTruthy();
+    expect(requestsTo(backend, "PUT", "/api/users/user-sam")[0]?.body).toMatchObject({
+      role: "operator",
+      permissions: ["data:write"],
+    });
+    expect(
+      backend.data.users.find((candidate) => candidate.username === "sam")?.permissions,
+    ).toEqual(["data:write"]);
+  });
+
+  it("drops the permission when an operator becomes a viewer", async () => {
+    const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/users" });
+    await user.click(await screen.findByRole("button", { name: "Edit maya" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      (within(dialog).getByLabelText("Can edit live data (data:write)") as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+    await user.selectOptions(within(dialog).getByLabelText("Role"), "viewer");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Saved maya.")).toBeTruthy();
+    expect(
+      backend.data.users.find((candidate) => candidate.username === "maya")?.permissions,
+    ).toEqual([]);
   });
 
   it("shows a server error inside the dialog", async () => {

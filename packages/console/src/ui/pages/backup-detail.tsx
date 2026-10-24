@@ -367,7 +367,8 @@ function HistoryTab(props: { detail: BackupDetail }) {
           empty={
             <EmptyState title="No drills yet">
               A drill restores the backup into a scratch connection and measures how long recovery
-              takes.
+              takes. An upgrade rehearsal (mongoshield rehearse-upgrade) does the same on a newer
+              MongoDB version.
             </EmptyState>
           }
           columns={[
@@ -376,6 +377,15 @@ function HistoryTab(props: { detail: BackupDetail }) {
               key: "result",
               header: "Result",
               render: (drill) => <StatusBadge status={drill.ok ? "succeeded" : "failed"} />,
+            },
+            {
+              // Upgrade rehearsals are drills into a newer server: name the version they proved.
+              key: "kind",
+              header: "Kind",
+              render: (drill) =>
+                drill.targetVersion === undefined
+                  ? "Restore drill"
+                  : `Upgrade rehearsal on MongoDB ${drill.targetVersion}`,
             },
             {
               key: "rto",

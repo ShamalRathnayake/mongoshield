@@ -28,10 +28,15 @@ import type {
   JobEvent,
   JobKind,
   JobSummary,
+  Permission,
   PlanInput,
   PlanView,
+  PreviewCategory,
+  PreviewDocumentDiff,
+  PreviewNamespaceView,
   PrunePlanView,
   RestorePlanView,
+  RestorePreviewView,
   RestoreRequest,
   Role,
   SessionInfo,
@@ -51,6 +56,7 @@ import { roleIncludes } from "../context.tsx";
 import { applyRename, isSelected } from "../namespaces.ts";
 import { matchPath } from "../router.ts";
 import { createFixtures, generateDocument, type MockBackup, type MockData } from "./fixtures.ts";
+import { createLiveMock, LIVE_ROUTE_ROLES, type LiveMockControls, liveSettingsOf } from "./live.ts";
 
 // ---------------------------------------------------------------------------
 // Handler plumbing
@@ -120,12 +126,18 @@ const ROUTE_ROLES: { readonly [Route in RouteKey]: Role | "public" } = {
   "GET /api/storage/:id/backups/:backupId/documents": "operator",
   "POST /api/restore/plan": "operator",
   "POST /api/restore": "operator",
+  "POST /api/restore/preview": "operator",
+  "GET /api/restore/preview/:id": "operator",
+  "GET /api/restore/preview/:id/documents": "operator",
+  "POST /api/restore/preview/:id/document": "operator",
   "GET /api/jobs": "viewer",
   "GET /api/jobs/:id": "viewer",
   "POST /api/jobs/:id/cancel": "operator",
   "GET /api/audit": "viewer",
   "GET /api/config/export": "admin",
   "POST /api/config/import": "admin",
+  // The live data browser (mock/live.ts); its write handlers also check data:write.
+  ...LIVE_ROUTE_ROLES,
 };
 
 const ROUTE_KEYS = Object.keys(ROUTE_ROLES).filter((key): key is RouteKey => key in ROUTE_ROLES);
@@ -168,6 +180,8 @@ export interface MockBackend {
   }[];
   /** Moves every running job one step forward (used when `jobTickMs` is 0). */
   tickJobs(): void;
+  /** The live databases, for tests (e.g. simulating a concurrent change). */
+  readonly live: LiveMockControls;
   /** Stops timers. */
   dispose(): void;
 }
@@ -181,6 +195,8 @@ const JOB_STEPS = 12;
 /** Per-job runtime state, including the events replayed to new subscribers. */
 interface JobRuntime {
   step: number;
+  /** Steps until the job finishes ({@link JOB_STEPS} unless the job asks for fewer). */
+  readonly steps: number;
   readonly namespaces: readonly { ns: string; documents: number }[];
   readonly history: JobEvent[];
   readonly listeners: Set<(event: JobEvent) => void>;
@@ -202,6 +218,8 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
   const ssoEnabled = authMethods.includes("oidc") || authMethods.includes("proxy");
   const runtimes = new Map<string, JobRuntime>();
   const requests: MockBackend["requests"] = [];
+  /** Restore previews by job id (see `startPreview`). */
+  const previews = new Map<string, MockPreview>();
 
   // ---- helpers -----------------------------------------------------------
 
@@ -317,6 +335,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       storageId?: string;
       backupId?: string;
       onSuccess?: () => string;
+      steps?: number;
     } = {},
   ): JobSummary => {
     const job: JobSummary = {
@@ -332,6 +351,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     data.jobs.unshift(job);
     runtimes.set(job.id, {
       step: 0,
+      steps: extra.steps ?? JOB_STEPS,
       namespaces,
       history: [],
       listeners: new Set(),
@@ -348,10 +368,10 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     if (runtime === undefined || job.status !== "running") return;
     runtime.step += 1;
     const total = runtime.namespaces.reduce((sum, entry) => sum + entry.documents, 0);
-    const done = Math.round((total * runtime.step) / JOB_STEPS);
+    const done = Math.round((total * runtime.step) / runtime.steps);
     // Which namespace the cursor is in right now; the ones before it are finished,
     // and each is reported once, like the server's unthrottled "namespace" events.
-    const previousDone = Math.round((total * (runtime.step - 1)) / JOB_STEPS);
+    const previousDone = Math.round((total * (runtime.step - 1)) / runtime.steps);
     let cumulative = 0;
     let current = runtime.namespaces[0]?.ns;
     let currentDocuments = 0;
@@ -370,7 +390,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       documents: done,
       estimatedDocuments: total,
       bytes: done * 1_450,
-      etaMs: (JOB_STEPS - runtime.step) * 4_000,
+      etaMs: (runtime.steps - runtime.step) * 4_000,
       ...(current === undefined
         ? {}
         : { namespace: current, namespaceDocuments: currentDocuments }),
@@ -378,7 +398,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     if (runtime.step % 4 === 0 && current !== undefined) {
       emit(job.id, { type: "log", level: "info", message: `copying ${current}` });
     }
-    if (runtime.step >= JOB_STEPS) {
+    if (runtime.step >= runtime.steps) {
       const summary =
         runtime.onSuccess?.() ?? `processed ${done.toLocaleString("en-US")} documents`;
       emit(job.id, { type: "log", level: "info", message: summary });
@@ -401,6 +421,18 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     options.jobTickMs === 0 ? undefined : setInterval(tickJobs, options.jobTickMs ?? 700);
 
   /** Namespaces (with documents) of the newest complete backup, used for job progress. */
+  // ---- live data (mock/live.ts) --------------------------------------------
+
+  const live = createLiveMock({
+    data,
+    now,
+    fail: (status, code, message, hint) => new MockHttpError(status, code, message, hint),
+    findConnection,
+    audit,
+    newId,
+    startJob: (kind, namespaces, extra) => startJob(kind, namespaces, extra),
+  });
+
   const backupNamespaces = (backup: BackupDetail | undefined) =>
     namespacesInManifest(backup?.manifest);
 
@@ -498,6 +530,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
         // An empty password marks an SSO-only account (see toUserView).
         password: body.password ?? "",
         createdAt: new Date().toISOString(),
+        permissions: checkedPermissions(body.role, body.permissions) ?? [],
       };
       data.users.push(user);
       audit("user.create", "success", user.username, { role: user.role });
@@ -506,8 +539,13 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     "PUT /api/users/:id": ({ params, body }) => {
       const user = data.users.find((candidate) => candidate.id === params.id);
       if (user === undefined) throw new MockHttpError(404, "CONSOLE_NOT_FOUND", "User not found.");
+      // Omitted permissions are kept, except that viewers can hold none (as on the server).
+      const permissions =
+        checkedPermissions(body.role, body.permissions) ??
+        (body.role === "viewer" ? [] : (user.permissions ?? []));
       user.username = body.username;
       user.role = body.role;
+      user.permissions = permissions;
       if (body.password !== undefined) user.password = body.password;
       audit("user.update", "success", user.username, { role: user.role });
       return toUserView(user);
@@ -872,6 +910,32 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       );
     },
 
+    "POST /api/restore/preview": ({ body, user }) => startPreview(body, user),
+    "GET /api/restore/preview/:id": ({ params }) => previewView(findPreview(params.id)),
+    "GET /api/restore/preview/:id/documents": ({ params, query }) => {
+      const preview = readyPreview(params.id);
+      const ns = query.get("ns") ?? "";
+      const category = query.get("category");
+      const lists = preview.ids.get(ns);
+      if (lists === undefined || !isPreviewCategory(category))
+        throw new MockHttpError(404, "CONSOLE_NOT_FOUND", `The preview has no "${ns}".`);
+      const listed = lists[category];
+      const after = Number(query.get("after") ?? "0");
+      const limit = Math.min(100, Math.max(1, Number(query.get("limit") ?? "20")));
+      const page = listed.slice(after, after + limit);
+      audit("restore.preview_documents", "success", `${preview.request.backupId}/${ns}`);
+      return {
+        documents: page.map((entry) => ({ id: entry.id, label: entry.id })),
+        listed: listed.length,
+        ...(after + page.length < listed.length ? { next: String(after + page.length) } : {}),
+      };
+    },
+    "POST /api/restore/preview/:id/document": ({ params, body }) => {
+      const preview = readyPreview(params.id);
+      audit("restore.preview_document", "success", `${preview.request.backupId}/${body.ns}`);
+      return previewDocument(preview, body.ns, body.id);
+    },
+
     "GET /api/jobs": () => data.jobs,
     "GET /api/jobs/:id": ({ params }) => findJob(params.id),
     "POST /api/jobs/:id/cancel": ({ params }) => {
@@ -906,6 +970,8 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       content: configExport(data),
     }),
     "POST /api/config/import": ({ body }) => importConfig(body),
+
+    ...live.handlers,
   };
 
   /**
@@ -1083,6 +1149,88 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     );
   }
 
+  // ---- restore preview ----------------------------------------------------
+
+  /** Starts a preview job; the result is made up from the plan (see `mockPreviewNamespace`). */
+  function startPreview(body: RestoreRequest, user: UserView | undefined): JobSummary {
+    const target = findConnection(body.targetConnectionId);
+    if (target.production && !roleIncludes(user?.role, "admin")) {
+      throw new MockHttpError(
+        403,
+        "CONSOLE_FORBIDDEN",
+        "Only admins may preview restores into a production connection.",
+      );
+    }
+    if (body.filter !== undefined) {
+      throw new MockHttpError(
+        400,
+        "CONSOLE_VALIDATION",
+        "A preview compares whole collections, not selected documents.",
+      );
+    }
+    const backup = findBackup(body.storageId, body.backupId);
+    const plan = restorePlan(body);
+    const namespaces = plan.entries.map((entry) => mockPreviewNamespace(entry));
+    const ids = new Map(
+      namespaces.map((namespace) => [namespace.from, mockPreviewIds(namespace, backup)]),
+    );
+    audit("restore.preview", "success", target.name, { mode: body.mode });
+    const job = startJob("preview", [], {
+      storageId: body.storageId,
+      backupId: body.backupId,
+      // A preview reads quickly in the demo: three ticks instead of twelve.
+      steps: 3,
+      onSuccess: () =>
+        `Previewed ${namespaces.length} namespaces of ${target.name}: ${namespaces.filter((namespace) => !namespace.identical).length} would change.`,
+    });
+    previews.set(job.id, { jobId: job.id, request: body, backup, namespaces, ids });
+    return job;
+  }
+
+  function findPreview(id: string | undefined): MockPreview {
+    const preview = previews.get(id ?? "");
+    if (preview === undefined)
+      throw new MockHttpError(404, "CONSOLE_NOT_FOUND", "The preview was not found.");
+    return preview;
+  }
+
+  /** A preview whose job has succeeded, or 409 as the server answers. */
+  function readyPreview(id: string | undefined): MockPreview {
+    const preview = findPreview(id);
+    if (findJob(preview.jobId).status !== "succeeded") {
+      throw new MockHttpError(
+        409,
+        "CONSOLE_PREVIEW_NOT_READY",
+        "This preview has no result: it is still running, or it failed or was cancelled.",
+      );
+    }
+    return preview;
+  }
+
+  function previewView(preview: MockPreview): RestorePreviewView {
+    const job = findJob(preview.jobId);
+    return {
+      jobId: preview.jobId,
+      status: job.status,
+      storageId: preview.request.storageId,
+      backupId: preview.request.backupId,
+      targetConnectionId: preview.request.targetConnectionId,
+      mode: preview.request.mode,
+      ...(job.status === "succeeded" ? { namespaces: preview.namespaces } : {}),
+      ...(job.error === undefined ? {} : { error: job.error }),
+      documentsVisible: roleIncludes(currentUser()?.role, "operator"),
+      limits: {
+        sampleAbove: MOCK_SAMPLE_ABOVE,
+        sampleSize: MOCK_SAMPLE_SIZE,
+        listedPerCategory: MOCK_LISTED,
+        timeoutMs: 600_000,
+      },
+      expiresAt: new Date(
+        Date.parse(job.startedAt ?? new Date().toISOString()) + 3_600_000,
+      ).toISOString(),
+    };
+  }
+
   /** The dry-run plan: what goes where, how many documents, and what happens on conflict. */
   function restorePlan(body: RestoreRequest): RestorePlanView {
     const backup = findBackup(body.storageId, body.backupId);
@@ -1220,6 +1368,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     data,
     requests,
     tickJobs,
+    live: live.controls,
     dispose: () => {
       if (timer !== undefined) clearInterval(timer);
     },
@@ -1241,6 +1390,23 @@ function randomToken(): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** Checks requested permissions like the server: viewers cannot hold any. */
+function checkedPermissions(
+  role: Role,
+  permissions: readonly Permission[] | undefined,
+): Permission[] | undefined {
+  if (permissions === undefined) return undefined;
+  if (role === "viewer" && permissions.length > 0) {
+    throw new MockHttpError(
+      400,
+      "CONSOLE_VALIDATION",
+      "Viewers cannot hold extra permissions.",
+      "Make the user an operator first.",
+    );
+  }
+  return [...new Set(permissions)];
+}
+
 function toUserView(user: MockData["users"][number]): UserView {
   return {
     id: user.id,
@@ -1249,6 +1415,7 @@ function toUserView(user: MockData["users"][number]): UserView {
     signIn: user.password === "" ? "sso" : "password",
     createdAt: user.createdAt,
     ...(user.lastLoginAt === undefined ? {} : { lastLoginAt: user.lastLoginAt }),
+    permissions: user.permissions ?? [],
   };
 }
 
@@ -1266,6 +1433,7 @@ function toConnectionView(connection: MockData["connections"][number]): Connecti
     uri: { configured: true, preview: redactUri(connection.uri) },
     production: connection.production,
     createdAt: connection.createdAt,
+    liveEdits: liveSettingsOf(connection),
   };
 }
 
@@ -1601,4 +1769,211 @@ function hostOf(uri: string): string {
   const afterScheme = uri.replace(/^[a-z+]+:\/\//i, "");
   const afterCredentials = afterScheme.slice(afterScheme.indexOf("@") + 1);
   return afterCredentials.split(/[/?]/)[0] || "Imported connection";
+}
+
+// ---------------------------------------------------------------------------
+// Restore preview (made up from the plan, deterministically)
+// ---------------------------------------------------------------------------
+
+/** One preview the mock remembers. */
+interface MockPreview {
+  readonly jobId: string;
+  readonly request: RestoreRequest;
+  readonly backup: MockBackup;
+  readonly namespaces: readonly PreviewNamespaceView[];
+  /** Listed ids per namespace and category, each with the index of its generated document. */
+  readonly ids: ReadonlyMap<
+    string,
+    Readonly<Record<PreviewCategory, readonly { id: string; index: number }[]>>
+  >;
+}
+
+/** Namespaces above this many documents are "sampled" (as the server's default). */
+const MOCK_SAMPLE_ABOVE = 100_000;
+const MOCK_SAMPLE_SIZE = 1_000;
+/** Ids listed per category. */
+const MOCK_LISTED = 20;
+/** Generated documents only on the target start at this index. */
+const LIVE_ONLY_INDEX = 1_000_000;
+/** Field names whose values are hidden, as on the server (src/jobs/preview-diff.ts). */
+const MOCK_SECRET_FIELD = /password|passwd|secret|token|api_?key|private_?key|credential/i;
+
+function isPreviewCategory(value: string | null): value is PreviewCategory {
+  return value === "changed" || value === "backup-only" || value === "live-only";
+}
+
+/**
+ * A believable preview of one plan entry: about 3% of the documents changed, 1% only in
+ * the backup, and whatever the target has beyond that only in the target.
+ */
+function mockPreviewNamespace(entry: RestorePlanView["entries"][number]): PreviewNamespaceView {
+  const backup = entry.documents;
+  const existing = entry.existingDocuments;
+  const targetExists = existing !== undefined;
+  const changed = targetExists ? Math.min(backup, Math.max(1, Math.round(backup * 0.03))) : 0;
+  const backupOnly = targetExists ? Math.min(backup - changed, Math.round(backup * 0.01)) : backup;
+  const present = backup - backupOnly;
+  const live = targetExists ? Math.max(existing, present) : 0;
+  const documents = {
+    backup,
+    live,
+    backupOnly,
+    liveOnly: live - present,
+    changed,
+    identical: present - changed,
+  };
+  const effect = mockEffect(entry.action, documents);
+  const sampled = backup > MOCK_SAMPLE_ABOVE;
+  const listed = (count: number) => Math.min(MOCK_LISTED, count);
+  return {
+    from: entry.from,
+    to: entry.to,
+    targetExists,
+    action: entry.action,
+    ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+    accuracy: sampled ? "sampled" : "exact",
+    ...(sampled ? { sample: { documents: MOCK_SAMPLE_SIZE, of: backup } } : {}),
+    documents,
+    ...(effect === undefined ? {} : { effect }),
+    indexes: {
+      backupOnly: [],
+      liveOnly: targetExists && entry.from.endsWith(".users") ? ["email_1"] : [],
+      different: [],
+    },
+    options: targetExists && entry.from.endsWith(".orders") ? ["validator"] : [],
+    listed: {
+      changed: listed(changed),
+      "backup-only": listed(backupOnly),
+      // A sample cannot see documents only in the target, as on the server.
+      "live-only": sampled ? 0 : listed(documents.liveOnly),
+    },
+    identical: changed + backupOnly + documents.liveOnly === 0 && targetExists,
+  };
+}
+
+/** What the mock plan's actions do to the target (see `restoreEffect` on the server). */
+function mockEffect(
+  action: string,
+  documents: PreviewNamespaceView["documents"],
+): PreviewNamespaceView["effect"] {
+  const { backupOnly, liveOnly, changed, identical } = documents;
+  switch (action) {
+    case "create":
+      return { inserted: backupOnly, replaced: 0, deleted: 0, kept: 0 };
+    case "drop":
+      return { inserted: backupOnly, replaced: changed, deleted: liveOnly, kept: identical };
+    case "upsert":
+      return { inserted: backupOnly, replaced: changed, deleted: 0, kept: identical + liveOnly };
+    case "insert":
+    case "restore":
+      return {
+        inserted: backupOnly,
+        replaced: 0,
+        deleted: 0,
+        kept: identical + changed + liveOnly,
+      };
+    default:
+      return undefined;
+  }
+}
+
+/** The listed ids of a namespace: generated documents' `_id`s as Extended JSON. */
+function mockPreviewIds(
+  namespace: PreviewNamespaceView,
+  backup: MockBackup,
+): Record<PreviewCategory, { id: string; index: number }[]> {
+  const time = backupTime(backup);
+  const entries = (count: number, first: number) =>
+    Array.from({ length: count }, (_, offset) => {
+      const index = first + offset;
+      return { id: JSON.stringify(generateDocument(namespace.from, index, time)._id), index };
+    });
+  return {
+    changed: entries(namespace.listed.changed, 0),
+    "backup-only": entries(namespace.listed["backup-only"], namespace.documents.changed),
+    "live-only": entries(namespace.listed["live-only"], LIVE_ONLY_INDEX),
+  };
+}
+
+/** One listed document in both versions; the target's version of a changed one is edited. */
+function previewDocument(preview: MockPreview, ns: string, id: string): PreviewDocumentDiff {
+  const namespace = preview.namespaces.find((candidate) => candidate.from === ns);
+  const lists = preview.ids.get(ns);
+  const found = lists === undefined ? undefined : findListed(lists, id);
+  if (namespace === undefined || found === undefined)
+    throw new MockHttpError(
+      404,
+      "CONSOLE_NOT_FOUND",
+      "That document of this preview was not found.",
+    );
+  const generated: Record<string, unknown> = {
+    ...generateDocument(ns, found.index, backupTime(preview.backup)),
+    passwordHash: `scrypt$${found.index}`,
+  };
+  const edited = {
+    ...generated,
+    name: `${String(generated.name ?? "")} (edited)`,
+    passwordHash: "scrypt$new",
+  };
+  const backup = found.category === "live-only" ? undefined : generated;
+  const live =
+    found.category === "backup-only"
+      ? undefined
+      : found.category === "changed"
+        ? edited
+        : generated;
+  return {
+    ns,
+    to: namespace.to,
+    label: id,
+    ...(backup === undefined ? {} : { backup: JSON.stringify(redacted(backup)) }),
+    ...(live === undefined ? {} : { live: JSON.stringify(redacted(live)) }),
+    fields: topLevelChanges(backup, live),
+    truncated: false,
+  };
+}
+
+function findListed(
+  lists: Readonly<Record<PreviewCategory, readonly { id: string; index: number }[]>>,
+  id: string,
+): { category: PreviewCategory; index: number } | undefined {
+  for (const category of ["changed", "backup-only", "live-only"] as const) {
+    const entry = lists[category].find((candidate) => candidate.id === id);
+    if (entry !== undefined) return { category, index: entry.index };
+  }
+  return undefined;
+}
+
+/** Top-level fields that differ (the server walks nested fields too; the mock keeps it short). */
+function topLevelChanges(
+  backup: Record<string, unknown> | undefined,
+  live: Record<string, unknown> | undefined,
+): PreviewDocumentDiff["fields"] {
+  const keys = [...new Set([...Object.keys(backup ?? {}), ...Object.keys(live ?? {})])];
+  const changes: PreviewDocumentDiff["fields"][number][] = [];
+  for (const key of keys) {
+    const before =
+      backup === undefined || !(key in backup) ? undefined : JSON.stringify(backup[key]);
+    const after = live === undefined || !(key in live) ? undefined : JSON.stringify(live[key]);
+    if (before === after) continue;
+    const secret = MOCK_SECRET_FIELD.test(key);
+    changes.push({
+      path: key,
+      change: before === undefined ? "removed" : after === undefined ? "added" : "changed",
+      ...(before === undefined ? {} : { backup: secret ? '"***"' : before }),
+      ...(after === undefined ? {} : { live: secret ? '"***"' : after }),
+      ...(secret ? { redacted: true } : {}),
+    });
+  }
+  return changes;
+}
+
+/** A generated document with secret-looking top-level values hidden. */
+function redacted(document: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(document).map(([key, value]) => [
+      key,
+      MOCK_SECRET_FIELD.test(key) ? "***" : value,
+    ]),
+  );
 }

@@ -10,7 +10,14 @@
  * first format; readers refuse versions they do not know rather than guessing.
  */
 
-import type { JobSummary, Role } from "../shared/api.ts";
+import type {
+  ApiError,
+  JobSummary,
+  LiveEditOp,
+  LiveEditStatus,
+  Permission,
+  Role,
+} from "../shared/api.ts";
 
 /** Version of the console.json layout. Bump it (and add a migration) on incompatible changes. */
 export const STATE_FORMAT_VERSION = 1;
@@ -37,6 +44,12 @@ export interface UserRecord {
    * older files simply have no linked identities.
    */
   readonly oidc?: { readonly issuer: string; readonly subject: string };
+  /**
+   * Extra permissions on top of the role (see `Permission` in src/shared/api.ts), e.g.
+   * `data:write` for editing live documents. Added without a format bump: older files
+   * have none, which means "no extra permissions".
+   */
+  readonly permissions?: readonly Permission[];
 }
 
 /** A signed-in browser session. Only the SHA-256 of the session id is stored. */
@@ -64,7 +77,79 @@ export interface ConnectionRecord {
   readonly uriPreview: string;
   readonly production: boolean;
   readonly createdAt: string;
+  /**
+   * Live data editing for this connection (off when absent). Added without a format
+   * bump: older files have no such settings, which means "read-only".
+   */
+  readonly liveEdits?: LiveEditSettingsRecord;
 }
+
+/**
+ * Whether people with the `data:write` permission may change documents of a
+ * connection from the console's live data browser, and with which safety rails.
+ */
+export interface LiveEditSettingsRecord {
+  readonly enabled: boolean;
+  /** The admin who last changed the setting, and when. */
+  readonly changedBy: string;
+  readonly changedAt: string;
+  /** Why live edits were turned on; required for production connections. */
+  readonly reason?: string;
+  /**
+   * True only when an admin turned edits on while the connection was marked production,
+   * typing its name to confirm. Marking a connection production later turns edits off.
+   */
+  readonly productionConfirmed: boolean;
+  /**
+   * The storage location that keeps the edit journal (pre-images for undo). Absent:
+   * the journal lives in the console's data directory (`<data>/live-journal`).
+   */
+  readonly journalStorageId?: string;
+  /** Most documents one "update many" or "delete many" may touch. */
+  readonly maxBulkDocuments: number;
+}
+
+/**
+ * One entry of the live edit journal index. The pre-images (and post-images) of the
+ * documents live in the journal objects (src/server/live/journal.ts), sealed with the
+ * console's key; this record only says what happened, so the history page and the audit
+ * log never need the document contents.
+ */
+export interface LiveEditRecord {
+  readonly id: string;
+  readonly connectionId: string;
+  readonly ns: string;
+  readonly op: LiveEditOp;
+  /** Username of whoever made the change. */
+  readonly by: string;
+  readonly at: string;
+  readonly status: LiveEditStatus;
+  /** Documents whose pre-image was journaled. */
+  readonly documents: number;
+  /** Documents actually changed, and documents skipped because they had changed meanwhile. */
+  readonly applied: number;
+  readonly conflicts: number;
+  /** Relaxed Extended JSON of the `_id`, for single-document entries. */
+  readonly documentId?: string;
+  /** SHA-256 of the document before and after (single-document entries). */
+  readonly beforeHash?: string;
+  readonly afterHash?: string;
+  /** The entry this one undid, and the entry that undid this one. */
+  readonly undoOf?: string;
+  readonly undoneBy?: string;
+  /** The job of a bulk operation or a bulk undo. */
+  readonly jobId?: string;
+  /** Where the journal objects are: a storage location, or the console's data directory. */
+  readonly journal:
+    | { readonly kind: "storage"; readonly storageId: string }
+    | { readonly kind: "console" };
+  /** Number of journal objects (parts of at most 100 documents each). */
+  readonly parts: number;
+  readonly error?: ApiError["error"];
+}
+
+/** Live edit journal entries kept in console.json; older ones drop out of the index. */
+export const MAX_LIVE_EDIT_HISTORY = 1000;
 
 /** A storage location for backups. */
 export interface StorageRecord {
@@ -117,6 +202,12 @@ export interface PlanRecord {
   readonly verify: "none" | "fast" | "deep";
   readonly notify: readonly NotifyRecord[];
   readonly createdAt: string;
+  /**
+   * Incremental backups between full ones: each run stores only the changes since the
+   * previous backup, and a full backup starts a new chain every `fullEveryDays` (the
+   * library's `backup.incremental`). Absent: every run is a full backup.
+   */
+  readonly incremental?: { readonly fullEveryDays: number };
 }
 
 /** The whole console.json document. */
@@ -138,6 +229,11 @@ export interface ConsoleState {
   readonly plans: readonly PlanRecord[];
   /** Job history, newest first, at most {@link MAX_JOB_HISTORY} entries. */
   readonly jobs: readonly JobSummary[];
+  /**
+   * The live edit journal index, newest first, at most {@link MAX_LIVE_EDIT_HISTORY}
+   * entries. Optional so files written before live editing existed still open.
+   */
+  readonly liveEdits?: readonly LiveEditRecord[];
 }
 
 /** Job history kept in console.json. Older jobs are dropped. */

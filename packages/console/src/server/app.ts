@@ -5,7 +5,8 @@
  * Request pipeline, outermost first:
  *
  *   security headers  every response (CSP, frame deny, no-referrer, HSTS on TLS, no-store for /api)
- *   body limit        /api: 64 KiB (the largest legitimate body is a plan with a few keys)
+ *   body limit        /api: 64 KiB (the largest legitimate body is a plan with a few keys);
+ *                     /api/live: 1 MiB + 64 KiB (a document being edited, as Extended JSON)
  *   same origin       /api state-changing requests: refuse a foreign `Origin`
  *   authenticate      /api: cookie session or trusted proxy → `principal`
  *   CSRF              /api state-changing requests of signed-in principals
@@ -19,6 +20,7 @@
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import type { PreviewLimits } from "../shared/api.ts";
 import { openConnectionUri, openPlanPassphrase } from "../state/secrets.ts";
 import { authenticate, csrfProtection } from "./auth.ts";
 import type { AppEnv, ConsoleServices } from "./context.ts";
@@ -29,9 +31,11 @@ import { configRoutes } from "./routes/config.ts";
 import { connectionRoutes } from "./routes/connections.ts";
 import { healthRoutes, type JournalStatusReader } from "./routes/health.ts";
 import { jobRoutes } from "./routes/jobs.ts";
+import { liveRoutes } from "./routes/live.ts";
 import { oidcRoutes } from "./routes/oidc.ts";
 import { planRoutes } from "./routes/plans.ts";
 import { restoreRoutes } from "./routes/restore.ts";
+import { restorePreviewRoutes } from "./routes/restore-preview.ts";
 import { sessionRoutes } from "./routes/session.ts";
 import { storageRoutes } from "./routes/storage.ts";
 import { userRoutes } from "./routes/users.ts";
@@ -39,6 +43,8 @@ import { sameOriginOnly, securityHeaders } from "./security.ts";
 
 /** Largest accepted request body. */
 export const MAX_BODY_BYTES = 64 * 1024;
+/** Largest body of the live data routes: one document of up to 1 MiB of Extended JSON, plus the rest. */
+export const MAX_LIVE_BODY_BYTES = 1024 * 1024 + MAX_BODY_BYTES;
 
 /** Options for {@link createConsoleApp}. */
 export interface ConsoleAppOptions {
@@ -48,6 +54,8 @@ export interface ConsoleAppOptions {
   readonly heartbeatMs?: number;
   /** Reads journal status for /metrics; tests replace it to simulate failures. */
   readonly readJournalStatus?: JournalStatusReader;
+  /** Bounds of restore previews (sampling, listed ids, time); tests make them small. */
+  readonly previewLimits?: PreviewLimits;
 }
 
 /** Builds the console's HTTP app. */
@@ -58,21 +66,25 @@ export function createConsoleApp(
   const app = new Hono<AppEnv>();
 
   app.use("*", securityHeaders(services.settings));
-  app.use(
-    "/api/*",
+  const bodyLimitOf = (maxSize: number) =>
     bodyLimit({
-      maxSize: MAX_BODY_BYTES,
+      maxSize,
       onError: (c) =>
         c.json(
           {
             error: {
               code: "CONSOLE_BODY_TOO_LARGE",
-              message: `Request bodies are limited to ${MAX_BODY_BYTES / 1024} KiB.`,
+              message: `Request bodies are limited to ${maxSize / 1024} KiB.`,
             },
           },
           413,
         ),
-    }),
+    });
+  const defaultBodyLimit = bodyLimitOf(MAX_BODY_BYTES);
+  const liveBodyLimit = bodyLimitOf(MAX_LIVE_BODY_BYTES);
+  // Live document edits carry a whole document; everything else stays at 64 KiB.
+  app.use("/api/*", (c, next) =>
+    c.req.path.startsWith("/api/live/") ? liveBodyLimit(c, next) : defaultBodyLimit(c, next),
   );
   app.use("/api/*", sameOriginOnly(services.settings));
   app.use("/api/*", authenticate(services));
@@ -86,6 +98,8 @@ export function createConsoleApp(
   planRoutes(app, services);
   backupRoutes(app, services);
   restoreRoutes(app, services);
+  liveRoutes(app, services);
+  restorePreviewRoutes(app, services, options.previewLimits);
   jobRoutes(
     app,
     services,

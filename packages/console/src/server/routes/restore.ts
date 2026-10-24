@@ -95,8 +95,11 @@ export function restoreRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
   });
 }
 
-/** Parses a `RestoreRequest` body and looks up its storage and target. */
-async function parseRequest(
+/**
+ * Parses a `RestoreRequest` body and looks up its storage and target. Also used by
+ * the restore preview (restore-preview.ts), which takes the same body.
+ */
+export async function parseRequest(
   c: Context<AppEnv>,
   services: ConsoleServices,
 ): Promise<{ readonly input: RestoreJobInput; readonly confirmName: string | undefined }> {
@@ -131,8 +134,8 @@ async function parseRequest(
   };
 }
 
-/** Operators may only restore into (or plan restores into) non-production connections. */
-function authorizeTarget(principal: Principal, input: RestoreJobInput): void {
+/** Operators may only restore into (or plan or preview restores into) non-production connections. */
+export function authorizeTarget(principal: Principal, input: RestoreJobInput): void {
   if (input.target.production && !hasRole(principal.user.role, "admin")) {
     throw forbidden("Only admins may restore into a production connection.");
   }

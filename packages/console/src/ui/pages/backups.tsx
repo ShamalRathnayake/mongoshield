@@ -392,7 +392,13 @@ export function BackupsPage(props: BackupsPageProps) {
               align: "end",
               hideOnNarrow: true,
               sortValue: (backup) => backup.documents,
-              render: (backup) => formatCompact(backup.documents),
+              // An incremental holds changes, not documents: say which link it is.
+              render: (backup) =>
+                backup.kind === "incremental" ? (
+                  <span className="muted">Incremental #{backup.chainLength}</span>
+                ) : (
+                  formatCompact(backup.documents)
+                ),
             },
             {
               key: "encrypted",

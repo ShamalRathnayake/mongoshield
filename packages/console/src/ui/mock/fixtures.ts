@@ -12,6 +12,8 @@ import type {
   BackupDetail,
   DatabaseNode,
   JobSummary,
+  LiveEditSettingsView,
+  Permission,
   PlanView,
   Role,
 } from "../../shared/api.ts";
@@ -24,6 +26,8 @@ export interface MockUser {
   password: string;
   readonly createdAt: string;
   lastLoginAt?: string;
+  /** Extra permissions on top of the role (`data:write` for live edits). */
+  permissions?: Permission[];
 }
 
 /** A connection plus its secret URI. */
@@ -40,6 +44,8 @@ export interface MockConnection {
   missingRestorePrivileges: string[];
   /** The databases and collections "on the server". */
   namespaces: DatabaseNode[];
+  /** Live edit settings (absent: off, as on the real server). */
+  liveEdits?: LiveEditSettingsView;
 }
 
 /** A storage location plus its secret credentials. */
@@ -251,6 +257,17 @@ function nightlyBackups(now: number, storageId: string, days: number): MockBacku
               ok: true,
               rtoMs: 14 * MINUTE + 12_000,
             },
+            // Before upgrading production: the same backup rehearsed on a newer MongoDB.
+            ...(day === 8
+              ? [
+                  {
+                    drilledAt: new Date(started.getTime() + 5 * HOUR).toISOString(),
+                    ok: true,
+                    rtoMs: 15 * MINUTE + 3_000,
+                    targetVersion: "8.2.1",
+                  },
+                ]
+              : []),
           ]
         : [];
     backups.push({
@@ -459,6 +476,9 @@ export function createFixtures(now: number = Date.now()): MockData {
         password: "operator",
         createdAt: ago(now, 40 * DAY),
         lastLoginAt: ago(now, 30 * HOUR),
+        // Maya may edit live data where an admin allowed it (Staging); the admin may not
+        // until they grant themselves data:write, which shows that permissions are separate.
+        permissions: ["data:write"],
       },
       {
         id: "user-sam",
@@ -492,6 +512,15 @@ export function createFixtures(now: number = Date.now()): MockData {
         missingBackupPrivileges: [],
         missingRestorePrivileges: [],
         namespaces: stagingTree(),
+        liveEdits: {
+          enabled: true,
+          productionConfirmed: false,
+          changedBy: "admin",
+          changedAt: ago(now, 3 * DAY),
+          reason: "Fixing test data before the release",
+          journalStorageId: "st-s3",
+          maxBulkDocuments: 1_000,
+        },
       },
       {
         id: "conn-local",

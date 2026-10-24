@@ -84,6 +84,8 @@ const MS_STATUS: Readonly<Record<ErrorCode, ErrorStatus>> = {
   MS_STORAGE_INSUFFICIENT_SPACE: 507,
   MS_STORAGE_PRECONDITION_FAILED: 409,
   MS_BACKUP_NOT_FOUND: 404,
+  // On hold, write-once, or needed by an incremental: the state forbids it, so 409.
+  MS_BACKUP_PROTECTED: 409,
   MS_MANIFEST_INVALID: 422,
   MS_FORMAT_UNSUPPORTED: 422,
   MS_INTEGRITY_FAILED: 422,

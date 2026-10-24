@@ -95,6 +95,22 @@ describe("backup detail tabs", () => {
     expect(screen.getByText("deep")).toBeTruthy();
   });
 
+  it("marks upgrade rehearsals with the MongoDB version they proved", async () => {
+    await openBackup(
+      "sam",
+      (backend) =>
+        backupWhere(backend, "st-s3", (backup) =>
+          backup.drills.some((drill) => drill.targetVersion !== undefined),
+        ),
+      "history",
+    );
+    const drills = screen.getByRole("table", { name: "Restore drills of this backup" });
+    expect(within(drills).getByRole("columnheader", { name: "Kind" })).toBeTruthy();
+    expect(within(drills).getByText("Upgrade rehearsal on MongoDB 8.2.1")).toBeTruthy();
+    expect(within(drills).getByText("Restore drill")).toBeTruthy();
+    expect(within(drills).getByText("15 min 3 s")).toBeTruthy();
+  });
+
   it("moves between tabs with the arrow, Home and End keys", async () => {
     const { user } = await openBackup("maya", newest);
     screen.getByRole("tab", { name: "Summary" }).focus();

@@ -1,6 +1,6 @@
 /**
- * Jobs: every backup, restore, verify, drill and prune the console has run or is
- * running, newest first. Running jobs refresh every few seconds; open one for live
+ * Jobs: every backup, restore, verify, drill, prune and restore preview the console has
+ * run or is running, newest first. Running jobs refresh every few seconds; open one for live
  * progress and logs.
  */
 
@@ -52,6 +52,8 @@ export function JobsPage() {
             { value: "verify", label: "Verify" },
             { value: "drill", label: "Drill" },
             { value: "prune", label: "Prune" },
+            { value: "preview", label: "Restore preview" },
+            { value: "live-edit", label: "Live edit" },
           ]}
           onValue={setKind}
         />

@@ -45,6 +45,19 @@ const state: ConsoleState = {
 };
 
 describe("renderConfig", () => {
+  it("renders backup.incremental for an incremental plan", () => {
+    const base = state.plans[0];
+    if (base === undefined) throw new Error("fixture");
+    const { content } = renderConfig(
+      { ...state, plans: [{ ...base, incremental: { fullEveryDays: 7 } }] },
+      "/data",
+      new Date("2026-10-21T00:00:00Z"),
+    );
+    expect(content).toContain(
+      'backup: { include: ["app.*"], consistency: "auto", incremental: { fullEveryDays: 7 } },',
+    );
+  });
+
   it("renders env references, absolute local paths and escaped names", () => {
     const { filename, content } = renderConfig(state, "/data", new Date("2026-10-21T00:00:00Z"));
     expect(filename).toBe("mongoshield.config.ts");

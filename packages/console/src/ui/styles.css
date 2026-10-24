@@ -1426,6 +1426,43 @@ main:focus {
   gap: var(--space-3);
 }
 
+/* ---------------------------------------------------------------- restore preview */
+
+/* The listed _ids of one category, as a wrapping row of small buttons. */
+.preview-ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+
+/* Long field values wrap instead of widening the table. */
+.preview-value {
+  overflow-wrap: anywhere;
+}
+
+/* One document in the target and in the backup, side by side (stacked when narrow). */
+.diff-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.diff-side {
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface-sunken);
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.diff-side .ejson-tree,
+.diff-missing {
+  padding: var(--space-3);
+}
+
 .job-log {
   list-style: none;
   margin: 0;
@@ -1569,5 +1606,160 @@ main:focus {
   .key-value-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
+  }
+}
+
+/* ------------------------------------------------------------- live data */
+/*
+ * The live data browser (pages/live-browser.tsx), its dialogs (live-editor.tsx), the
+ * Edit history (edit-history.tsx) and the Live data panel (live-settings.tsx). Colors
+ * come from the tokens above, so light and dark themes both work.
+ */
+
+.live-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.live-tree {
+  padding: var(--space-3);
+  max-height: calc(100vh - var(--topbar-height) - 120px);
+  overflow: auto;
+}
+
+.live-databases,
+.live-collections {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.live-databases > li + li {
+  margin-top: var(--space-3);
+}
+
+.live-database-name {
+  display: block;
+  font-weight: 600;
+  margin-bottom: var(--space-1);
+}
+
+.live-collection-link {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-small);
+  color: var(--color-text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.live-collection-link:hover {
+  background: var(--color-surface-sunken);
+}
+
+/* The selected collection: a bar and bold text, not only a color. */
+.live-collection-link[aria-current="page"] {
+  background: var(--color-surface-sunken);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+  font-weight: 600;
+}
+
+.live-main {
+  min-width: 0;
+}
+
+.live-summary {
+  margin-top: 0;
+}
+
+.live-query {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) 100px auto;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.live-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+
+.live-document-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.live-editor-text textarea,
+.live-editor-text .textarea {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.live-diff-table {
+  width: 100%;
+}
+
+.live-diff-cell {
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+/* Added / removed rows carry a word in the Change column; the tint only repeats it. */
+.live-diff-added {
+  background: var(--color-success-bg);
+}
+
+.live-diff-removed {
+  background: var(--color-danger-bg);
+}
+
+.live-diff-changed {
+  background: var(--color-warning-bg);
+}
+
+.live-bulk-preview {
+  margin-top: var(--space-3);
+}
+
+.live-records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.live-record + .live-record {
+  border-top: 1px solid var(--color-border);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+}
+
+.live-hashes {
+  overflow-wrap: anywhere;
+}
+
+.live-settings {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-4);
+}
+
+@media (max-width: 960px) {
+  .live-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .live-tree {
+    max-height: 240px;
+  }
+
+  .live-query {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

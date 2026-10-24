@@ -260,6 +260,10 @@ function configOf(
       ...(plan.include.length > 0 ? { include: [...plan.include] } : {}),
       ...(plan.exclude.length > 0 ? { exclude: [...plan.exclude] } : {}),
       consistency: plan.consistency,
+      // Incremental between full backups: the runner picks the kind of each run.
+      ...(plan.incremental === undefined
+        ? {}
+        : { incremental: { fullEveryDays: plan.incremental.fullEveryDays } }),
     },
     ...(plan.retention === undefined ? {} : { retention: { ...plan.retention } }),
     ...(notify.length > 0 ? { notify } : {}),
@@ -709,7 +713,8 @@ function formatMiB(bytes: number): string {
 
 // ---------------------------------------------------------------------------
 
-function secretsOf(decryption: DecryptionOptions | undefined): string[] {
+/** The typed or stored keys of a job, for scrubbing them from its errors. */
+export function secretsOf(decryption: DecryptionOptions | undefined): string[] {
   if (decryption === undefined) return [];
   return [
     ...(decryption.passphrase === undefined ? [] : [decryption.passphrase]),

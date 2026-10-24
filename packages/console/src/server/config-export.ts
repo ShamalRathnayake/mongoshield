@@ -92,6 +92,11 @@ function renderPlan(
   if (plan.include.length > 0) backup.push(`include: ${JSON.stringify(plan.include)}`);
   if (plan.exclude.length > 0) backup.push(`exclude: ${JSON.stringify(plan.exclude)}`);
   backup.push(`consistency: ${JSON.stringify(plan.consistency)}`);
+  if (plan.incremental !== undefined) {
+    backup.push(
+      `incremental: { fullEveryDays: ${JSON.stringify(plan.incremental.fullEveryDays)} }`,
+    );
+  }
   out.push(`  backup: { ${backup.join(", ")} },`);
 
   if (plan.retention !== undefined) out.push(`  retention: ${JSON.stringify(plan.retention)},`);
