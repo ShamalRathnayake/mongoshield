@@ -22,8 +22,10 @@ export const VIEWER = { username: "victor", password: "viewer password for e2e" 
 export const NAMES = {
   production: "Production shop",
   scratch: "Scratch",
-  storage: "Local backups",
-  storagePath: "backups",
+  // Not "Local backups" in "backups": the console creates that one by itself on first
+  // start (the onboarding spec uses it), and names are unique.
+  storage: "Journey backups",
+  storagePath: "journey-backups",
   plan: "Shop nightly",
 } as const;
 

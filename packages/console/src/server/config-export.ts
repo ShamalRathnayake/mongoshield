@@ -82,6 +82,11 @@ function renderPlan(
 
   if (plan.encryption.kind === "recipients") {
     out.push(`  encryption: { recipients: ${JSON.stringify(plan.encryption.recipients)} },`);
+  } else if (plan.encryption.kind === "managed") {
+    // The console keeps the private key; the CLI only needs the public one to encrypt.
+    // Restoring needs the recovery key (Backup plans → Recovery key) as an identity file.
+    out.push("  // Key kept by the console: restore with its recovery key (--identity-file).");
+    out.push(`  encryption: { recipients: ${JSON.stringify([plan.encryption.recipient])} },`);
   } else if (plan.encryption.kind === "passphrase") {
     const variable = `MONGOSHIELD_PASSPHRASE_${envSuffix(plan.name)}`;
     variables.push(`${variable}  backup passphrase of plan ${JSON.stringify(plan.name)}`);

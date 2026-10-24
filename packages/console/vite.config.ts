@@ -16,6 +16,8 @@ export default defineConfig({
     sourcemap: true,
   },
   server: {
-    proxy: { "/api": "http://localhost:8080" },
+    // "/api/" with the slash: a bare "/api" prefix would also catch the UI's own
+    // module /api.ts and break the dev server (and mock mode, `?mock=1`).
+    proxy: { "/api/": "http://localhost:8080" },
   },
 });

@@ -46,6 +46,11 @@ export interface MockConnection {
   namespaces: DatabaseNode[];
   /** Live edit settings (absent: off, as on the real server). */
   liveEdits?: LiveEditSettingsView;
+  /**
+   * Behave like an Atlas Free/Flex cluster in the data browser: `$collStats` is refused
+   * (no sizes, `statsUnavailable`) and the collection reports `sharedTier`. Tests set it.
+   */
+  atlasSharedTier?: boolean;
 }
 
 /** A storage location plus its secret credentials. */
@@ -122,6 +127,13 @@ function stagingTree(): DatabaseNode[] {
         { name: "users", type: "collection", estimatedDocuments: 1_200, indexes: 5 },
         { name: "orders", type: "collection", estimatedDocuments: 25_010, indexes: 7 },
         { name: "products", type: "collection", estimatedDocuments: 3_120, indexes: 4 },
+        {
+          name: "audit_log",
+          type: "collection",
+          estimatedDocuments: 1_850,
+          indexes: 1,
+          capped: true,
+        },
       ],
     },
     {
@@ -699,10 +711,56 @@ export function generateDocument(
       placedAt: created,
     };
   }
+  if (ns.endsWith(".products")) return productDocument(id, index, created);
   return {
     _id: id,
     name: `${ns.split(".").pop() ?? "item"} ${index}`,
     value: index,
+    updatedAt: created,
+  };
+}
+
+/** Words for product names. */
+const PRODUCT_ADJECTIVES = ["Compact", "Classic", "Smart", "Ultra", "Eco", "Pro"];
+const PRODUCT_NOUNS = ["Kettle", "Lamp", "Backpack", "Speaker", "Chair", "Bottle", "Desk"];
+
+/**
+ * A product that shows every BSON type the document viewer knows: Decimal128, Int64,
+ * booleans, null, nested documents, arrays of strings and of documents, a UUID, generic
+ * binary data, a regular expression and a timestamp. The live and backup browsers use it to
+ * demonstrate (and test) type-aware rendering.
+ */
+function productDocument(
+  id: { $oid: string },
+  index: number,
+  created: { $date: string },
+): Record<string, unknown> {
+  // 16 deterministic bytes for the UUID (version 4 and variant bits set).
+  const bytes = Array.from({ length: 16 }, (_, byte) => (index * 37 + byte * 11) % 256);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const seconds = Math.floor(Date.parse(created.$date) / 1000);
+  return {
+    _id: id,
+    sku: `SKU-${1000 + index}`,
+    name: `${PRODUCT_ADJECTIVES[index % PRODUCT_ADJECTIVES.length]} ${PRODUCT_NOUNS[index % PRODUCT_NOUNS.length]}`,
+    price: { $numberDecimal: `${(index % 90) + 9}.${String((index * 7) % 100).padStart(2, "0")}` },
+    stock: (index * 7) % 120,
+    rating: (index % 5) + 1,
+    active: index % 4 !== 0,
+    discontinuedAt: index % 9 === 0 ? created : null,
+    tags: index % 3 === 0 ? ["sale", "new"] : index % 3 === 1 ? ["bestseller"] : [],
+    dimensions: { width: 10 + (index % 30), height: 5 + (index % 12), unit: "cm" },
+    variants: [
+      { color: index % 2 === 0 ? "black" : "white", stock: index % 10 },
+      ...(index % 3 === 0 ? [{ color: "red", stock: 2 }] : []),
+    ],
+    // Beyond 2^53, so only an Int64 holds it exactly (BigInt keeps every digit).
+    views: { $numberLong: String(9_007_199_254_740_993n + BigInt(index) * 1_234_567n) },
+    externalId: { $binary: { base64: btoa(String.fromCharCode(...bytes)), subType: "04" } },
+    thumbnail: { $binary: { base64: "iVBORw0KGgoAAAANSUhEUg==", subType: "00" } },
+    skuPattern: { $regularExpression: { pattern: "^SKU-\\d+$", options: "i" } },
+    lastSync: { $timestamp: { t: seconds, i: (index % 3) + 1 } },
     updatedAt: created,
   };
 }

@@ -136,17 +136,21 @@ describe("app shell", () => {
 });
 
 describe("setup page", () => {
-  it("explains that setup is required and validates every field", async () => {
-    const { user, backend } = renderApp({ setupComplete: false });
-    expect(await screen.findByText("Setup required")).toBeTruthy();
-    await user.clear(screen.getByLabelText("Admin username"));
-    await user.click(screen.getByRole("button", { name: "Create admin and sign in" }));
-    expect(screen.getByText("Paste the token from the setup link in the server log.")).toBeTruthy();
-    expect(screen.getByText("Choose a username.")).toBeTruthy();
+  it("explains that the token is needed once the window has closed, and validates every field", async () => {
+    const { user, backend } = renderApp({ setupComplete: false, setupWindow: false });
+    expect(await screen.findByText("Setup token needed")).toBeTruthy();
+    await user.clear(screen.getByLabelText("User name"));
+    await user.click(screen.getByRole("button", { name: "Create account and continue" }));
+    expect(
+      screen.getByText("Paste the token from the setup link in the console's log."),
+    ).toBeTruthy();
+    expect(screen.getByText("Choose a user name.")).toBeTruthy();
     expect(screen.getByText(/Use at least \d+ characters/)).toBeTruthy();
+    // "Show password" reveals what was typed instead of asking for it twice.
     await user.type(screen.getByLabelText("Password"), "a long enough password");
-    await user.type(screen.getByLabelText("Repeat password"), "something else entirely");
-    expect(screen.getByText("The passwords do not match.")).toBeTruthy();
+    expect((screen.getByLabelText("Password") as HTMLInputElement).type).toBe("password");
+    await user.click(screen.getByLabelText("Show password"));
+    expect((screen.getByLabelText("Password") as HTMLInputElement).type).toBe("text");
     expect(backend.requests.some((request) => request.url === "/api/setup")).toBe(false);
   });
 });

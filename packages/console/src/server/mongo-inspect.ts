@@ -62,20 +62,7 @@ export async function withClient<T>(
 /** Connects, describes the deployment and reports missing privileges. Never throws. */
 export async function testConnection(uri: string): Promise<ConnectionTestResult> {
   try {
-    return await withClient(uri, async (client) => {
-      const admin = client.db("admin");
-      const hello = await admin.command({ hello: 1 });
-      const buildInfo = await admin.command({ buildInfo: 1 });
-      const status = await admin.command({ connectionStatus: 1, showPrivileges: true });
-      const privileges = readPrivileges(status);
-      return {
-        ok: true,
-        topology: topologyOf(hello),
-        serverVersion: typeof buildInfo.version === "string" ? buildInfo.version : "unknown",
-        missingBackupPrivileges: missingPrivileges(privileges, BACKUP_ACTIONS, ["listDatabases"]),
-        missingRestorePrivileges: missingPrivileges(privileges, RESTORE_ACTIONS, []),
-      };
-    });
+    return await withClient(uri, describeConnected);
   } catch (error) {
     return {
       ok: false,
@@ -89,6 +76,26 @@ export async function testConnection(uri: string): Promise<ConnectionTestResult>
       },
     };
   }
+}
+
+/**
+ * The successful half of {@link testConnection} on an already connected client: topology,
+ * server version and missing privileges. Also used by the onboarding check
+ * (connection-check.ts), which explains failures in its own words.
+ */
+export async function describeConnected(client: MongoClient): Promise<ConnectionTestResult> {
+  const admin = client.db("admin");
+  const hello = await admin.command({ hello: 1 });
+  const buildInfo = await admin.command({ buildInfo: 1 });
+  const status = await admin.command({ connectionStatus: 1, showPrivileges: true });
+  const privileges = readPrivileges(status);
+  return {
+    ok: true,
+    topology: topologyOf(hello),
+    serverVersion: typeof buildInfo.version === "string" ? buildInfo.version : "unknown",
+    missingBackupPrivileges: missingPrivileges(privileges, BACKUP_ACTIONS, ["listDatabases"]),
+    missingRestorePrivileges: missingPrivileges(privileges, RESTORE_ACTIONS, []),
+  };
 }
 
 /** The database/collection tree with counts and index numbers. */
@@ -120,7 +127,12 @@ async function describeCollections(client: MongoClient, dbName: string): Promise
     .toArray();
   const wanted = infos
     .filter((info) => !info.name.startsWith("system."))
-    .map((info) => ({ name: info.name, type: collectionType(info.type) }))
+    .map((info) => ({
+      name: info.name,
+      type: collectionType(info.type),
+      // Capped collections say so in their listCollections options: no extra command.
+      capped: Reflect.get(Object(info.options), "capped") === true,
+    }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   const nodes: CollectionNode[] = [];
@@ -128,7 +140,7 @@ async function describeCollections(client: MongoClient, dbName: string): Promise
     const batch = wanted.slice(start, start + INSPECT_CONCURRENCY);
     nodes.push(
       ...(await Promise.all(
-        batch.map(async ({ name, type }): Promise<CollectionNode> => {
+        batch.map(async ({ name, type, capped }): Promise<CollectionNode> => {
           if (type === "view") return { name, type, estimatedDocuments: 0, indexes: 0 };
           const collection = db.collection(name);
           // Metadata-only calls; a failure (privileges, a collection dropped meanwhile) shows as 0.
@@ -138,7 +150,7 @@ async function describeCollections(client: MongoClient, dbName: string): Promise
             .toArray()
             .then((list) => list.length)
             .catch(() => 0);
-          return { name, type, estimatedDocuments, indexes };
+          return { name, type, estimatedDocuments, indexes, ...(capped ? { capped } : {}) };
         }),
       )),
     );

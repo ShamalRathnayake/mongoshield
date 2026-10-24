@@ -42,6 +42,8 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
   "PUT /api/connections/:id": "admin",
   "DELETE /api/connections/:id": "admin",
   "POST /api/connections/:id/test": "operator",
+  "POST /api/connections/check": "admin",
+  "POST /api/network/public-ip": "admin",
   "GET /api/connections/:id/namespaces": "viewer",
   "PUT /api/connections/:id/live-edits": "admin",
 
@@ -56,6 +58,8 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
   "PUT /api/plans/:id": "admin",
   "DELETE /api/plans/:id": "admin",
   "POST /api/plans/:id/run": "operator",
+  "POST /api/plans/:id/recovery-key": "admin",
+  "POST /api/quick-backup": "admin",
   "POST /api/plans/:id/prune/plan": "admin",
   "POST /api/plans/:id/prune": "admin",
 
@@ -66,6 +70,8 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
   "POST /api/storage/:id/backups/:backupId/hold": "operator",
   "DELETE /api/storage/:id/backups/:backupId/hold": "admin",
   "GET /api/storage/:id/backups/:backupId/documents": "operator",
+  "GET /api/storage/:id/backups/:backupId/sample": "operator",
+  "GET /api/storage/:id/backups/:backupId/export": "operator",
 
   "POST /api/restore/plan": "operator",
   "POST /api/restore": "operator",
@@ -76,6 +82,8 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
 
   "GET /api/live/:id/collection": "operator",
   "GET /api/live/:id/documents": "operator",
+  "GET /api/live/:id/sample": "operator",
+  "GET /api/live/:id/export": "operator",
   "POST /api/live/:id/documents": "data:write",
   "PUT /api/live/:id/documents": "data:write",
   "POST /api/live/:id/documents/delete": "data:write",

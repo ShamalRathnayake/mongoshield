@@ -21,9 +21,16 @@ function isMockMode(): boolean {
 async function createClient(): Promise<ApiClient> {
   if (!isMockMode()) return new ApiClient();
   const { createMockBackend } = await import("./mock/backend.ts");
-  // `?mock=1&setup=1` starts before setup, to try the setup page with token "mock-setup-token".
-  const startBeforeSetup = new URLSearchParams(window.location.search).get("setup") === "1";
-  const backend = createMockBackend({ latencyMs: 120, setupComplete: !startBeforeSetup });
+  // `?mock=1&setup=1` starts before setup, to try the setup page (within its setup
+  // window; add `&window=0` to need the token "mock-setup-token"). `&fresh=1` starts like
+  // a brand-new console (no connections yet), to try the welcome flow.
+  const search = new URLSearchParams(window.location.search);
+  const backend = createMockBackend({
+    latencyMs: 120,
+    setupComplete: search.get("setup") !== "1",
+    setupWindow: search.get("window") !== "0",
+    fresh: search.get("fresh") === "1",
+  });
   return new ApiClient({ fetch: backend.fetch, openEventSource: backend.openEventSource });
 }
 

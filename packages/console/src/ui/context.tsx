@@ -111,6 +111,19 @@ export interface LoadState<T> {
   reload(): void;
   /** Replaces the data locally (optimistic update after a mutation). */
   setData(data: T): void;
+  /**
+   * Stops the load in flight (the request is aborted, so the server stops too) and
+   * reports it as a {@link CancelledLoadError}; `reload()` starts it again.
+   */
+  cancel(): void;
+}
+
+/** The error of a load the user cancelled (`LoadState.cancel`). */
+export class CancelledLoadError extends Error {
+  override readonly name = "CancelledLoadError";
+  constructor() {
+    super("You cancelled the request. Change the query or try again.");
+  }
 }
 
 /**
@@ -128,6 +141,8 @@ export function useLoad<T>(key: string, load: (signal: AbortSignal) => Promise<T
   const [generation, setGeneration] = useState(0);
   const loadRef = useRef(load);
   loadRef.current = load;
+  /** The controller of the load in flight, for `cancel()`. */
+  const controllerRef = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
     // `generation` is read so that reload() re-runs this effect.
@@ -136,6 +151,7 @@ export function useLoad<T>(key: string, load: (signal: AbortSignal) => Promise<T
       return;
     }
     const controller = new AbortController();
+    controllerRef.current = controller;
     setLoading(true);
     loadRef.current(controller.signal).then(
       (result) => {
@@ -154,5 +170,12 @@ export function useLoad<T>(key: string, load: (signal: AbortSignal) => Promise<T
   }, [key, generation]);
 
   const reload = useCallback(() => setGeneration((value) => value + 1), []);
-  return { data, error, loading, reload, setData };
+  const cancel = useCallback(() => {
+    const controller = controllerRef.current;
+    if (controller === undefined || controller.signal.aborted) return;
+    controller.abort();
+    setError(new CancelledLoadError());
+    setLoading(false);
+  }, []);
+  return { data, error, loading, reload, setData, cancel };
 }

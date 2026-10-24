@@ -48,30 +48,53 @@ describe("setup", () => {
   it("creates the first admin with the token from the setup link and signs in", async () => {
     const { user, backend } = renderApp({
       setupComplete: false,
+      setupWindow: false,
       hash: "#/setup?token=mock-setup-token",
     });
     const token = (await screen.findByLabelText("Setup token")) as HTMLInputElement;
     expect(token.value).toBe("mock-setup-token");
 
     await user.type(screen.getByLabelText("Password"), "short");
-    await user.click(screen.getByRole("button", { name: "Create admin and sign in" }));
+    await user.click(screen.getByRole("button", { name: "Create account and continue" }));
     expect(screen.getByText("Use at least 12 characters.")).toBeTruthy();
     expect(requestsTo(backend, "POST", "/api/setup")).toHaveLength(0);
 
     await user.clear(screen.getByLabelText("Password"));
     await user.type(screen.getByLabelText("Password"), "a long passphrase");
-    await user.type(screen.getByLabelText("Repeat password"), "a long passphrase");
-    await user.click(screen.getByRole("button", { name: "Create admin and sign in" }));
+    await user.click(screen.getByRole("button", { name: "Create account and continue" }));
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
     // The single-use token is removed from the address bar.
     expect(window.location.href).not.toContain("mock-setup-token");
   });
 
-  it("explains a rejected token", async () => {
+  it("explains a rejected token, even while the setup window is open", async () => {
     const { user } = renderApp({ setupComplete: false, hash: "#/setup?token=stale" });
-    await user.type(await screen.findByLabelText("Password"), "a long passphrase");
-    await user.type(screen.getByLabelText("Repeat password"), "a long passphrase");
-    await user.click(screen.getByRole("button", { name: "Create admin and sign in" }));
+    expect(await screen.findByLabelText("Setup token (optional)")).toBeTruthy();
+    await user.type(screen.getByLabelText("Password"), "a long passphrase");
+    await user.click(screen.getByRole("button", { name: "Create account and continue" }));
     expect(await screen.findByText(/invalid or has expired/)).toBeTruthy();
+  });
+
+  it("needs no token within the setup window, and says who may set it up", async () => {
+    const { user, backend } = renderApp({ setupComplete: false });
+    expect(await screen.findByText("First come, first served")).toBeTruthy();
+    expect(screen.queryByLabelText(/Setup token/)).toBeNull();
+    await user.type(screen.getByLabelText("Password"), "a long passphrase");
+    await user.click(screen.getByRole("button", { name: "Create account and continue" }));
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
+    const [request] = requestsTo(backend, "POST", "/api/setup");
+    expect(request?.body).toEqual({ username: "admin", password: "a long passphrase" });
+  });
+
+  it("still takes a token during the window when the user has one", async () => {
+    const { user, backend } = renderApp({ setupComplete: false });
+    await user.click(await screen.findByRole("button", { name: "I have a setup token" }));
+    await user.type(screen.getByLabelText("Setup token (optional)"), "mock-setup-token");
+    await user.type(screen.getByLabelText("Password"), "a long passphrase");
+    await user.click(screen.getByRole("button", { name: "Create account and continue" }));
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(requestsTo(backend, "POST", "/api/setup")[0]?.body).toMatchObject({
+      token: "mock-setup-token",
+    });
   });
 });

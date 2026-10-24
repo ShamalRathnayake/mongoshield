@@ -22,6 +22,9 @@ afterEach(() => {
   cleanup();
   for (const backend of liveBackends.splice(0)) backend.dispose();
   window.location.hash = "";
+  // Viewer preferences (views, columns, query history, last collection) live in
+  // localStorage; every test starts without them.
+  window.localStorage.clear();
 });
 
 /** What `renderApp` returns. */

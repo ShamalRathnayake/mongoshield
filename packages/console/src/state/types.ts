@@ -82,6 +82,16 @@ export interface ConnectionRecord {
    * bump: older files have no such settings, which means "read-only".
    */
   readonly liveEdits?: LiveEditSettingsRecord;
+  /** What the last check or test found out (Atlas tier, version). Optional, no format bump. */
+  readonly deployment?: DeploymentRecord;
+}
+
+/** A connection's deployment as last seen (see `DeploymentSummary` in src/shared/api.ts). */
+export interface DeploymentRecord {
+  readonly topology?: string;
+  readonly serverVersion?: string;
+  readonly atlas?: "shared" | "dedicated";
+  readonly checkedAt: string;
 }
 
 /**
@@ -178,7 +188,19 @@ export interface NotifyRecord {
 export type PlanEncryptionRecord =
   | { readonly kind: "none" }
   | { readonly kind: "recipients"; readonly recipients: readonly string[] }
-  | { readonly kind: "passphrase"; readonly passphrase: EncryptedSecret };
+  | { readonly kind: "passphrase"; readonly passphrase: EncryptedSecret }
+  /**
+   * A key pair the console generated: backups are encrypted to `recipient`; the private
+   * key (`identity`, `AGE-SECRET-KEY-1…`) is sealed like every stored secret, so the
+   * console can decrypt its own backups. Added without a format bump (a new kind).
+   */
+  | {
+      readonly kind: "managed";
+      readonly recipient: string;
+      readonly identity: EncryptedSecret;
+      /** When the recovery key was last downloaded; absent until it has been. */
+      readonly recoveryKeySavedAt?: string;
+    };
 
 /** A backup plan: connection + storage + what + how + when. */
 export interface PlanRecord {
@@ -208,6 +230,8 @@ export interface PlanRecord {
    * library's `backup.incremental`). Absent: every run is a full backup.
    */
   readonly incremental?: { readonly fullEveryDays: number };
+  /** `quick`: the connection's "Back up now" plan (at most one per connection). */
+  readonly origin?: "quick";
 }
 
 /** The whole console.json document. */
@@ -234,6 +258,19 @@ export interface ConsoleState {
    * entries. Optional so files written before live editing existed still open.
    */
   readonly liveEdits?: readonly LiveEditRecord[];
+  /**
+   * The first-run defaults (the "Local backups" storage location), recorded once they
+   * were applied so they are never applied twice: a location the admin deleted stays
+   * deleted. Optional, so files written before first-run defaults existed still open.
+   */
+  readonly defaults?: FirstRunDefaultsRecord;
+}
+
+/** What the console set up by itself on a fresh data directory (services.ts). */
+export interface FirstRunDefaultsRecord {
+  readonly appliedAt: string;
+  /** The default storage location, when one was created. */
+  readonly storageId?: string;
 }
 
 /** Job history kept in console.json. Older jobs are dropped. */

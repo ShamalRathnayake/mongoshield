@@ -1,18 +1,26 @@
 /**
- * First-run setup: creates the first admin account with the one-time token from the
- * setup link the server prints in its log (`/setup?token=…`).
+ * First-run setup: creates the first admin account.
  *
- * After success the token is removed from the address bar (it is single-use, but it
- * should not linger in history or screenshots) and the new admin is signed in.
+ * Two ways in (see src/server/routes/session.ts for the reasoning):
+ *   - within the setup window after the console starts (15 minutes by default), the
+ *     page works without anything else: choose a name and a password, done;
+ *   - with the one-time token from the setup link the server prints in its log
+ *     (`/setup?token=…`), which also works after the window has closed.
+ *
+ * The page says plainly which case applies, and that during the window whoever opens
+ * the page first becomes the admin. After success the token (if any) is removed from the
+ * address bar (it is single-use, but it should not linger in history or screenshots)
+ * and the new admin is signed in.
  */
 
 import { type FormEvent, useState } from "react";
 import type { SessionInfo } from "../../shared/api.ts";
 import { describeError } from "../api.ts";
 import { Button } from "../components/button.tsx";
-import { TextField } from "../components/field.tsx";
+import { CheckboxField, TextField } from "../components/field.tsx";
 import { Notice } from "../components/layout.tsx";
 import { useApi } from "../context.tsx";
+import { formatDateTime } from "../format.ts";
 
 /** Minimum password length; the server enforces the same rule. */
 export const MIN_PASSWORD_LENGTH = 12;
@@ -24,28 +32,52 @@ export interface SetupPageProps {
   readonly onDone: (session: SessionInfo) => void;
   readonly mock: boolean;
   readonly fromSetupLink: boolean;
+  /** Whether the token is needed now, and until when it is not (from `GET /api/session`). */
+  readonly setup?: SessionInfo["setup"];
+}
+
+/**
+ * True when the page is served over plain HTTP from a host other than this machine.
+ * Browsers then refuse the console's `Secure` session cookie, so signing in would
+ * silently fail; the page says so up front instead.
+ */
+export function insecureRemoteHttp(location: Pick<Location, "protocol" | "hostname">): boolean {
+  if (location.protocol !== "http:") return false;
+  const host = location.hostname.replace(/^\[|\]$/g, "");
+  return !(
+    host === "localhost" ||
+    host === "::1" ||
+    /^127\./.test(host) ||
+    host.endsWith(".localhost")
+  );
 }
 
 /** The one-time "create the first admin" page. */
 export function SetupPage(props: SetupPageProps) {
   const client = useApi();
+  // Without setup state (an older server) the token is required, as it always was.
+  const tokenRequired = props.setup?.tokenRequired ?? true;
   const [token, setToken] = useState(props.token ?? "");
+  // The token field is hidden while the window is open, unless the user has one anyway.
+  const [showToken, setShowToken] = useState(tokenRequired || props.token !== undefined);
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
+  const [revealPassword, setRevealPassword] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
 
+  const sendToken = tokenRequired || (showToken && token.trim() !== "");
   const errors = {
     token:
-      token.trim() === "" ? "Paste the token from the setup link in the server log." : undefined,
-    username: username.trim() === "" ? "Choose a username." : undefined,
+      tokenRequired && token.trim() === ""
+        ? "Paste the token from the setup link in the console's log."
+        : undefined,
+    username: username.trim() === "" ? "Choose a user name." : undefined,
     password:
       password.length < MIN_PASSWORD_LENGTH
         ? `Use at least ${MIN_PASSWORD_LENGTH} characters.`
         : undefined,
-    confirm: confirm !== password ? "The passwords do not match." : undefined,
   };
   const valid = Object.values(errors).every((message) => message === undefined);
 
@@ -57,7 +89,7 @@ export function SetupPage(props: SetupPageProps) {
     setError(undefined);
     try {
       const session = await client.call("POST /api/setup", {
-        token: token.trim(),
+        ...(sendToken ? { token: token.trim() } : {}),
         username: username.trim(),
         password,
       });
@@ -74,50 +106,75 @@ export function SetupPage(props: SetupPageProps) {
   return (
     <main className="centered-page">
       <form className="auth-card" onSubmit={submit} noValidate>
-        <h1 className="auth-title">Set up MongoShield</h1>
-        <p className="muted">Create the first administrator. This can only be done once.</p>
+        <h1 className="auth-title">Welcome to MongoShield</h1>
+        <p className="muted">
+          Create the administrator account. You will connect your database right after.
+        </p>
         {props.mock ? (
           <Notice tone="info" title="Mock mode">
-            Use the setup token <code>mock-setup-token</code>.
+            Nothing is saved.{" "}
+            {tokenRequired ? (
+              <>
+                Use the setup token <code>mock-setup-token</code>.
+              </>
+            ) : (
+              "No token is needed."
+            )}
           </Notice>
         ) : null}
-        {!props.fromSetupLink && props.token === undefined ? (
-          <Notice tone="info" title="Setup required">
-            The server printed a one-time setup link in its log when it first started. Open that
-            link, or paste its token below.
+        {insecureRemoteHttp(window.location) ? (
+          <Notice tone="warning" title="Sign-in needs HTTPS here">
+            Browsers keep the console's sign-in cookie only over HTTPS or on this computer
+            (localhost). Open the console through an HTTPS proxy, or for a quick evaluation start it
+            with <code>MONGOSHIELD_COOKIE_SECURE=false</code>.
           </Notice>
         ) : null}
+        {tokenRequired ? (
+          !props.fromSetupLink && props.token === undefined ? (
+            <Notice tone="info" title="Setup token needed">
+              The console printed a one-time setup link in its log (
+              <code>docker logs &lt;container&gt;</code>). Open that link, or paste its token below.
+              Restarting the console also lets you finish setup without the token for a few minutes.
+            </Notice>
+          ) : null
+        ) : (
+          <Notice tone="info" title="First come, first served">
+            Until {formatDateTime(props.setup?.windowEndsAt)}, anyone who can open this page can
+            create the administrator, so do it now. After that, setup needs the one-time link from
+            the console's log.
+          </Notice>
+        )}
+        {showToken ? (
+          <TextField
+            label={tokenRequired ? "Setup token" : "Setup token (optional)"}
+            value={token}
+            onValue={setToken}
+            autoComplete="off"
+            spellCheck={false}
+            error={submitted ? errors.token : undefined}
+          />
+        ) : null}
         <TextField
-          label="Setup token"
-          value={token}
-          onValue={setToken}
-          autoComplete="off"
-          spellCheck={false}
-          error={submitted ? errors.token : undefined}
-        />
-        <TextField
-          label="Admin username"
+          label="User name"
           value={username}
           onValue={setUsername}
           autoComplete="username"
+          hint="Letters, digits, dots, dashes, underscores, or an email address."
           error={submitted ? errors.username : undefined}
         />
         <TextField
           label="Password"
-          type="password"
+          type={revealPassword ? "text" : "password"}
           value={password}
           onValue={setPassword}
           autoComplete="new-password"
-          hint={`At least ${MIN_PASSWORD_LENGTH} characters. A passphrase of several words is easiest.`}
+          hint={`At least ${MIN_PASSWORD_LENGTH} characters. A few words in a row are easy to remember and hard to guess.`}
           error={submitted ? errors.password : undefined}
         />
-        <TextField
-          label="Repeat password"
-          type="password"
-          value={confirm}
-          onValue={setConfirm}
-          autoComplete="new-password"
-          error={submitted ? errors.confirm : undefined}
+        <CheckboxField
+          label="Show password"
+          checked={revealPassword}
+          onChecked={setRevealPassword}
         />
         {error === undefined ? null : (
           <Notice tone="danger" title="Setup failed">
@@ -125,8 +182,13 @@ export function SetupPage(props: SetupPageProps) {
           </Notice>
         )}
         <Button type="submit" variant="primary" busy={busy}>
-          Create admin and sign in
+          Create account and continue
         </Button>
+        {!tokenRequired && !showToken ? (
+          <Button variant="ghost" size="small" onClick={() => setShowToken(true)}>
+            I have a setup token
+          </Button>
+        ) : null}
       </form>
     </main>
   );

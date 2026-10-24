@@ -57,6 +57,7 @@ describe("live data browser, other states", () => {
   it("shows a refused write that is not a conflict as an error", async () => {
     const { user, backend } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await screen.findByText("Showing 1–20 of about 45 documents");
+    await user.click(screen.getByRole("radio", { name: "Tree" }));
     await user.click(screen.getAllByRole("button", { name: /^Edit document/ })[0] as HTMLElement);
     const dialog = await screen.findByRole("dialog", { name: "Edit document" });
     const textarea = within(dialog).getByLabelText(
@@ -151,7 +152,7 @@ describe("live data browser, other states", () => {
     const retries = await screen.findAllByRole("button", { name: "Try again" });
     for (const retry of retries) await user.click(retry);
     expect(await screen.findByText("Showing 1–20 of about 45 documents")).toBeTruthy();
-    expect(await screen.findAllByRole("link", { name: "users" })).not.toHaveLength(0);
+    expect(await screen.findAllByRole("treeitem", { name: /^users/ })).not.toHaveLength(0);
   });
 });
 
@@ -159,6 +160,7 @@ describe("edit history, other states", () => {
   it("shows bulk entries, details of deletes and a deleted connection", async () => {
     const { user, backend } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await screen.findByText("Showing 1–20 of about 45 documents");
+    await user.click(screen.getByRole("radio", { name: "Tree" }));
     await user.click(screen.getAllByRole("button", { name: /^Delete document/ })[0] as HTMLElement);
     const dialog = await screen.findByRole("dialog", { name: /^Delete document/ });
     await user.click(within(dialog).getByRole("button", { name: "Delete document" }));
@@ -196,6 +198,7 @@ describe("edit history, other states", () => {
       ],
     });
     await screen.findByText("Showing 1–20 of about 45 documents");
+    await user.click(screen.getByRole("radio", { name: "Tree" }));
     await user.click(screen.getAllByRole("button", { name: /^Delete document/ })[0] as HTMLElement);
     const dialog = await screen.findByRole("dialog", { name: /^Delete document/ });
     await user.click(within(dialog).getByRole("button", { name: "Delete document" }));

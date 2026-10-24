@@ -36,7 +36,12 @@ describe("setup token", () => {
     const client = testConsole.client();
 
     const before = await client.request("GET", "/api/session");
-    expect(before.body).toEqual({ setupComplete: false, authMethods: ["password"] });
+    expect(before.body).toEqual({
+      setupComplete: false,
+      authMethods: ["password"],
+      // Tests open consoles without a setup window: the token is required.
+      setup: { tokenRequired: true },
+    });
 
     const setup = await client.request("POST", "/api/setup", {
       token: testConsole.setupToken,

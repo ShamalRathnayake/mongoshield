@@ -8,6 +8,7 @@
  *   POST   /api/storage/:id/backups/:backupId/hold          operator
  *   DELETE /api/storage/:id/backups/:backupId/hold          admin (releasing makes the backup prunable)
  *   GET    /api/storage/:id/backups/:backupId/documents     operator (read-only document browser)
+ *   (samples and exports of a backup's documents: browse-extras.ts)
  *
  * The document browser shows customer data, not console metadata, so it needs
  * the operator role (the people who may restore that data anyway) rather than viewer.
@@ -30,7 +31,9 @@ import type { BackupDetail, BackupSummary, DocumentPage, Role } from "../../shar
 import { recordAudit } from "../audit.ts";
 import { hasRole, requireRole } from "../auth.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
+import { relaxedText } from "../ejson-text.ts";
 import { ConsoleError, forbidden, invalid } from "../errors.ts";
+import { type EjsonMode, parseEjsonMode } from "../export-format.ts";
 import { parseExtendedJsonFilter } from "../filter.ts";
 import { readJson } from "../security.ts";
 import {
@@ -186,6 +189,7 @@ export function backupRoutes(app: Hono<AppEnv>, services: ConsoleServices): void
     });
     const filter = parseExtendedJsonFilter(c.req.query("filter"), "The filter") ?? {};
     const after = parseCursor(c.req.query("after"));
+    const ejson = parseEjsonMode(c.req.query("ejson"));
     const shield = await shieldFor(tasks, storage);
     const decryption = decryptionFor(store, storage.id);
     const page = await readPage(
@@ -198,6 +202,7 @@ export function backupRoutes(app: Hono<AppEnv>, services: ConsoleServices): void
       }),
       limit,
       after,
+      ejson,
     );
     // Reading backup contents is sensitive: record who looked at what (not the documents).
     await recordAudit(services, {
@@ -273,15 +278,18 @@ function idKeyOf(document: Document): string {
  * Reads one page. Documents come in backup order, which never changes for a
  * backup, so "everything after the document with this `_id`" is a stable cursor
  * whatever type the `_id` has. Iteration stops as soon as the page is full, which
- * closes the storage download.
+ * closes the storage download. With `ejson: "canonical"` the page also carries every
+ * document as canonical Extended JSON (`DocumentPage.canonical`, the JSON view).
  */
 async function readPage(
   documents: AsyncIterable<Document>,
   limit: number,
   after: string | undefined,
+  ejson: EjsonMode = "relaxed",
 ): Promise<DocumentPage> {
   let skipping = after !== undefined;
   const page: string[] = [];
+  const canonical: string[] = [];
   let lastIdKey: string | undefined;
   let hasMore = false;
   for await (const document of documents) {
@@ -294,7 +302,9 @@ async function readPage(
       hasMore = true;
       break;
     }
-    page.push(BSON.EJSON.stringify(document, { relaxed: true }));
+    // Relaxed, with Int64 values beyond 2^53 kept exact (ejson-text.ts).
+    page.push(relaxedText(document));
+    if (ejson === "canonical") canonical.push(BSON.EJSON.stringify(document, { relaxed: false }));
     lastIdKey = idKey;
   }
   if (skipping) {
@@ -305,6 +315,7 @@ async function readPage(
   }
   return {
     documents: page,
+    ...(ejson === "canonical" ? { canonical } : {}),
     ...(hasMore && lastIdKey !== undefined ? { next: encodeCursor(lastIdKey) } : {}),
   };
 }

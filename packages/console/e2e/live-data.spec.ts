@@ -112,13 +112,14 @@ test("browse → edit with a diff review → conflict → undo from the edit his
     await goTo(page, `/connections/${scratchId}`);
     await page.getByRole("link", { name: "Browse live data" }).click();
     await expect(page.locator("#main h1")).toContainText(/live data/i);
-    await page
-      .getByRole("button", { name: COLLECTION })
-      .or(page.getByRole("link", { name: COLLECTION }))
-      .first()
-      .click();
+    // Find the collection in the navigation tree by name, then open it.
+    await page.getByLabel("Find a collection").fill(COLLECTION);
+    await page.getByRole("treeitem", { name: new RegExp(`^${COLLECTION}`) }).click();
     await expect(page.getByText("ada@example.com")).toBeVisible();
     expect(await accessibilityProblems(page, { shell: true }), "live data page").toEqual([]);
+    // Each document's edit buttons are in the tree view.
+    await page.locator(".view-option", { hasText: "Tree" }).click();
+    await expect(page.getByRole("button", { name: "Edit document 1" })).toBeVisible();
   });
 
   await test.step("edit a document: review the diff, save, and find it in MongoDB", async () => {

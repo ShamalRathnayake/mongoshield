@@ -25,6 +25,7 @@ import { ADMIN, E2E_MONGO_PASSWORD, mongoUri, NAMES, SEED } from "./env.ts";
 import {
   expect,
   goTo,
+  idByName,
   setupLinkFromServerLog,
   signIn,
   signOut,
@@ -52,16 +53,22 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
   await test.step("first-run setup with the link from the server log", async () => {
     const link = await setupLinkFromServerLog();
     await page.goto(link);
-    await expect(page.getByRole("heading", { name: "Set up MongoShield" })).toBeVisible();
-    // The token comes from the link; the operator only chooses a password.
-    await expect(page.getByLabel("Setup token")).not.toHaveValue("");
-    await page.getByLabel("Admin username").fill(ADMIN.username);
+    await expect(page.getByRole("heading", { name: "Welcome to MongoShield" })).toBeVisible();
+    // The token comes from the link (optional while the setup window is open, but a
+    // token that is given is used); the operator only chooses a name and a password.
+    await expect(page.getByLabel(/^Setup token/)).not.toHaveValue("");
+    await page.getByLabel("User name").fill(ADMIN.username);
     await page.getByLabel("Password", { exact: true }).fill(ADMIN.password);
-    await page.getByLabel("Repeat password").fill(ADMIN.password);
-    await page.getByRole("button", { name: "Create admin and sign in" }).click();
-    await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+    await page.getByRole("button", { name: "Create account and continue" }).click();
+    // A console without connections starts on the welcome page; this journey sets
+    // things up by hand, so it skips it (e2e/onboarding.spec.ts takes the quick path).
+    await expect(
+      page.getByRole("heading", { name: "Connect your database", level: 1 }),
+    ).toBeVisible();
     // The single-use token is removed from the address bar and history.
     expect(page.url()).not.toContain("token=");
+    await page.getByRole("button", { name: "Skip for now" }).click();
+    await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
   });
 
   await test.step("sign out and sign in again", async () => {
@@ -175,6 +182,8 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
 
   await test.step("the backup appears in the catalog, verified", async () => {
     await page.getByRole("link", { name: "Backups", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Backups", level: 1 })).toBeVisible();
+    await showJourneyStorage(page);
     const row = page.getByRole("row", { name: new RegExp(recipientBackupId) });
     await expect(row.getByText("Verified (fast)")).toBeVisible();
     await row.getByRole("link", { name: recipientBackupId }).click();
@@ -197,6 +206,9 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
     await goTo(page, "/plans/new");
     const form = page.getByRole("form", { name: "Backup plan" });
     await form.getByLabel("Name").fill(PASSPHRASE_PLAN);
+    // The same location as the first plan (the editor preselects the first one, which is
+    // the console's own "Local backups").
+    await form.getByLabel("Storage").selectOption({ label: NAMES.storage });
     await form.getByLabel("Include").fill(`${SEED.database}.${SEED.orders}`);
     await form.getByLabel("Exclude").fill("");
     await form.getByLabel("Encryption").selectOption({ label: "Passphrase" });
@@ -212,35 +224,41 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
 
   await test.step("browse its documents with a filter and paging", async () => {
     await openBackup(page, passphraseBackupId, "Browse documents");
+    // The backup's namespaces are a tree; the documents a table (the default view).
     await page
-      .getByLabel("Namespace")
-      .selectOption({ label: `${SEED.database}.${SEED.orders} (${SEED.orderCount})` });
-    const firstPage = page.getByRole("list", { name: "Documents on page 1" });
-    await expect(firstPage.getByRole("listitem")).toHaveCount(20);
+      .getByRole("tree", { name: "Databases and collections in the backup" })
+      .getByRole("treeitem", { name: new RegExp(`^${SEED.orders}`) })
+      .click();
+    const rows = page.getByRole("table", { name: "Documents" }).locator("tbody tr[data-index]");
+    await expect(rows).toHaveCount(20);
     await page.getByRole("button", { name: "Next page" }).click();
-    const secondPage = page.getByRole("list", { name: "Documents on page 2" });
-    await expect(secondPage.getByRole("listitem")).toHaveCount(20);
+    await expect(page.getByText(`Page 2 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
+    await expect(rows).toHaveCount(20);
     await page.getByRole("button", { name: "Previous page" }).click();
-    await expect(firstPage.getByRole("listitem")).toHaveCount(20);
+    await expect(page.getByText(`Page 1 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
 
     // One in three orders is open: 40 documents, two pages of 20.
     await page.getByLabel("Filter (Extended JSON)").fill('{"status": "open"}');
-    await page.getByRole("button", { name: "Apply filter" }).click();
+    await page.getByRole("button", { name: "Apply", exact: true }).click();
     await expect(page.getByText(/· filtered/)).toBeVisible();
-    await expect(firstPage.getByRole("listitem")).toHaveCount(20);
-    await expect(firstPage.getByRole("listitem").first()).toContainText("open");
+    await expect(rows).toHaveCount(20);
+    await expect(rows.first()).toContainText("open");
     await page.getByRole("button", { name: "Next page" }).click();
-    await expect(secondPage.getByRole("listitem")).toHaveCount(20);
+    await expect(page.getByText(`Page 2 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
+    await expect(rows).toHaveCount(20);
     await expect(page.getByRole("button", { name: "Next page" })).toBeDisabled();
     await page.getByRole("button", { name: "Previous page" }).click();
+    await expect(page.getByText(`Page 1 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
   });
 
   await test.step("restore two selected documents into renamed collections", async () => {
-    const firstPage = page.getByRole("list", { name: "Documents on page 1" });
+    const rows = page.getByRole("table", { name: "Documents" }).locator("tbody tr[data-index]");
     for (const index of [0, 1]) {
-      const choice = firstPage.getByRole("listitem").nth(index).locator(".document-select");
-      selectedIds.push(Number(await choice.textContent()));
-      await choice.getByRole("checkbox").check();
+      const choice = rows.nth(index).getByRole("checkbox", { name: /^Select document / });
+      // The checkbox is named after the document's `_id` ("Select document 4").
+      const label = (await choice.getAttribute("aria-label")) ?? "";
+      selectedIds.push(Number(label.replace("Select document ", "")));
+      await choice.check();
     }
     await page.getByRole("button", { name: "Restore selected (2)" }).click();
 
@@ -401,7 +419,7 @@ test("an admin sets up the console, backs up, browses, restores and audits", asy
     await goTo(page, "/plans");
     await page.getByRole("button", { name: `Run now ${NAMES.plan}` }).click();
     expect(await waitForJob(page)).toBe("Succeeded");
-    await goTo(page, "/backups");
+    await showJourneyStorage(page);
     await expect(page.getByRole("row", { name: new RegExp(passphraseBackupId) })).toBeVisible();
     await expect(page.getByRole("row", { name: new RegExp(recipientBackupId) })).toHaveCount(0);
 
@@ -460,9 +478,19 @@ async function backupIdOnJobPage(page: Page): Promise<string> {
   return id;
 }
 
+/**
+ * Picks the journey's storage location on the Backups page. The page starts on the
+ * first location, which is the "Local backups" the console created by itself.
+ */
+async function showJourneyStorage(page: Page): Promise<void> {
+  const storageId = await idByName(page.request, "/api/storage", NAMES.storage);
+  await goTo(page, `/backups?storage=${encodeURIComponent(storageId)}`);
+  await expect(page.getByLabel("Storage", { exact: true })).toHaveValue(storageId);
+}
+
 /** Opens a backup of the journey's storage location, optionally on one tab. */
 async function openBackup(page: Page, backupId: string, tab?: string): Promise<void> {
-  await goTo(page, "/backups");
+  await showJourneyStorage(page);
   await page.getByRole("link", { name: backupId }).click();
   await expect(page.getByRole("heading", { name: backupId, level: 1 })).toBeVisible();
   if (tab !== undefined) await page.getByRole("tab", { name: tab }).click();

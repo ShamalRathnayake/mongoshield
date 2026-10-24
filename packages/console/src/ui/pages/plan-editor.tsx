@@ -256,12 +256,15 @@ export function validatePlanForm(
   const encryption: PlanInput["encryption"] =
     form.encryptionKind === "none"
       ? { kind: "none" }
-      : form.encryptionKind === "recipients"
-        ? { kind: "recipients", recipients }
-        : {
-            kind: "passphrase",
-            ...(form.passphrase === "" ? {} : { passphrase: form.passphrase }),
-          };
+      : form.encryptionKind === "managed"
+        ? // The server keeps the plan's key, or generates one for a plan that had none.
+          { kind: "managed" }
+        : form.encryptionKind === "recipients"
+          ? { kind: "recipients", recipients }
+          : {
+              kind: "passphrase",
+              ...(form.passphrase === "" ? {} : { passphrase: form.passphrase }),
+            };
 
   const input: PlanInput = {
     name: form.name.trim(),
@@ -554,6 +557,7 @@ function PlanEditorForm(props: {
                   label="Encryption"
                   value={form.encryptionKind}
                   options={[
+                    { value: "managed", label: "Key kept by the console — easiest" },
                     { value: "recipients", label: "Public keys (age recipients) — recommended" },
                     { value: "passphrase", label: "Passphrase" },
                     { value: "none", label: "No encryption" },
@@ -587,6 +591,14 @@ function PlanEditorForm(props: {
                     }
                     error={errors.passphrase}
                   />
+                ) : null}
+                {form.encryptionKind === "managed" ? (
+                  <Notice tone="info">
+                    The console creates a key, encrypts every backup with it and uses it to restore,
+                    so nobody has to type a key. Download the recovery key (from the connection's
+                    data page after the first backup) and keep it somewhere safe: it restores the
+                    backups even if the console is lost.
+                  </Notice>
                 ) : null}
                 {form.encryptionKind === "none" ? (
                   <Notice tone="warning">

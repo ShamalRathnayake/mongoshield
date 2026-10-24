@@ -61,6 +61,11 @@ export interface ConsoleServices {
   readonly now: () => Date;
   /** The live data browser: pooled MongoDB clients and the live edit journal. */
   readonly live: { readonly clients: LiveClients; readonly journal: LiveJournal };
+  /**
+   * First-run setup without the token: allowed until this moment while no admin exists
+   * (MONGOSHIELD_SETUP_WINDOW_MINUTES after start). Absent: setup always needs the token.
+   */
+  readonly setupWindowEndsAt?: Date;
 }
 
 /** Who is making a request, once authenticated. */

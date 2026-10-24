@@ -36,6 +36,8 @@ beforeAll(async () => {
     pipeline: [{ $match: { _id: 1 } }],
   });
   await database.createCollection("metrics", { timeseries: { timeField: "at" } });
+  // A capped collection: the tree marks it from its listCollections options.
+  await database.createCollection("events", { capped: true, size: 4096 });
 });
 
 afterAll(async () => {
@@ -80,6 +82,7 @@ describe("namespaceTree", () => {
     const node = tree.find((database) => database.name === db);
     expect(node?.collections).toEqual([
       { name: "active_users", type: "view", estimatedDocuments: 0, indexes: 0 },
+      { name: "events", type: "collection", estimatedDocuments: 0, indexes: 1, capped: true },
       expect.objectContaining({ name: "metrics", type: "timeseries" }),
       { name: "users", type: "collection", estimatedDocuments: 2, indexes: 1 },
     ]);

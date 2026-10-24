@@ -16,6 +16,7 @@
 import { createHash } from "node:crypto";
 import { BSON, type Document, Double, Int32, Long } from "mongodb";
 import type { LiveDocument } from "../../shared/api.ts";
+import { relaxedText } from "../ejson-text.ts";
 import { invalid } from "../errors.ts";
 import { MAX_FILTER_LENGTH, parseExtendedJsonFilter } from "../filter.ts";
 
@@ -89,7 +90,8 @@ export function idLabelOf(id: unknown): string {
 
 /** A document as the browser receives it. `editable: false` for partial (projected) reads. */
 export function liveDocumentView(document: Document, editable: boolean): LiveDocument {
-  const json = BSON.EJSON.stringify(document, { relaxed: true });
+  // Relaxed, but with Int64 values beyond 2^53 kept exact (ejson-text.ts).
+  const json = relaxedText(document);
   if (!("_id" in document)) return { json };
   return {
     json,
@@ -256,7 +258,7 @@ export interface MergedEdit {
  * Field order follows the edited document (the user may reorder fields).
  */
 export function mergeEdit(original: Document, edited: Document): MergedEdit {
-  const roundTrip = fromExtendedJson(BSON.EJSON.stringify(original, { relaxed: true }));
+  const roundTrip = fromExtendedJson(relaxedText(original));
   const changed: string[] = [];
   const document = mergeValue(original, roundTrip, edited, "", changed);
   // Fields the user deleted are changes too.

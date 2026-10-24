@@ -26,6 +26,11 @@ function planPassphraseContext(planId: string): string {
   return `plan:${planId}:passphrase`;
 }
 
+/** AES-GCM context of a plan's managed private key (its recovery key). */
+function planIdentityContext(planId: string): string {
+  return `plan:${planId}:identity`;
+}
+
 /** AES-GCM context of a plan's notification URLs. */
 function planNotifyContext(planId: string): string {
   return `plan:${planId}:notify`;
@@ -77,6 +82,17 @@ export function sealPlanPassphrase(store: StateStore, planId: string, passphrase
 export function openPlanPassphrase(store: StateStore, plan: PlanRecord): string | undefined {
   if (plan.encryption.kind !== "passphrase") return undefined;
   return store.decrypt(plan.encryption.passphrase, planPassphraseContext(plan.id));
+}
+
+/** Encrypts a plan's managed private key (`AGE-SECRET-KEY-1…`). */
+export function sealPlanIdentity(store: StateStore, planId: string, identity: string): string {
+  return store.encrypt(identity, planIdentityContext(planId));
+}
+
+/** The plaintext private key of a plan with a managed key, else `undefined`. */
+export function openPlanIdentity(store: StateStore, plan: PlanRecord): string | undefined {
+  if (plan.encryption.kind !== "managed") return undefined;
+  return store.decrypt(plan.encryption.identity, planIdentityContext(plan.id));
 }
 
 /** Encrypts one notification URL of a plan. */

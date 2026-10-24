@@ -6,6 +6,7 @@
  *   PUT  /api/connections/:id/live-edits     admin      turn live edits on/off (production: name + reason)
  *   GET  /api/live/:id/collection?ns=        operator   stats, indexes, whether the caller may write
  *   GET  /api/live/:id/documents?ns=…        operator   a page of documents (audited: live.browse)
+ *   (samples and exports of live data: browse-extras.ts)
  *   POST /api/live/:id/documents             data:write insert one
  *   PUT  /api/live/:id/documents             data:write replace one (conditional on its version)
  *   POST /api/live/:id/documents/delete      data:write delete one (conditional on its version)
@@ -30,7 +31,6 @@ import {
   type LiveCount,
   type LiveDocumentPage,
   type LiveEditEntryDetail,
-  type LiveIndexView,
   type LiveUndoResult,
   type LiveWriteResult,
 } from "../../shared/api.ts";
@@ -45,6 +45,7 @@ import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
 import type { AppEnv, ConsoleServices, Principal } from "../context.ts";
 import { ConsoleError, invalid, isKnownError } from "../errors.ts";
+import { parseEjsonMode } from "../export-format.ts";
 import { assertLiveWritable, liveWriteRefusal, requireLiveWriter } from "../live/access.ts";
 import {
   applySingleEdit,
@@ -64,6 +65,8 @@ import {
   undoJob,
   writableCollectionOf,
 } from "../live/apply.ts";
+import { isSharedTier, markSharedTier } from "../live/atlas-tier.ts";
+import { collectionStatsOf } from "../live/collection-stats.ts";
 import {
   FAITHFUL_READ,
   fromExtendedJson,
@@ -77,6 +80,7 @@ import {
   parseSort,
   parseUpdate,
   parseVersion,
+  toCanonical,
   versionOf,
 } from "../live/documents.ts";
 import { entryById, entryView, isUndoable, updateEntry } from "../live/history.ts";
@@ -180,16 +184,25 @@ export function liveRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
         info.type === "view" ? "view" : info.type === "timeseries" ? "timeseries" : "collection";
       const collection = db.collection(namespace.collection);
       const refusal = readOnlyReason(principal, connection, type);
+      // Views have no stats or indexes. Collections: ONE $collStats call for sizes and
+      // index sizes; a refusal (Atlas Free/Flex, missing privilege) becomes a reason in
+      // words, never an error.
+      const stats = type === "view" ? undefined : await collectionStatsOf(collection);
+      const { atlasRefused, ...statsFields } = stats ?? { atlasRefused: false, indexes: [] };
+      // Atlas refusing $collStats proves a shared tier; otherwise ask (cached per client).
+      if (atlasRefused) markSharedTier(client);
+      const sharedTier = await isSharedTier(client);
       const result: LiveCollectionInfo = {
         ns: namespace.ns,
         type,
+        // The metadata estimate; a refusal shows as 0 rather than failing the page.
         estimatedDocuments:
           type === "view" ? 0 : await collection.estimatedDocumentCount().catch(() => 0),
         capped: Reflect.get(Object(info.options), "capped") === true,
-        ...(type === "view" ? {} : await storageStatsOf(collection)),
-        indexes: type === "view" ? [] : await indexesOf(collection),
+        ...statsFields,
         writable: refusal === undefined,
         ...(refusal === undefined ? {} : { readOnlyReason: refusal }),
+        ...(sharedTier ? { sharedTier } : {}),
       };
       return c.json(result);
     });
@@ -208,6 +221,7 @@ export function liveRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       max: MAX_PAGE_SIZE,
       fallback: DEFAULT_PAGE_SIZE,
     });
+    const ejson = parseEjsonMode(c.req.query("ejson"));
     const projected = projection !== undefined && Object.keys(projection).length > 0;
     return withDriverErrors(services, connection, async () => {
       const collection = await collectionOf(deps, connection, namespace);
@@ -219,12 +233,18 @@ export function liveRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
           skip,
           limit: limit + 1,
           maxTimeMS: QUERY_TIMEOUT_MS,
+          // The browser went away (new query, closed tab): stop the query on the server too.
+          signal: c.req.raw.signal,
           ...FAITHFUL_READ,
         })
         .toArray();
       const documents = read.slice(0, limit);
       const page: LiveDocumentPage = {
-        documents: documents.map((document) => liveDocumentView(document, !projected)),
+        documents: documents.map((document) => ({
+          ...liveDocumentView(document, !projected),
+          // The JSON view shows every BSON type explicitly; only sent when asked for.
+          ...(ejson === "canonical" ? { canonical: toCanonical(document) } : {}),
+        })),
         skip,
         limit,
         count: await countOf(collection, filter, skip + read.length),
@@ -670,82 +690,6 @@ async function countOf(
   }
 }
 
-/** Sizes from `$collStats` (summed over shards); absent when the user may not read them. */
-async function storageStatsOf(
-  collection: Collection<Document>,
-): Promise<
-  Pick<
-    LiveCollectionInfo,
-    "sizeBytes" | "storageSizeBytes" | "averageDocumentBytes" | "totalIndexBytes"
-  >
-> {
-  try {
-    const stats = await collection.aggregate([{ $collStats: { storageStats: {} } }]).toArray();
-    let sizeBytes = 0;
-    let storageSizeBytes = 0;
-    let totalIndexBytes = 0;
-    let count = 0;
-    for (const shard of stats) {
-      const storageStats: unknown = shard.storageStats;
-      sizeBytes += numberField(storageStats, "size");
-      storageSizeBytes += numberField(storageStats, "storageSize");
-      totalIndexBytes += numberField(storageStats, "totalIndexSize");
-      count += numberField(storageStats, "count");
-    }
-    return {
-      sizeBytes,
-      storageSizeBytes,
-      totalIndexBytes,
-      averageDocumentBytes: count === 0 ? 0 : Math.round(sizeBytes / count),
-    };
-  } catch {
-    return {};
-  }
-}
-
-/** The indexes of a collection, with their sizes when `$collStats` has them. */
-async function indexesOf(collection: Collection<Document>): Promise<LiveIndexView[]> {
-  const sizes = new Map<string, number>();
-  try {
-    const stats = await collection.aggregate([{ $collStats: { storageStats: {} } }]).toArray();
-    for (const shard of stats) {
-      const indexSizes: unknown = Reflect.get(Object(shard.storageStats), "indexSizes");
-      for (const [name, size] of Object.entries(Object(indexSizes))) {
-        if (typeof size === "number") sizes.set(name, (sizes.get(name) ?? 0) + size);
-      }
-    }
-  } catch {
-    // Sizes are optional.
-  }
-  const indexes = await collection.listIndexes().toArray();
-  return indexes.map((index): LiveIndexView => {
-    const name = String(index.name);
-    const size = sizes.get(name);
-    return {
-      name,
-      key: BSON.EJSON.stringify(index.key, { relaxed: true }),
-      unique: index.unique === true,
-      sparse: index.sparse === true,
-      hidden: index.hidden === true,
-      ...(typeof index.expireAfterSeconds === "number"
-        ? { expireAfterSeconds: index.expireAfterSeconds }
-        : {}),
-      ...(index.partialFilterExpression === undefined
-        ? {}
-        : {
-            partialFilter: BSON.EJSON.stringify(index.partialFilterExpression, { relaxed: true }),
-          }),
-      ...(size === undefined ? {} : { sizeBytes: size }),
-    };
-  });
-}
-
-/** A numeric field of an unknown object, or 0. */
-function numberField(value: unknown, name: string): number {
-  const field: unknown = Reflect.get(Object(value), name);
-  return typeof field === "number" ? field : 0;
-}
-
 /** The first journaled documents of an entry, as relaxed Extended JSON. */
 async function detailRecords(
   services: ConsoleServices,
@@ -929,8 +873,11 @@ async function undoSingle(
  * the request (a bad operator, a validation rule) become `400 CONSOLE_LIVE_QUERY` with
  * the server's message; anything else (network, authentication) becomes
  * `502 MS_CONNECTION_FAILED`. The connection URI is scrubbed from every message.
+ * A request the browser aborted (its signal was passed to the driver) becomes a quiet
+ * `MS_ABORTED`: nobody is listening for the answer, and it is not worth a log line.
+ * Also used by the sample and export routes (browse-extras.ts).
  */
-async function withDriverErrors(
+export async function withDriverErrors(
   services: ConsoleServices,
   connection: ConnectionRecord,
   handler: () => Promise<Response>,
@@ -939,6 +886,9 @@ async function withDriverErrors(
     return await handler();
   } catch (error) {
     if (isKnownError(error)) throw error;
+    if (isAbortError(error)) {
+      throw new MongoShieldError("MS_ABORTED", "The request was cancelled.");
+    }
     const uri = openConnectionUri(services.store, connection);
     const message = scrubText(error instanceof Error ? error.message : String(error), [uri]);
     if (error instanceof MongoServerError) {
@@ -948,4 +898,9 @@ async function withDriverErrors(
       hint: "Test the connection for details.",
     });
   }
+}
+
+/** True for the error an aborted `AbortSignal` makes the driver throw (its default reason). */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

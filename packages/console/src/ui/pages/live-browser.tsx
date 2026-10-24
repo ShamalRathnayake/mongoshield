@@ -1,31 +1,44 @@
 /**
- * The live data browser (`#/connections/:id/data?ns=db.collection`): the databases and
- * collections of a connection on the left, and on the right the chosen collection's
- * documents, indexes and statistics, read straight from MongoDB.
+ * The live data browser (`#/connections/:id/data?ns=db.collection`): a navigation tree of
+ * connections, databases and collections on the left, and the chosen collection on the
+ * right, read straight from MongoDB.
  *
- * - Reading needs the operator role (customer data, like the backup document browser),
- *   and every page read is recorded in the audit log by the server.
- * - The query form takes a filter, projection and sort as Extended JSON, checked in the
- *   browser before any request. Paging uses skip/limit; the count is the collection's
- *   estimate without a filter, else counted (up to a limit).
+ * - The tree shows every connection; the current one is open, others load their
+ *   databases when opened. It remembers the last collection opened per connection, and
+ *   opening the page without one goes back to it.
+ * - The collection's documents are shown by the shared document viewer
+ *   (components/document-viewer.tsx) as a table, trees, JSON, cards, a schema or a chart,
+ *   with the shared query bar (filter with suggestions, sort, projection, history, quick
+ *   filters from any value) and an export of the current result.
+ * - Reading needs the operator role (customer data, like the backup document browser);
+ *   the server audits every page read. Paging uses skip/limit; the count is the
+ *   collection's estimate without a filter, else counted up to a limit.
+ * - Schema samples and field suggestions are background work: requested only when
+ *   needed and paced per connection (slower on Atlas Free/Flex, which the server reports
+ *   as `sharedTier`), see pacer.ts.
  * - Changing documents is opt-in: the buttons appear only when the server says the
  *   collection is writable for this user (`data:write` permission AND live edits allowed
  *   on the connection). Otherwise the page says why it is read-only. Documents read with
- *   a projection are partial and never editable.
- * - Every write is conditional and journaled by the server, so it can be undone from
- *   the Edit history page; see live-editor.tsx for the dialogs.
+ *   a projection are partial and never editable. Every write is conditional and
+ *   journaled by the server (live-editor.tsx has the dialogs).
  */
 
-import { type FormEvent, useState } from "react";
-import type {
-  DatabaseNode,
-  LiveCollectionInfo,
-  LiveCount,
-  LiveDocument,
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ConnectionView,
+  type DatabaseNode,
+  LIVE_SAMPLE_DEFAULT_SIZE,
+  type LiveCollectionInfo,
+  type LiveCount,
+  type LiveDocument,
 } from "../../shared/api.ts";
+import { describeError } from "../api.ts";
+import { columnsOf } from "../bson.ts";
 import { Button } from "../components/button.tsx";
-import { EjsonTree } from "../components/code-block.tsx";
-import { SelectField, TextAreaField } from "../components/field.tsx";
+import { CollectionTree, type CollectionTreeNode } from "../components/collection-tree.tsx";
+import { DocumentViewer } from "../components/document-viewer.tsx";
+import { ExportButton } from "../components/export-button.tsx";
+import { collectionIcon, Icon } from "../components/icons.tsx";
 import {
   EmptyState,
   ErrorNotice,
@@ -33,16 +46,26 @@ import {
   Loading,
   Notice,
   PageHeader,
-  Panel,
   Tabs,
 } from "../components/layout.tsx";
+import { QueryBar } from "../components/query-bar.tsx";
 import { Table } from "../components/table.tsx";
 import { useToast } from "../components/toast.tsx";
-import { useApi, useLoad } from "../context.tsx";
-import { checkFilter, documentIdLabel, isJsonObject, parseDocument } from "../ejson.ts";
-import { formatBytes, formatNumber } from "../format.ts";
-import { checkProjection, checkSort } from "../live-query.ts";
-import { buildHref, navigate, segment } from "../router.ts";
+import { useApi, useLoad, useSession } from "../context.tsx";
+import { describeSample, useDocumentQuery, useSample } from "../document-query.ts";
+import { formatBytes, formatCompact, formatNumber } from "../format.ts";
+import { DEFAULT_GAP_MS, pacerFor, SHARED_TIER_GAP_MS, SUGGESTION_DEBOUNCE_MS } from "../pacer.ts";
+import { buildHref, navigate, replaceQuery, segment } from "../router.ts";
+import { fieldPaths } from "../schema.ts";
+import {
+  lastCollection,
+  loadPrefs,
+  rememberCollection,
+  updatePrefs,
+  type ViewMode,
+} from "../view-prefs.ts";
+import { toViewerDocuments, type ViewerDocument } from "../viewer-model.ts";
+import { BackupActions } from "./backup-actions.tsx";
 import {
   BulkEditDialog,
   DeleteDocumentDialog,
@@ -52,7 +75,10 @@ import {
 
 /** Page sizes offered; the API allows at most 100. */
 const PAGE_SIZES = ["20", "50", "100"] as const;
-type PageSize = (typeof PAGE_SIZES)[number];
+/** Up to this many databases, all of them start open in the tree. */
+const SMALL_DEPLOYMENT_DATABASES = 4;
+/** Documents sampled for the schema on an Atlas shared tier (the server caps it at 200). */
+const SHARED_TIER_SAMPLE_SIZE = 100;
 
 /** Props for `LiveBrowserPage`. */
 export interface LiveBrowserPageProps {
@@ -61,25 +87,49 @@ export interface LiveBrowserPageProps {
   readonly ns?: string | undefined;
 }
 
+/** `"shop.orders"` → `["shop", "orders"]` (collection names may contain dots). */
+export function splitNamespace(ns: string): [string, string] {
+  const dot = ns.indexOf(".");
+  return dot === -1 ? [ns, ""] : [ns.slice(0, dot), ns.slice(dot + 1)];
+}
+
 /** The live data browser page. */
 export function LiveBrowserPage(props: LiveBrowserPageProps) {
   const client = useApi();
-  const { connectionId } = props;
+  const { connectionId, ns } = props;
   const connections = useLoad("connections", (signal) =>
     client.call("GET /api/connections", undefined, { signal }),
   );
-  const tree = useLoad<readonly DatabaseNode[]>(`namespaces:${connectionId}`, (signal) =>
-    client.call("GET /api/connections/:id/namespaces", undefined, {
-      params: { id: connectionId },
-      signal,
-    }),
-  );
+  const trees = useNamespaceTrees(connectionId);
+  const treeData = trees.get(connectionId)?.data;
   const connection = connections.data?.find((candidate) => candidate.id === connectionId);
+
+  // Opening the page without a collection goes back to the last one opened here.
+  useEffect(() => {
+    if (ns !== undefined && ns !== "") {
+      rememberCollection(connectionId, ns);
+      return;
+    }
+    const last = lastCollection(connectionId);
+    if (last === undefined || treeData === undefined) return;
+    const [db, name] = splitNamespace(last);
+    const exists = treeData.some(
+      (database) =>
+        database.name === db && database.collections.some((entry) => entry.name === name),
+    );
+    if (exists) replaceQuery({ ns: last });
+  }, [connectionId, ns, treeData]);
+
+  const selected = ns === undefined || ns === "" ? undefined : ns;
+  const [db, collectionName] = selected === undefined ? ["", ""] : splitNamespace(selected);
+  const dataHref = buildHref(`/connections/${segment(connectionId)}/data`);
   const breadcrumbs = [
     { label: "Connections", href: "#/connections" },
     ...(connection === undefined
       ? []
       : [{ label: connection.name, href: buildHref(`/connections/${segment(connectionId)}`) }]),
+    selected === undefined ? { label: "Live data" } : { label: "Live data", href: dataHref },
+    ...(selected === undefined ? [] : [{ label: db }, { label: collectionName }]),
   ];
 
   if (connections.error !== undefined) {
@@ -89,7 +139,7 @@ export function LiveBrowserPage(props: LiveBrowserPageProps) {
   if (connection === undefined) {
     return (
       <>
-        <PageHeader title="Connection not found" breadcrumbs={breadcrumbs} />
+        <PageHeader title="Connection not found" breadcrumbs={breadcrumbs.slice(0, 1)} />
         <p>
           It may have been deleted. <a href="#/connections">Back to connections</a>
         </p>
@@ -102,12 +152,13 @@ export function LiveBrowserPage(props: LiveBrowserPageProps) {
       <PageHeader
         title={`${connection.name}: live data`}
         breadcrumbs={breadcrumbs}
-        description="Documents read straight from the databases of this connection. Changes, where allowed, are journaled and can be undone from Edit history."
+        description="Read straight from MongoDB. Pick a collection on the left."
         actions={
           <a
             className="button button-secondary"
             href={buildHref("/edit-history", { connection: connectionId })}
           >
+            <Icon name="history" size={14} />
             Edit history of this connection
           </a>
         }
@@ -117,27 +168,27 @@ export function LiveBrowserPage(props: LiveBrowserPageProps) {
           These are live production documents.
         </Notice>
       ) : null}
-      <div className="live-layout">
-        <nav className="live-tree panel" aria-label="Collections">
-          {tree.error !== undefined ? (
-            <ErrorNotice error={tree.error} onRetry={tree.reload} />
-          ) : null}
-          {tree.data === undefined ? (
-            tree.error === undefined ? (
-              <Loading label="Listing databases…" />
-            ) : null
-          ) : (
-            <CollectionList connectionId={connectionId} tree={tree.data} selected={props.ns} />
-          )}
+      {/* Back up now / progress / next steps for this connection (backup-actions.tsx). */}
+      <BackupActions connectionId={connectionId} />
+      <div className="browser-layout">
+        <nav className="browser-nav panel" aria-label="Collections">
+          <ConnectionTree
+            connections={connections.data}
+            currentId={connectionId}
+            trees={trees}
+            selectedNs={selected}
+          />
         </nav>
-        <div className="live-main">
-          {props.ns === undefined || props.ns === "" ? (
-            <EmptyState title="Choose a collection">
-              Pick a collection on the left to see its documents, indexes and statistics.
-            </EmptyState>
+        <div className="browser-main">
+          {selected === undefined ? (
+            <div className="panel">
+              <EmptyState title="Choose a collection">
+                Pick a collection on the left to see its documents, indexes and statistics.
+              </EmptyState>
+            </div>
           ) : (
-            // Keyed by namespace so the query form and paging start fresh per collection.
-            <CollectionView key={props.ns} connectionId={connectionId} ns={props.ns} />
+            // Keyed by namespace so the query, paging and views start fresh per collection.
+            <CollectionView key={selected} connectionId={connectionId} ns={selected} />
           )}
         </div>
       </div>
@@ -145,44 +196,199 @@ export function LiveBrowserPage(props: LiveBrowserPageProps) {
   );
 }
 
-/** Databases with their collections as links (the selected one marked `aria-current`). */
-function CollectionList(props: {
-  connectionId: string;
-  tree: readonly DatabaseNode[];
-  selected: string | undefined;
+// ---------------------------------------------------------------------------
+// The navigation tree
+// ---------------------------------------------------------------------------
+
+/** One connection's namespace tree as loaded so far (empty object: loading). */
+interface TreeLoad {
+  readonly data?: readonly DatabaseNode[];
+  readonly error?: unknown;
+}
+
+/** The trees of the connections that were opened, with a `load(id)` for more. */
+interface NamespaceTrees {
+  get(id: string): TreeLoad | undefined;
+  load(id: string): void;
+  /** Reads a tree again after it failed. */
+  retry(id: string): void;
+}
+
+/**
+ * Namespace trees per connection: the current connection's at once, others on demand
+ * (opening them in the tree), one request each per visit to the page.
+ */
+function useNamespaceTrees(currentId: string): NamespaceTrees {
+  const client = useApi();
+  const [loads, setLoads] = useState<ReadonlyMap<string, TreeLoad>>(new Map());
+  const [wanted, setWanted] = useState<ReadonlySet<string>>(() => new Set([currentId]));
+  if (!wanted.has(currentId)) setWanted(new Set([...wanted, currentId]));
+
+  /** Ids already requested (a ref, so a re-render or a second effect run never repeats one). */
+  const started = useRef(new Set<string>());
+  useEffect(() => {
+    for (const id of wanted) {
+      if (started.current.has(id)) continue;
+      started.current.add(id);
+      setLoads((current) => new Map(current).set(id, {}));
+      // Not aborted on unmount: the tree is small, and a late answer is simply dropped.
+      client.call("GET /api/connections/:id/namespaces", undefined, { params: { id } }).then(
+        (data) => setLoads((current) => new Map(current).set(id, { data })),
+        (error: unknown) => setLoads((current) => new Map(current).set(id, { error })),
+      );
+    }
+  }, [client, wanted]);
+
+  return {
+    get: (id) => loads.get(id),
+    load: (id) => {
+      if (!wanted.has(id)) setWanted(new Set([...wanted, id]));
+    },
+    retry: (id) => {
+      started.current.delete(id);
+      setLoads((current) => {
+        const next = new Map(current);
+        next.delete(id);
+        return next;
+      });
+      // A new set re-runs the loading effect, which starts the request again.
+      setWanted(new Set(wanted));
+    },
+  };
+}
+
+/** "3 collections, 12 MiB on disk". */
+function databaseTitle(database: DatabaseNode): string {
+  const count = database.collections.length;
+  const size =
+    database.sizeBytes === undefined ? "" : `, ${formatBytes(database.sizeBytes)} on disk`;
+  return `${database.name}: ${count} ${count === 1 ? "collection" : "collections"}${size}`;
+}
+
+/** Tree nodes of one connection's databases and collections. */
+function databaseNodes(
+  connectionId: string,
+  databases: readonly DatabaseNode[],
+): CollectionTreeNode[] {
+  return databases.map((database) => ({
+    id: `db:${connectionId}:${database.name}`,
+    label: database.name,
+    icon: "database",
+    kind: "database",
+    meta:
+      database.sizeBytes === undefined
+        ? String(database.collections.length)
+        : `${database.collections.length} · ${formatBytes(database.sizeBytes)}`,
+    title: databaseTitle(database),
+    children: database.collections.map((collection): CollectionTreeNode => {
+      const ns = `${database.name}.${collection.name}`;
+      const note =
+        collection.type === "view"
+          ? "view"
+          : collection.type === "timeseries"
+            ? "time series"
+            : collection.capped === true
+              ? "capped"
+              : undefined;
+      const details =
+        collection.type === "view"
+          ? "a view"
+          : `about ${formatNumber(collection.estimatedDocuments)} documents, ${collection.indexes} ${collection.indexes === 1 ? "index" : "indexes"}`;
+      const size =
+        collection.sizeBytes === undefined ? "" : `, ${formatBytes(collection.sizeBytes)}`;
+      return {
+        id: `ns:${connectionId}:${ns}`,
+        label: collection.name,
+        icon: collectionIcon(collection.type, collection.capped),
+        kind: "collection",
+        href: buildHref(`/connections/${segment(connectionId)}/data`, { ns }),
+        ...(note === undefined ? {} : { note }),
+        ...(collection.type === "view"
+          ? {}
+          : { meta: formatCompact(collection.estimatedDocuments) }),
+        title: `${ns}: ${details}${size}`,
+      };
+    }),
+  }));
+}
+
+/** The sidebar: every connection, the current one open. */
+function ConnectionTree(props: {
+  connections: readonly ConnectionView[];
+  currentId: string;
+  trees: NamespaceTrees;
+  selectedNs: string | undefined;
 }) {
-  if (props.tree.length === 0) {
-    return (
-      <EmptyState title="No databases">This connection has no databases you can read.</EmptyState>
-    );
-  }
+  const { trees, currentId } = props;
+  const roots: CollectionTreeNode[] = props.connections.map((connection) => {
+    const load = trees.get(connection.id);
+    const loading = load !== undefined && load.data === undefined && load.error === undefined;
+    return {
+      id: `conn:${connection.id}`,
+      label: connection.name,
+      icon: "server",
+      kind: "connection",
+      ...(connection.production ? { note: "production" } : {}),
+      ...(load?.data === undefined ? {} : { children: databaseNodes(connection.id, load.data) }),
+      ...(loading ? { loading: true } : {}),
+      ...(load?.error === undefined ? {} : { error: describeError(load.error), children: [] }),
+    };
+  });
+  const [db] = props.selectedNs === undefined ? [""] : splitNamespace(props.selectedNs);
+  // Open by default: the current connection, and the selected collection's database (or,
+  // with nothing selected yet, every database of a small deployment).
+  const databases = trees.get(currentId)?.data ?? [];
+  const openDatabases =
+    db !== ""
+      ? [`db:${currentId}:${db}`]
+      : databases.length <= SMALL_DEPLOYMENT_DATABASES
+        ? databases.map((database) => `db:${currentId}:${database.name}`)
+        : [];
+  const currentError = trees.get(currentId)?.error;
   return (
-    <ul className="live-databases">
-      {props.tree.map((database) => (
-        <li key={database.name}>
-          <span className="live-database-name">{database.name}</span>
-          <ul className="live-collections">
-            {database.collections.map((collection) => {
-              const ns = `${database.name}.${collection.name}`;
-              return (
-                <li key={ns}>
-                  <a
-                    href={buildHref(`/connections/${segment(props.connectionId)}/data`, { ns })}
-                    aria-current={props.selected === ns ? "page" : undefined}
-                    className="live-collection-link"
-                  >
-                    {collection.name}
-                    {collection.type === "collection" ? null : (
-                      <span className="muted"> ({collection.type})</span>
-                    )}
-                  </a>
-                </li>
-              );
-            })}
-          </ul>
-        </li>
-      ))}
-    </ul>
+    <>
+      {currentError === undefined ? null : (
+        <ErrorNotice
+          error={currentError}
+          title="Could not list the databases"
+          onRetry={() => trees.retry(currentId)}
+        />
+      )}
+      <CollectionTree
+        label="Connections, databases and collections"
+        roots={roots}
+        selectedId={
+          props.selectedNs === undefined ? undefined : `ns:${currentId}:${props.selectedNs}`
+        }
+        defaultExpanded={[`conn:${currentId}`, ...openDatabases]}
+        onToggle={(node, open) => {
+          if (open && node.kind === "connection") trees.load(node.id.slice("conn:".length));
+        }}
+        empty="No connections."
+      />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// One collection
+// ---------------------------------------------------------------------------
+
+/** The type of a collection in words. */
+function typeLabel(info: LiveCollectionInfo): string {
+  if (info.type === "view") return "View";
+  if (info.type === "timeseries") return "Time series";
+  return info.capped ? "Capped collection" : "Collection";
+}
+
+/** A size, or "—" with the reason as tooltip when MongoDB would not say (Atlas shared tiers). */
+function SizeValue(props: { bytes: number | undefined; reason: string | undefined }) {
+  if (props.bytes !== undefined) return <>{formatBytes(props.bytes)}</>;
+  const reason = props.reason ?? "Not reported by MongoDB";
+  return (
+    <span className="muted" title={reason}>
+      —<span className="visually-hidden"> ({reason})</span>
+    </span>
   );
 }
 
@@ -205,45 +411,66 @@ function CollectionView(props: { connectionId: string; ns: string }) {
   if (info.data === undefined) return <Loading label="Reading the collection…" />;
   const collection = info.data;
   return (
-    <Panel title={collection.ns}>
-      <p className="muted live-summary">
-        {collection.type === "collection"
-          ? "Collection"
-          : collection.type === "view"
-            ? "View"
-            : "Time series"}
-        {" · about "}
-        {formatNumber(collection.estimatedDocuments)} documents
-        {collection.sizeBytes === undefined ? "" : ` · ${formatBytes(collection.sizeBytes)}`}
-        {` · ${collection.indexes.length === 1 ? "1 index" : `${collection.indexes.length} indexes`}`}
-      </p>
-      <Tabs
-        label="Collection"
-        tabs={[
-          { id: "documents", label: "Documents" },
-          { id: "indexes", label: "Indexes" },
-          { id: "stats", label: "Stats" },
-        ]}
-        selected={tab}
-        onSelect={setTab}
-      >
-        {tab === "documents" ? (
-          <DocumentsTab connectionId={props.connectionId} collection={collection} />
-        ) : tab === "indexes" ? (
-          <IndexesTab collection={collection} />
-        ) : (
-          <StatsTab collection={collection} />
-        )}
-      </Tabs>
-    </Panel>
+    <section className="panel collection-panel" aria-labelledby="collection-title">
+      <header className="collection-header">
+        <div className="collection-heading">
+          <Icon
+            name={collectionIcon(collection.type, collection.capped)}
+            size={18}
+            className="collection-icon"
+          />
+          <h2 id="collection-title" className="collection-title">
+            {collection.ns}
+          </h2>
+          <span
+            className={collection.writable ? "badge badge-success" : "badge badge-neutral"}
+            title={
+              collection.writable
+                ? "You may change documents here; every change is journaled and can be undone."
+                : collection.readOnlyReason
+            }
+          >
+            {collection.writable ? "Editable" : "Read-only"}
+          </span>
+          {collection.sharedTier === true ? (
+            <span
+              className="badge badge-neutral"
+              title="Atlas Free and Flex clusters are throttled, so the console samples fewer documents and spaces out the queries it runs on its own."
+            >
+              Atlas shared tier
+            </span>
+          ) : null}
+        </div>
+        <p className="collection-facts muted">
+          {typeLabel(collection)}
+          {" · about "}
+          {formatNumber(collection.estimatedDocuments)} documents
+          {collection.sizeBytes === undefined ? "" : ` · ${formatBytes(collection.sizeBytes)}`}
+          {` · ${collection.indexes.length === 1 ? "1 index" : `${collection.indexes.length} indexes`}`}
+        </p>
+      </header>
+      <div className="panel-body">
+        <Tabs
+          label="Collection"
+          tabs={[
+            { id: "documents", label: "Documents" },
+            { id: "indexes", label: "Indexes" },
+            { id: "stats", label: "Stats" },
+          ]}
+          selected={tab}
+          onSelect={setTab}
+        >
+          {tab === "documents" ? (
+            <DocumentsTab connectionId={props.connectionId} collection={collection} />
+          ) : tab === "indexes" ? (
+            <IndexesTab collection={collection} />
+          ) : (
+            <StatsTab collection={collection} />
+          )}
+        </Tabs>
+      </div>
+    </section>
   );
-}
-
-/** The applied query of the Documents tab (compact JSON strings, or undefined). */
-interface AppliedQuery {
-  readonly filter: string | undefined;
-  readonly projection: string | undefined;
-  readonly sort: string | undefined;
 }
 
 /** "about 45", "45" or "at least 10,000" documents. */
@@ -260,31 +487,39 @@ type Overlay =
   | { readonly kind: "delete"; readonly document: LiveDocument }
   | { readonly kind: "bulk"; readonly op: "update" | "delete" };
 
-/** The documents of a collection: query form, documents, paging and the write actions. */
+/** The documents of a collection: query bar, viewer, paging and the write actions. */
 function DocumentsTab(props: { connectionId: string; collection: LiveCollectionInfo }) {
   const client = useApi();
   const toast = useToast();
-  const { collection } = props;
+  const { hasRole } = useSession();
+  const { collection, connectionId } = props;
   const ns = collection.ns;
-  const [text, setText] = useState({ filter: "", projection: "", sort: "" });
-  const [problems, setProblems] = useState<{ filter?: string; projection?: string; sort?: string }>(
-    {},
-  );
-  const [applied, setApplied] = useState<AppliedQuery>({
-    filter: undefined,
-    projection: undefined,
-    sort: undefined,
-  });
-  const [pageSize, setPageSize] = useState<PageSize>("20");
+  const scope = `live:${connectionId}:${ns}`;
+  const [view, setViewState] = useState<ViewMode>(() => loadPrefs(scope).view ?? "table");
+  const [pageSize, setPageSize] = useState<string>("20");
   const [skip, setSkip] = useState(0);
+  const [canonical, setCanonical] = useState(false);
+  const [wantFields, setWantFields] = useState(false);
   const [overlay, setOverlay] = useState<Overlay | undefined>(undefined);
+  const query = useDocumentQuery(scope, { sortAndProjection: true, onApplied: () => setSkip(0) });
+  const { applied } = query;
   const limit = Number(pageSize);
 
+  const setView = (next: ViewMode) => {
+    setViewState(next);
+    updatePrefs(scope, { view: next });
+  };
+
+  // Background queries of this connection go one at a time, slower on Atlas shared tiers.
+  const pacer = pacerFor(`live:${connectionId}`);
+  pacer.setGap(collection.sharedTier === true ? SHARED_TIER_GAP_MS : DEFAULT_GAP_MS);
+
+  const wantCanonical = canonical && view === "json";
   const page = useLoad(
-    JSON.stringify([props.connectionId, ns, applied, pageSize, skip]),
+    JSON.stringify([connectionId, ns, applied, pageSize, skip, wantCanonical]),
     (signal) =>
       client.call("GET /api/live/:id/documents", undefined, {
-        params: { id: props.connectionId },
+        params: { id: connectionId },
         query: {
           ns,
           filter: applied.filter,
@@ -292,26 +527,57 @@ function DocumentsTab(props: { connectionId: string; collection: LiveCollectionI
           sort: applied.sort,
           skip: skip === 0 ? undefined : skip,
           limit: pageSize,
+          ejson: wantCanonical ? "canonical" : undefined,
         },
         signal,
       }),
   );
 
-  const apply = (event: FormEvent) => {
-    event.preventDefault();
-    const filter = checkFilter(text.filter);
-    const projection = checkProjection(text.projection);
-    const sort = checkSort(text.sort);
-    const next = {
-      ...(filter.ok ? {} : { filter: filter.message }),
-      ...(projection.ok ? {} : { projection: projection.message }),
-      ...(sort.ok ? {} : { sort: sort.message }),
-    };
-    setProblems(next);
-    if (!filter.ok || !projection.ok || !sort.ok) return;
-    setApplied({ filter: filter.filter, projection: projection.value, sort: sort.value });
-    setSkip(0);
+  const sample = useSample(
+    JSON.stringify([connectionId, ns, applied.filter]),
+    view === "schema" || view === "chart" || wantFields,
+    pacer,
+    (signal) =>
+      client.call("GET /api/live/:id/sample", undefined, {
+        params: { id: connectionId },
+        query: {
+          ns,
+          filter: applied.filter,
+          size: collection.sharedTier === true ? SHARED_TIER_SAMPLE_SIZE : LIVE_SAMPLE_DEFAULT_SIZE,
+        },
+        signal,
+      }),
+  );
+
+  // Field suggestions: sample once the filter box has had focus for a moment.
+  const [suggestTimer, setSuggestTimer] = useState<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  useEffect(() => () => clearTimeout(suggestTimer), [suggestTimer]);
+  const onWantFields = () => {
+    if (wantFields || suggestTimer !== undefined) return;
+    setSuggestTimer(setTimeout(() => setWantFields(true), SUGGESTION_DEBOUNCE_MS));
   };
+
+  const liveDocuments = page.data?.documents;
+  const documents = useMemo(
+    () =>
+      toViewerDocuments(
+        (liveDocuments ?? []).map((document) => document.json),
+        (liveDocuments ?? []).map((document) => document.canonical),
+      ),
+    [liveDocuments],
+  );
+  /** The live document behind a viewer document (same position on the page). */
+  const liveOf = (document: ViewerDocument) => liveDocuments?.[documents.indexOf(document)];
+
+  const fields = useMemo(() => {
+    const paths = new Set([
+      ...columnsOf(documents.map((document) => document.value)),
+      ...fieldPaths(sample.summary),
+    ]);
+    return [...paths];
+  }, [documents, sample.summary]);
 
   /** After a write: say so, close the dialog and read the page again. */
   const saved = (message: string) => {
@@ -324,74 +590,124 @@ function DocumentsTab(props: { connectionId: string; collection: LiveCollectionI
     setOverlay(undefined);
     page.reload();
   };
+  const onCopied = (ok: boolean, what: string) =>
+    toast.show(
+      ok ? "success" : "error",
+      ok
+        ? `Copied the ${what}.`
+        : "The browser refused to copy. Select the text and copy it by hand.",
+    );
 
   const writable = collection.writable;
   const projected = page.data?.projected === true;
-  const documents = page.data?.documents ?? [];
   const first = documents.length === 0 ? 0 : skip + 1;
   const last = skip + documents.length;
 
+  /** Edit / Duplicate / Delete for one document, when allowed. */
+  const writeActions = (document: ViewerDocument) => {
+    const live = liveOf(document);
+    if (!writable || live === undefined || live.version === undefined) return null;
+    return (
+      <>
+        <Button
+          size="small"
+          aria-label={`Edit document ${document.label}`}
+          onClick={() => setOverlay({ kind: "editor", mode: { kind: "edit", document: live } })}
+        >
+          <Icon name="edit" size={12} />
+          Edit
+        </Button>
+        <Button
+          size="small"
+          aria-label={`Duplicate document ${document.label}`}
+          onClick={() =>
+            setOverlay({ kind: "editor", mode: { kind: "duplicate", document: live } })
+          }
+        >
+          <Icon name="duplicate" size={12} />
+          Duplicate
+        </Button>
+        <Button
+          size="small"
+          variant="danger"
+          aria-label={`Delete document ${document.label}`}
+          onClick={() => setOverlay({ kind: "delete", document: live })}
+        >
+          <Icon name="trash" size={12} />
+          Delete
+        </Button>
+      </>
+    );
+  };
+
+  const pager = (label?: string) => (
+    <Pager
+      page={Math.floor(skip / limit) + 1}
+      hasPrevious={skip > 0}
+      hasNext={page.data?.hasMore === true}
+      busy={page.loading}
+      onPrevious={() => setSkip(Math.max(0, skip - limit))}
+      onNext={() => setSkip(skip + limit)}
+      {...(label === undefined ? {} : { label })}
+    />
+  );
+
   return (
     <div className="live-documents">
-      <form className="live-query" onSubmit={apply} noValidate>
-        <TextAreaField
-          label="Filter (Extended JSON)"
-          value={text.filter}
-          onValue={(value) => setText({ ...text, filter: value })}
-          rows={2}
-          spellCheck={false}
-          placeholder='{"status": "paid"}'
-          error={problems.filter}
-        />
-        <TextAreaField
-          label="Projection"
-          value={text.projection}
-          onValue={(value) => setText({ ...text, projection: value })}
-          rows={2}
-          spellCheck={false}
-          placeholder='{"name": 1, "email": 1}'
-          hint="Projected documents are partial and read-only."
-          error={problems.projection}
-        />
-        <TextAreaField
-          label="Sort"
-          value={text.sort}
-          onValue={(value) => setText({ ...text, sort: value })}
-          rows={2}
-          spellCheck={false}
-          placeholder='{"_id": -1}'
-          error={problems.sort}
-        />
-        <SelectField<PageSize>
-          label="Per page"
-          value={pageSize}
-          options={PAGE_SIZES.map((size) => ({ value: size, label: size }))}
-          onValue={(value) => {
-            setPageSize(value);
-            setSkip(0);
-          }}
-        />
-        <div className="browser-buttons">
-          <Button type="submit" variant="primary">
-            Apply
-          </Button>
-        </div>
-      </form>
+      <QueryBar
+        text={query.text}
+        onText={query.setText}
+        problems={query.problems}
+        onApply={() => void query.apply()}
+        onReset={query.reset}
+        fields={fields}
+        onWantFields={onWantFields}
+        sortAndProjection
+        pageSize={pageSize}
+        pageSizes={PAGE_SIZES}
+        onPageSize={(size) => {
+          setPageSize(size);
+          setSkip(0);
+        }}
+        history={query.history}
+        onHistory={query.applyHistory}
+        chips={query.chips}
+        onRemoveChip={query.removeChip}
+        busy={page.loading}
+        onCancel={page.cancel}
+      />
 
       {writable ? (
         <div className="live-actions">
-          <Button onClick={() => setOverlay({ kind: "editor", mode: { kind: "insert" } })}>
+          <Button
+            size="small"
+            variant="primary"
+            onClick={() => setOverlay({ kind: "editor", mode: { kind: "insert" } })}
+          >
+            <Icon name="plus" size={14} />
             Insert document
           </Button>
-          <Button onClick={() => setOverlay({ kind: "bulk", op: "update" })}>Update many…</Button>
-          <Button variant="danger" onClick={() => setOverlay({ kind: "bulk", op: "delete" })}>
+          <Button size="small" onClick={() => setOverlay({ kind: "bulk", op: "update" })}>
+            Update many…
+          </Button>
+          <Button
+            size="small"
+            variant="danger"
+            onClick={() => setOverlay({ kind: "bulk", op: "delete" })}
+          >
             Delete many…
           </Button>
+          <span className="muted live-actions-note">
+            Every change is journaled and can be undone from Edit history.
+          </span>
         </div>
       ) : (
-        <Notice tone="info">
-          Read-only: {collection.readOnlyReason ?? "changing documents is not allowed here."}
-        </Notice>
+        <p className="read-only-note">
+          <Icon name="key" size={14} />
+          <span>
+            Read-only: {collection.readOnlyReason ?? "changing documents is not allowed here."}
+          </span>
+        </p>
       )}
       {writable && projected ? (
         <Notice tone="info">
@@ -400,93 +716,77 @@ function DocumentsTab(props: { connectionId: string; collection: LiveCollectionI
         </Notice>
       ) : null}
 
-      <p className="browser-status" aria-live="polite">
-        {page.data === undefined
-          ? ""
-          : `Showing ${formatNumber(first)}–${formatNumber(last)} of ${describeCount(page.data.count)} documents`}
-        {applied.filter === undefined ? "" : " · filtered"}
-      </p>
+      <div className="results-bar">
+        <p className="browser-status" aria-live="polite">
+          {page.data === undefined
+            ? ""
+            : `Showing ${formatNumber(first)}–${formatNumber(last)} of ${describeCount(page.data.count)} documents`}
+          {applied.filter === undefined ? "" : " · filtered"}
+        </p>
+        {pager("Document pages")}
+      </div>
       {page.error !== undefined ? (
         <ErrorNotice error={page.error} title="Could not read documents" onRetry={page.reload} />
       ) : null}
-      {page.loading ? <Loading label="Reading documents…" /> : null}
-      {!page.loading && page.data !== undefined && documents.length === 0 ? (
-        <EmptyState title="No documents">
-          {applied.filter === undefined
-            ? "This collection is empty."
-            : "No documents match the filter."}
-        </EmptyState>
-      ) : null}
 
-      <ol className="document-list" aria-label="Documents">
-        {documents.map((document, index) => {
-          const parsed = parseDocument(document.json);
-          const label = documentIdLabel(parsed);
-          const editable = writable && document.version !== undefined;
-          return (
-            <li key={document.id ?? `${skip + index}`} className="document-card">
-              <div className="live-document-header">
-                <span className="mono">{label}</span>
-                {editable ? (
-                  <span className="row-actions">
-                    <Button
-                      size="small"
-                      aria-label={`Edit document ${label}`}
-                      onClick={() =>
-                        setOverlay({ kind: "editor", mode: { kind: "edit", document } })
-                      }
-                    >
-                      Edit
-                    </Button>
-                    <Button
-                      size="small"
-                      aria-label={`Duplicate document ${label}`}
-                      onClick={() =>
-                        setOverlay({ kind: "editor", mode: { kind: "duplicate", document } })
-                      }
-                    >
-                      Duplicate
-                    </Button>
-                    <Button
-                      size="small"
-                      variant="danger"
-                      aria-label={`Delete document ${label}`}
-                      onClick={() => setOverlay({ kind: "delete", document })}
-                    >
-                      Delete
-                    </Button>
-                  </span>
-                ) : null}
-              </div>
-              {parsed === undefined || !isJsonObject(parsed) ? (
-                <pre className="mono">{document.json}</pre>
-              ) : (
-                <EjsonTree value={parsed} />
-              )}
-            </li>
-          );
-        })}
-      </ol>
-
-      <nav className="pager" aria-label="Document pages">
-        <Button
-          disabled={skip === 0 || page.loading}
-          onClick={() => setSkip(Math.max(0, skip - limit))}
-        >
-          Previous page
-        </Button>
-        <span className="numeric">Page {formatNumber(Math.floor(skip / limit) + 1)}</span>
-        <Button
-          disabled={page.data?.hasMore !== true || page.loading}
-          onClick={() => setSkip(skip + limit)}
-        >
-          Next page
-        </Button>
-      </nav>
+      <DocumentViewer
+        scope={scope}
+        view={view}
+        onView={setView}
+        documents={documents}
+        firstNumber={skip + 1}
+        loading={page.loading}
+        empty={
+          <EmptyState title="No documents">
+            {applied.filter === undefined
+              ? "This collection is empty."
+              : "No documents match the filter."}
+          </EmptyState>
+        }
+        sort={query.sort}
+        onSort={query.sortBy}
+        onQuickFilter={(filter) => {
+          const problem = query.quickFilter(filter);
+          if (problem !== undefined) toast.show("error", problem);
+        }}
+        sample={{
+          summary: sample.summary,
+          description: describeSample(sample.sample, applied.filter !== undefined),
+          loading: sample.loading,
+          error: sample.error,
+          reload: sample.reload,
+        }}
+        canonical={{ on: canonical, onToggle: setCanonical }}
+        detailActions={writeActions}
+        documentActions={writeActions}
+        onCopied={onCopied}
+        toolbar={
+          hasRole("operator") ? (
+            <ExportButton
+              disabled={page.data === undefined}
+              run={(choice) =>
+                client.call("GET /api/live/:id/export", undefined, {
+                  params: { id: connectionId },
+                  query: {
+                    ns,
+                    filter: applied.filter,
+                    projection: applied.projection,
+                    sort: applied.sort,
+                    format: choice.format,
+                    limit: choice.limit,
+                    ejson: choice.ejson === "canonical" ? "canonical" : undefined,
+                  },
+                })
+              }
+              onDone={(message, tone) => toast.show(tone, message)}
+            />
+          ) : null
+        }
+      />
 
       {overlay?.kind === "editor" ? (
         <DocumentEditorDialog
-          connectionId={props.connectionId}
+          connectionId={connectionId}
           ns={ns}
           mode={overlay.mode}
           onClose={() => setOverlay(undefined)}
@@ -496,7 +796,7 @@ function DocumentsTab(props: { connectionId: string; collection: LiveCollectionI
       ) : null}
       {overlay?.kind === "delete" ? (
         <DeleteDocumentDialog
-          connectionId={props.connectionId}
+          connectionId={connectionId}
           ns={ns}
           document={overlay.document}
           onClose={() => setOverlay(undefined)}
@@ -506,7 +806,7 @@ function DocumentsTab(props: { connectionId: string; collection: LiveCollectionI
       ) : null}
       {overlay?.kind === "bulk" ? (
         <BulkEditDialog
-          connectionId={props.connectionId}
+          connectionId={connectionId}
           ns={ns}
           op={overlay.op}
           {...(applied.filter === undefined ? {} : { initialFilter: applied.filter })}
@@ -519,6 +819,49 @@ function DocumentsTab(props: { connectionId: string; collection: LiveCollectionI
         />
       ) : null}
     </div>
+  );
+}
+
+/** Previous / next page buttons with the page number between them. */
+export function Pager(props: {
+  page: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+  busy: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+  /** Accessible name; the pager with one is a navigation landmark (one per page). */
+  label?: string;
+}) {
+  const buttons = (
+    <>
+      <Button
+        size="small"
+        disabled={!props.hasPrevious || props.busy}
+        onClick={props.onPrevious}
+        aria-label="Previous page"
+      >
+        <Icon name="chevronLeft" size={14} />
+        Previous
+      </Button>
+      <span className="numeric pager-page">Page {formatNumber(props.page)}</span>
+      <Button
+        size="small"
+        disabled={!props.hasNext || props.busy}
+        onClick={props.onNext}
+        aria-label="Next page"
+      >
+        Next
+        <Icon name="chevronRight" size={14} />
+      </Button>
+    </>
+  );
+  return props.label === undefined ? (
+    <div className="pager">{buttons}</div>
+  ) : (
+    <nav className="pager" aria-label={props.label}>
+      {buttons}
+    </nav>
   );
 }
 
@@ -559,31 +902,46 @@ function IndexesTab(props: { collection: LiveCollectionInfo }) {
           header: "Size",
           align: "end",
           sortValue: (index) => index.sizeBytes,
-          render: (index) => formatBytes(index.sizeBytes),
+          render: (index) => (
+            <SizeValue bytes={index.sizeBytes} reason={props.collection.statsUnavailable} />
+          ),
         },
       ]}
     />
   );
 }
 
-/** Size statistics of a collection. */
+/** Size statistics of a collection ("—" with the reason when MongoDB would not report them). */
 function StatsTab(props: { collection: LiveCollectionInfo }) {
   const { collection } = props;
+  const reason = collection.statsUnavailable;
   return (
-    <KeyValueList
-      items={[
-        ["Type", collection.type],
-        ["Documents (estimate)", formatNumber(collection.estimatedDocuments)],
-        ["Data size", formatBytes(collection.sizeBytes)],
-        ["Storage size", formatBytes(collection.storageSizeBytes)],
-        ["Average document", formatBytes(collection.averageDocumentBytes)],
-        ["Index size", formatBytes(collection.totalIndexBytes)],
-        ["Capped", collection.capped ? "Yes" : "No"],
-        [
-          "Changes from the console",
-          collection.writable ? "Allowed for you" : (collection.readOnlyReason ?? "Not allowed"),
-        ],
-      ]}
-    />
+    <>
+      {reason === undefined ? null : <p className="muted">Sizes are not available: {reason}</p>}
+      <KeyValueList
+        items={[
+          ["Type", collection.type],
+          ["Documents (estimate)", formatNumber(collection.estimatedDocuments)],
+          ["Data size", <SizeValue key="data" bytes={collection.sizeBytes} reason={reason} />],
+          [
+            "Storage size",
+            <SizeValue key="storage" bytes={collection.storageSizeBytes} reason={reason} />,
+          ],
+          [
+            "Average document",
+            <SizeValue key="average" bytes={collection.averageDocumentBytes} reason={reason} />,
+          ],
+          [
+            "Index size",
+            <SizeValue key="index" bytes={collection.totalIndexBytes} reason={reason} />,
+          ],
+          ["Capped", collection.capped ? "Yes" : "No"],
+          [
+            "Changes from the console",
+            collection.writable ? "Allowed for you" : (collection.readOnlyReason ?? "Not allowed"),
+          ],
+        ]}
+      />
+    </>
   );
 }

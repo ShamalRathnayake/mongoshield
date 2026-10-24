@@ -16,15 +16,17 @@
 import type { Hono } from "hono";
 import { MongoShieldError, redactMongoUri } from "mongoshield";
 import { connectionById } from "../../jobs/tasks.ts";
+import type { ConnectionTestResult } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
 import { scrubText } from "../../state/redact.ts";
 import { openConnectionUri, sealConnectionUri } from "../../state/secrets.ts";
-import type { ConnectionRecord } from "../../state/types.ts";
+import type { ConnectionRecord, DeploymentRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
+import { inspectConnection, normalizeConnectionUri, recallCheck } from "../connection-check.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
 import { ConsoleError, invalid, notFound } from "../errors.ts";
-import { namespaceTree, testConnection } from "../mongo-inspect.ts";
+import { namespaceTree } from "../mongo-inspect.ts";
 import { readJson } from "../security.ts";
 import {
   asObject,
@@ -63,9 +65,12 @@ export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): 
       production,
       createdAt: services.now().toISOString(),
     };
+    // Checked a moment ago on the welcome page? Keep what the check found out.
+    const deployment = recallCheck(services, uri);
+    const stored: ConnectionRecord = deployment === undefined ? record : { ...record, deployment };
     await store.update((state) => {
       assertNameFree(state.connections, name, undefined);
-      state.connections = [...state.connections, record];
+      state.connections = [...state.connections, stored];
     });
     await recordAudit(services, {
       actor: principal,
@@ -74,7 +79,7 @@ export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): 
       outcome: "success",
       details: { id, production },
     });
-    return c.json(connectionView(record));
+    return c.json(connectionView(stored));
   });
 
   app.put("/api/connections/:id", async (c) => {
@@ -148,7 +153,8 @@ export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): 
   app.post("/api/connections/:id/test", async (c) => {
     const principal = requireRole(c, "operator");
     const connection = connectionById(store, c.req.param("id"));
-    const result = await testConnection(openConnectionUri(store, connection));
+    const result = await inspectConnection(openConnectionUri(store, connection));
+    if (result.ok) await rememberDeployment(services, connection.id, result);
     await recordAudit(services, {
       actor: principal,
       action: "connection.test",
@@ -175,14 +181,15 @@ export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): 
   });
 }
 
-/** The optional `uri` field: a MongoDB connection string. */
-function uriField(body: Fields): string | undefined {
+/**
+ * The optional `uri` field: a MongoDB connection string, cleaned and checked like a
+ * pasted one (quotes and `mongosh "…"` removed, raw special characters in the password
+ * encoded, placeholders such as `<db_password>` refused), see connection-check.ts.
+ */
+export function uriField(body: Fields): string | undefined {
   const uri = optionalString(body, "uri", MAX_URI_LENGTH);
   if (uri === undefined) return undefined;
-  if (!/^mongodb(\+srv)?:\/\//i.test(uri.trim())) {
-    throw invalid('"uri" must start with mongodb:// or mongodb+srv://.');
-  }
-  return uri.trim();
+  return normalizeConnectionUri(uri);
 }
 
 /**
@@ -207,6 +214,33 @@ function liveEditsAfterUpdate(
       changedAt: now.toISOString(),
       reason: "Turned off because the connection was marked production.",
     },
+  };
+}
+
+/**
+ * Keeps what a successful test found out (topology, version, Atlas tier) on the
+ * connection, so pages can show it as badges without connecting again.
+ */
+export async function rememberDeployment(
+  services: ConsoleServices,
+  connectionId: string,
+  result: ConnectionTestResult,
+): Promise<void> {
+  const deployment: DeploymentRecord = deploymentOf(result, services.now());
+  await services.store.update((state) => {
+    state.connections = state.connections.map((connection) =>
+      connection.id === connectionId ? { ...connection, deployment } : connection,
+    );
+  });
+}
+
+/** The deployment record of a successful test. */
+export function deploymentOf(result: ConnectionTestResult, now: Date): DeploymentRecord {
+  return {
+    checkedAt: now.toISOString(),
+    ...(result.topology === undefined ? {} : { topology: result.topology }),
+    ...(result.serverVersion === undefined ? {} : { serverVersion: result.serverVersion }),
+    ...(result.atlas === undefined ? {} : { atlas: result.atlas.tier }),
   };
 }
 

@@ -3,7 +3,7 @@
  * (paging and filter validation).
  */
 
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, requestsTo } from "../testing.tsx";
 
@@ -72,25 +72,32 @@ describe("document browser", () => {
     const rendered = renderApp({ signedInAs: "maya" });
     const id = newestCompleteId(rendered.backend);
     window.location.hash = `#/backups/st-s3/${id}?tab=browse`;
-    await screen.findByRole("list", { name: "Documents on page 1" });
-    await screen.findAllByText(/ObjectId\(/);
-    return { ...rendered, id };
+    const table = await screen.findByRole("table", { name: "Documents" });
+    await within(table).findAllByRole("button", { name: /^Open document/ });
+    return { ...rendered, id, table };
+  }
+
+  /** The document rows of the table view (not its header). */
+  function documentRows(table: HTMLElement): HTMLElement[] {
+    return within(table)
+      .getAllByRole("row")
+      .filter((row) => row.hasAttribute("data-index"));
   }
 
   it("pages forward and back with the server's cursor", async () => {
-    const { user, backend } = await openBrowser();
-    const list = screen.getByRole("list", { name: "Documents on page 1" });
-    expect(within(list).getAllByRole("listitem")).toHaveLength(20);
+    const { user, backend, table } = await openBrowser();
+    expect(documentRows(table)).toHaveLength(20);
+    expect(screen.getByText(/^Page 1 of shop.users/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Previous page" })).toHaveProperty("disabled", true);
 
     await user.click(screen.getByRole("button", { name: "Next page" }));
-    await screen.findByRole("list", { name: "Documents on page 2" });
+    expect(await screen.findByText(/^Page 2 of shop.users/)).toBeTruthy();
     const pageRequests = requestsTo(backend, "GET", "/api/storage/st-s3/backups/");
     expect(pageRequests.at(-1)?.url).toContain("after=20");
     expect(pageRequests.at(-1)?.url).toContain("ns=shop.users");
 
     await user.click(screen.getByRole("button", { name: "Previous page" }));
-    expect(await screen.findByRole("list", { name: "Documents on page 1" })).toBeTruthy();
+    expect(await screen.findByText(/^Page 1 of shop.users/)).toBeTruthy();
   });
 
   it("validates the Extended JSON filter before sending it", async () => {
@@ -100,44 +107,49 @@ describe("document browser", () => {
 
     await user.click(filter);
     await user.paste("{plan: 'pro'}");
-    await user.click(screen.getByRole("button", { name: "Apply filter" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(screen.getByText(/Not valid Extended JSON/)).toBeTruthy();
     expect(filter.getAttribute("aria-invalid")).toBe("true");
 
     await user.clear(filter);
     await user.paste('{"plan": {"$equals": "pro"}}');
-    await user.click(screen.getByRole("button", { name: "Apply filter" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(screen.getByText(/Unknown operator "\$equals"/)).toBeTruthy();
     expect(requestsTo(backend, "GET", "/api/storage/st-s3/backups/")).toHaveLength(before);
 
     await user.clear(filter);
     await user.paste('{ "plan": "pro" }');
-    await user.click(screen.getByRole("button", { name: "Apply filter" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
     await screen.findByText(/· filtered/);
     const last = requestsTo(backend, "GET", "/api/storage/st-s3/backups/").at(-1);
     expect(decodeURIComponent(last?.url ?? "")).toContain('filter={"plan":"pro"}');
-    // Every 5th generated user is on the pro plan.
-    const proBadges = await screen.findAllByText('"pro"');
-    expect(proBadges.length).toBe(20);
-    expect(screen.queryByText('"free"')).toBeNull();
+    // Every 5th generated user is on the pro plan; the table shows each plan once per row.
+    const table = screen.getByRole("table", { name: "Documents" });
+    await waitFor(() => expect(within(table).getAllByText("pro")).toHaveLength(20));
+    expect(within(table).queryByText("free")).toBeNull();
+    // The applied filter shows as a removable chip.
+    expect(screen.getByText('plan is "pro"')).toBeTruthy();
   });
 
-  it("collapses and expands nested values with the keyboard-accessible toggles", async () => {
+  it("collapses and expands nested values with the keyboard-accessible tree", async () => {
     const { user } = await openBrowser();
-    const [firstCard] = within(
-      screen.getByRole("list", { name: "Documents on page 1" }),
-    ).getAllByRole("listitem");
-    if (firstCard === undefined) throw new Error("no documents");
-    const addressToggle = within(firstCard).getByRole("button", { name: /address/ });
-    expect(addressToggle.getAttribute("aria-expanded")).toBe("false");
-    await user.click(addressToggle);
-    expect(addressToggle.getAttribute("aria-expanded")).toBe("true");
-    expect(within(firstCard).getByText('"Colombo"')).toBeTruthy();
+    await user.click(screen.getByRole("radio", { name: "Tree" }));
+    const [firstTree] = await screen.findAllByRole("tree", { name: /^Document / });
+    if (firstTree === undefined) throw new Error("no documents");
+    const address = within(firstTree).getByRole("treeitem", { name: /^address/ });
+    expect(address.getAttribute("aria-expanded")).toBe("false");
+    await user.click(address);
+    expect(address.getAttribute("aria-expanded")).toBe("true");
+    expect(within(firstTree).getByText('"Colombo"')).toBeTruthy();
+    // ← closes it again from the keyboard.
+    address.focus();
+    await user.keyboard("{ArrowLeft}");
+    expect(address.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("selects documents and starts a restore limited to them", async () => {
     const { user, id } = await openBrowser();
-    const checkboxes = screen.getAllByRole("checkbox");
+    const checkboxes = screen.getAllByRole("checkbox", { name: /^Select document/ });
     await user.click(checkboxes[0] as HTMLElement);
     await user.click(checkboxes[1] as HTMLElement);
     await user.click(screen.getByRole("button", { name: "Restore selected (2)" }));

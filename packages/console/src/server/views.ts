@@ -34,6 +34,7 @@ export function connectionView(connection: ConnectionRecord): ConnectionView {
     production: connection.production,
     createdAt: connection.createdAt,
     liveEdits: liveEditSettingsView(connection),
+    ...(connection.deployment === undefined ? {} : { deployment: { ...connection.deployment } }),
   };
 }
 
@@ -65,10 +66,7 @@ export function planView(
     include: plan.include,
     exclude: plan.exclude,
     compression: plan.compression,
-    encryption:
-      plan.encryption.kind === "passphrase"
-        ? { kind: "passphrase", passphrase: { configured: true } }
-        : plan.encryption,
+    encryption: encryptionView(plan.encryption),
     consistency: plan.consistency,
     ...(plan.schedule === undefined ? {} : { schedule: plan.schedule }),
     ...(plan.retention === undefined ? {} : { retention: plan.retention }),
@@ -80,5 +78,27 @@ export function planView(
     })),
     ...(extra.nextRunAt === undefined ? {} : { nextRunAt: extra.nextRunAt.toISOString() }),
     ...(extra.lastRun === undefined ? {} : { lastRun: extra.lastRun }),
+    ...(plan.origin === undefined ? {} : { origin: plan.origin }),
   };
+}
+
+/**
+ * A plan's encryption without its secrets: a passphrase becomes `configured`, a managed
+ * key shows only its public half and whether the recovery key was saved.
+ */
+function encryptionView(encryption: PlanRecord["encryption"]): PlanView["encryption"] {
+  switch (encryption.kind) {
+    case "none":
+      return { kind: "none" };
+    case "recipients":
+      return { kind: "recipients", recipients: encryption.recipients };
+    case "passphrase":
+      return { kind: "passphrase", passphrase: { configured: true } };
+    case "managed":
+      return {
+        kind: "managed",
+        recipient: encryption.recipient,
+        recoveryKeySaved: encryption.recoveryKeySavedAt !== undefined,
+      };
+  }
 }

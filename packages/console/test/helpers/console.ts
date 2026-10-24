@@ -16,7 +16,12 @@ import { MongoClient } from "mongodb";
 import { inject } from "vitest";
 import { type ConsoleAppOptions, createConsoleApp } from "../../src/server/app.ts";
 import type { AppEnv, ConsoleServices, ConsoleSettings } from "../../src/server/context.ts";
-import { closeConsole, type OpenConsoleOptions, openConsole } from "../../src/server/services.ts";
+import {
+  closeConsole,
+  type OpenConsoleOptions,
+  type OpenedConsole,
+  openConsole,
+} from "../../src/server/services.ts";
 import type { Permission, Role, SessionInfo } from "../../src/shared/api.ts";
 
 declare module "vitest" {
@@ -61,6 +66,8 @@ export interface TestConsole {
   readonly app: Hono<AppEnv>;
   readonly clock: TestClock;
   readonly setupToken: string | undefined;
+  /** What the console did at startup (see `OpenedConsole` in src/server/services.ts). */
+  readonly opened: OpenedConsole;
   /** Every response body seen by any client of this console. */
   readonly transcript: string[];
   /** A new browser-like client. */
@@ -80,13 +87,15 @@ export interface StartOptions {
   readonly oidcProvider?: OpenConsoleOptions["oidcProvider"];
   /** Options for the HTTP app (e.g. a journal status reader for /metrics). */
   readonly app?: Omit<ConsoleAppOptions, "heartbeatMs">;
+  /** First-run behaviour (setup window, environment admin, default storage). */
+  readonly firstRun?: Pick<OpenConsoleOptions, "setupWindowMs" | "initialAdmin" | "defaultStorage">;
 }
 
 /** Opens a console on a (new, by default) temporary data directory. */
 export async function startConsole(options: StartOptions = {}): Promise<TestConsole> {
   const dataDir = options.dataDir ?? (await mkdtemp(join(tmpdir(), "ms-console-")));
   const clock = options.clock ?? new TestClock();
-  const { services, setupToken } = await openConsole({
+  const opened = await openConsole({
     dataDir,
     secret: options.secret ?? TEST_SECRET,
     passwordCost: TEST_PASSWORD_COST,
@@ -94,8 +103,15 @@ export async function startConsole(options: StartOptions = {}): Promise<TestCons
     progressIntervalMs: 0,
     settings: { cookieSecure: false, ...options.settings },
     ...(options.oidcProvider === undefined ? {} : { oidcProvider: options.oidcProvider }),
+    ...options.firstRun,
   });
-  const app = createConsoleApp(services, { heartbeatMs: 50, ...options.app });
+  const { services, setupToken } = opened;
+  const app = createConsoleApp(services, {
+    heartbeatMs: 50,
+    // No real network in tests: the public IP lookup answers with a documentation address.
+    onboarding: { fetchPublicIp: async () => new Response("203.0.113.7\n"), inContainer: false },
+    ...options.app,
+  });
   const transcript = options.transcript ?? [];
   return {
     dataDir,
@@ -103,6 +119,7 @@ export async function startConsole(options: StartOptions = {}): Promise<TestCons
     app,
     clock,
     setupToken,
+    opened,
     transcript,
     client: () => new TestClient(app, transcript),
     close: () => closeConsole(services, 5_000),

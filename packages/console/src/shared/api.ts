@@ -66,6 +66,20 @@ export interface SessionInfo {
    * "Sign in with single sign-on" link to {@link OIDC_LOGIN_PATH}.
    */
   readonly authMethods: readonly ("password" | "oidc" | "proxy")[];
+  /** While setup is not complete: whether the setup page needs the token from the log. */
+  readonly setup?: SetupState;
+}
+
+/**
+ * How the first admin can be created. For a short time after the console starts
+ * (MONGOSHIELD_SETUP_WINDOW_MINUTES, 15 by default) the setup page works without the
+ * one-time token from the log; after that, or with the window turned off, it needs it.
+ */
+export interface SetupState {
+  /** True once the window has closed (or when there is none): `token` is required. */
+  readonly tokenRequired: boolean;
+  /** When the window closes (ISO date), while it is open. */
+  readonly windowEndsAt?: string;
 }
 
 /**
@@ -113,8 +127,11 @@ export interface LoginRequest {
 }
 
 export interface SetupRequest {
-  /** The one-time token printed in the server log at first start. */
-  readonly token: string;
+  /**
+   * The one-time token printed in the server log at first start. Optional while the
+   * setup window is open (`SessionInfo.setup.tokenRequired` is false).
+   */
+  readonly token?: string;
   readonly username: string;
   readonly password: string;
 }
@@ -160,6 +177,17 @@ export interface ConnectionView {
   readonly createdAt: string;
   /** Whether the live data browser may change documents here (off unless an admin turned it on). */
   readonly liveEdits: LiveEditSettingsView;
+  /** What the last check found out about the deployment (Atlas tier, version), when known. */
+  readonly deployment?: DeploymentSummary;
+}
+
+/** A connection's deployment as last seen by a check or test (shown as badges). */
+export interface DeploymentSummary {
+  readonly topology?: string;
+  readonly serverVersion?: string;
+  /** Atlas tier; absent when not on Atlas. */
+  readonly atlas?: AtlasTierName;
+  readonly checkedAt: string;
 }
 
 export interface ConnectionInput {
@@ -177,16 +205,83 @@ export interface ConnectionTestResult {
   readonly missingBackupPrivileges: readonly string[];
   readonly missingRestorePrivileges: readonly string[];
   readonly error?: ApiError["error"];
+  /** What went wrong, in plain words with a fix, when `ok` is false. */
+  readonly problem?: ConnectionProblem;
+  /** MongoDB Atlas: Free/Flex (`shared`) or dedicated (M10+). Absent when not on Atlas. */
+  readonly atlas?: { readonly tier: AtlasTierName };
+  /**
+   * When the user may read only some databases (per-database roles, common on Atlas):
+   * those databases. Backups then contain only them.
+   */
+  readonly readableDatabases?: readonly string[];
+  /** Advice about missing privileges, in plain words (a warning, not a failure). */
+  readonly privilegeAdvice?: ConnectionProblem;
+}
+
+/** Atlas cluster tiers as the console shows them: Free/Flex share hardware; M10+ is dedicated. */
+export type AtlasTierName = "shared" | "dedicated";
+
+/** The kinds of connection failure the console explains (src/server/connection-problems.ts). */
+export type ConnectionProblemKind =
+  | "dns-not-found"
+  | "network-blocked"
+  | "paused-cluster"
+  | "auth-failed"
+  | "missing-privileges"
+  | "tls"
+  | "connection-refused"
+  | "timeout"
+  | "unknown";
+
+/** A connection problem explained for people: what is wrong, how to fix it, where to go. */
+export interface ConnectionProblem {
+  readonly kind: ConnectionProblemKind;
+  readonly title: string;
+  readonly message: string;
+  readonly fix: string;
+  readonly links: readonly { readonly label: string; readonly url: string }[];
+  /** The driver's own message (connection string removed), for the curious and for support. */
+  readonly detail: string;
+  /** True when knowing the console's public IP helps (an Atlas IP access list). */
+  readonly offerPublicIp?: boolean;
+}
+
+/** Checks a connection string before it is saved (`POST /api/connections/check`, admin). */
+export interface ConnectionCheckRequest {
+  /** The pasted connection string (cleaned by the server like the onboarding page does). */
+  readonly uri: string;
+}
+
+/** The check's answer: the test result plus the defaults the onboarding page proposes. */
+export interface ConnectionCheckResult extends ConnectionTestResult {
+  /** A short name from the host, replica set or Atlas cluster, unique among connections. */
+  readonly suggestedName: string;
+  /** Whether to mark it production by default, and why in plain words (always shown). */
+  readonly production: { readonly suggested: boolean; readonly reason: string };
+}
+
+/** The console's public (egress) IP address, looked up on request (`POST /api/network/public-ip`). */
+export interface PublicIpResult {
+  /** The address as an external service saw it, e.g. for an Atlas IP access list. */
+  readonly ip?: string;
+  /** Why it could not be found (no internet access, the service did not answer, …). */
+  readonly error?: string;
 }
 
 /** One database in the namespace tree used to choose what to back up. */
 export interface DatabaseNode {
   readonly name: string;
+  /** Size of the database on disk, when the server reports it (`listDatabases`). */
+  readonly sizeBytes?: number;
   readonly collections: readonly {
     readonly name: string;
     readonly type: "collection" | "view" | "timeseries";
     readonly estimatedDocuments: number;
     readonly indexes: number;
+    /** True for a capped collection (from `listCollections` options; costs no extra command). */
+    readonly capped?: boolean;
+    /** Uncompressed size of the documents, when known. Absent: unknown (never 0 by default). */
+    readonly sizeBytes?: number;
   }[];
 }
 
@@ -232,7 +327,8 @@ export interface PlanView {
   readonly encryption:
     | { readonly kind: "none" }
     | { readonly kind: "recipients"; readonly recipients: readonly string[] }
-    | { readonly kind: "passphrase"; readonly passphrase: SecretSummary };
+    | { readonly kind: "passphrase"; readonly passphrase: SecretSummary }
+    | ManagedKeyView;
   readonly consistency: "auto" | "none" | "snapshot" | "converge";
   /** 5-field cron; absent = run manually only. */
   readonly schedule?: { readonly cron: string; readonly timezone: string };
@@ -252,14 +348,69 @@ export interface PlanView {
   readonly incremental?: { readonly fullEveryDays: number };
   readonly nextRunAt?: string;
   readonly lastRun?: JobSummary;
+  /** `quick`: created by "Back up now" (one per connection); edit it like any other plan. */
+  readonly origin?: "quick";
 }
 
-export type PlanInput = Omit<PlanView, "id" | "encryption" | "notify" | "nextRunAt" | "lastRun"> & {
+/** "Back up now" (`POST /api/quick-backup`, admin): one click, sensible defaults. */
+export interface QuickBackupRequest {
+  readonly connectionId: string;
+  /**
+   * Namespace patterns to back up (`db.*`, `db.collection`). Omit or leave empty for
+   * everything except MongoDB's own databases (admin, local, config). Saved on the
+   * connection's quick plan, so later clicks (and its schedule) back up the same.
+   */
+  readonly include?: readonly string[];
+}
+
+/** What "Back up now" did: the plan it used (created on the first click) and the job. */
+export interface QuickBackupResult {
+  readonly plan: PlanView;
+  readonly job: JobSummary;
+  /** True when this click created the plan (and its encryption key). */
+  readonly created: boolean;
+}
+
+/** A plan's recovery key, for safekeeping outside the console (admin, audited). */
+export interface RecoveryKeyView {
+  readonly planId: string;
+  readonly planName: string;
+  /** The age private key, `AGE-SECRET-KEY-1…`. Restores these backups without the console. */
+  readonly identity: string;
+  /** Its public key, `age1…`. */
+  readonly recipient: string;
+  /** A suggested file name for the download. */
+  readonly filename: string;
+  /** The text to save: the key with comments saying what it is and how to use it. */
+  readonly fileContent: string;
+}
+
+/**
+ * Encryption with a key the console generates and keeps (an age X25519 key pair). Backups
+ * are encrypted to its public key (`recipient`); the private key (the "recovery key") is
+ * stored sealed like every other secret, so restores, verifies and drills need no typing.
+ * Download it once (`POST /api/plans/:id/recovery-key`) and keep it somewhere else: it is
+ * what restores these backups when the console itself is gone.
+ */
+export interface ManagedKeyView {
+  readonly kind: "managed";
+  /** The age public key (age1…). */
+  readonly recipient: string;
+  /** True once someone downloaded the recovery key; the UI keeps reminding until then. */
+  readonly recoveryKeySaved: boolean;
+}
+
+export type PlanInput = Omit<
+  PlanView,
+  "id" | "encryption" | "notify" | "nextRunAt" | "lastRun" | "origin"
+> & {
   readonly encryption:
     | { readonly kind: "none" }
     | { readonly kind: "recipients"; readonly recipients: readonly string[] }
     /** Omit `passphrase` when updating to keep the stored one. */
-    | { readonly kind: "passphrase"; readonly passphrase?: string };
+    | { readonly kind: "passphrase"; readonly passphrase?: string }
+    /** Keeps the plan's managed key, or generates one when the plan had none. */
+    | { readonly kind: "managed" };
   readonly notify: readonly {
     readonly type: "webhook" | "slack" | "discord";
     readonly url?: string;
@@ -313,6 +464,12 @@ export interface BackupDetail extends BackupSummary {
 /** A page of documents from inside a backup, as relaxed Extended JSON strings. */
 export interface DocumentPage {
   readonly documents: readonly string[];
+  /**
+   * The same documents as canonical Extended JSON (every BSON type explicit, e.g.
+   * `{"$numberInt": "1"}`), in the same order. Only sent when the request asked for it
+   * with `ejson=canonical` (the document viewer's JSON view).
+   */
+  readonly canonical?: readonly string[];
   /** Pass back as `after` to get the next page; absent on the last page. */
   readonly next?: string;
 }
@@ -762,6 +919,11 @@ export interface LiveDocument {
    * documents read with a projection, which are partial and cannot be edited.
    */
   readonly version?: string;
+  /**
+   * The document as canonical Extended JSON (every BSON type explicit). Only sent when
+   * the request asked for it with `ejson=canonical` (the document viewer's JSON view).
+   */
+  readonly canonical?: string;
 }
 
 /** How many documents match a live query. */
@@ -820,6 +982,77 @@ export interface LiveCollectionInfo {
   readonly writable: boolean;
   /** Why not, in words, when `writable` is false. */
   readonly readOnlyReason?: string;
+  /**
+   * Why the sizes above are missing, in words, when MongoDB refused `$collStats` (missing
+   * privileges, or an Atlas Free/Flex cluster, which limits it). The UI shows "—" with
+   * this as the tooltip instead of an error: the collection is still browsable.
+   */
+  readonly statsUnavailable?: string;
+  /**
+   * True when the connection is an Atlas shared-tier cluster (Free, Flex, legacy M2/M5).
+   * Those are throttled (about 100 operations per second), so the UI paces the queries
+   * it runs on its own (schema samples, field suggestions) and samples fewer documents.
+   */
+  readonly sharedTier?: boolean;
+}
+
+/** Documents a schema sample reads when the request does not say (`LiveSampleRequest.size`). */
+export const LIVE_SAMPLE_DEFAULT_SIZE = 200;
+/** Most documents one schema sample may read. */
+export const LIVE_SAMPLE_MAX_SIZE = 1_000;
+/** Most documents one schema sample may read on an Atlas shared-tier cluster. */
+export const LIVE_SAMPLE_SHARED_TIER_MAX_SIZE = 200;
+
+/**
+ * A sample of documents for the schema and chart views and the filter's field
+ * suggestions (`GET /api/live/:id/sample?ns=&filter=&size=`, operator, audited as
+ * `live.browse`), or of a namespace inside a backup
+ * (`GET /api/storage/:id/backups/:backupId/sample?ns=&filter=&size=`).
+ */
+export interface DocumentSample {
+  /** The sampled documents as relaxed Extended JSON. */
+  readonly documents: readonly string[];
+  /** How many were asked for, after the server's cap (so the UI can say "a sample of 200"). */
+  readonly size: number;
+  /**
+   * `random`: MongoDB's `$sample` (live collections); `first`: the first documents in
+   * storage order (backups are read as a stream, so there is no random access).
+   */
+  readonly method: "random" | "first";
+}
+
+/** File formats of an export. */
+export type ExportFormat = "json" | "jsonl" | "csv";
+/** Documents an export contains when the request does not say. */
+export const EXPORT_DEFAULT_LIMIT = 1_000;
+/** Most documents one export may contain. */
+export const EXPORT_MAX_LIMIT = 10_000;
+/** Most bytes of content one export may contain; it stops early (and says so) beyond this. */
+export const EXPORT_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The current result of the document viewer as a file:
+ * `GET /api/live/:id/export?ns=&filter=&projection=&sort=&format=&limit=&ejson=` and
+ * `GET /api/storage/:id/backups/:backupId/export?ns=&filter=&format=&limit=&ejson=`
+ * (operator, audited as `live.export` / `backup.export` with counts, never contents).
+ *
+ * - `json`: one array of documents; `jsonl`: one document per line (both relaxed
+ *   Extended JSON, or canonical with `ejson=canonical`);
+ * - `csv`: one column per field path (nested fields flattened as `address.city`, arrays
+ *   as JSON text), RFC 4180 quoting, and cells that a spreadsheet would run as a formula
+ *   (starting with `=`, `+`, `-`, `@`) prefixed with `'`.
+ */
+export interface ExportResult {
+  /** A suggested file name, e.g. `shop.orders.csv`. */
+  readonly filename: string;
+  /** e.g. `text/csv;charset=utf-8`. */
+  readonly contentType: string;
+  /** The file's text. */
+  readonly content: string;
+  /** How many documents it contains. */
+  readonly documents: number;
+  /** True when it stopped at `limit` or at {@link EXPORT_MAX_BYTES} with more documents left. */
+  readonly truncated: boolean;
 }
 
 /** Inserts one document (`POST /api/live/:id/documents`). */
@@ -977,6 +1210,13 @@ export interface ApiRoutes {
   "PUT /api/connections/:id": { request: ConnectionInput; response: ConnectionView };
   "DELETE /api/connections/:id": { request: undefined; response: { ok: true } };
   "POST /api/connections/:id/test": { request: undefined; response: ConnectionTestResult };
+  /** Tests a connection string before saving it, with the defaults to propose (admin). */
+  "POST /api/connections/check": {
+    request: ConnectionCheckRequest;
+    response: ConnectionCheckResult;
+  };
+  /** Asks an external service for the console's public IP (admin; only when clicked). */
+  "POST /api/network/public-ip": { request: undefined; response: PublicIpResult };
   "GET /api/connections/:id/namespaces": { request: undefined; response: readonly DatabaseNode[] };
   /** Live edit settings (admin; production connections need `confirmName` and `reason`). */
   "PUT /api/connections/:id/live-edits": {
@@ -995,6 +1235,10 @@ export interface ApiRoutes {
   "PUT /api/plans/:id": { request: PlanInput; response: PlanView };
   "DELETE /api/plans/:id": { request: undefined; response: { ok: true } };
   "POST /api/plans/:id/run": { request: undefined; response: JobSummary };
+  /** The recovery key of a plan with a managed key (admin; audited; marks it saved). */
+  "POST /api/plans/:id/recovery-key": { request: undefined; response: RecoveryKeyView };
+  /** "Back up now": creates or reuses the connection's quick plan and runs it (admin). */
+  "POST /api/quick-backup": { request: QuickBackupRequest; response: QuickBackupResult };
   /** Dry run of the plan's retention policy (admin). */
   "POST /api/plans/:id/prune/plan": { request: undefined; response: PrunePlanView };
   /** Applies it as a `prune` job (admin). */
@@ -1015,10 +1259,20 @@ export interface ApiRoutes {
     response: { ok: true };
   };
   "DELETE /api/storage/:id/backups/:backupId/hold": { request: undefined; response: { ok: true } };
-  /** Query: `ns` (required), `filter` (Extended JSON), `limit` (≤ 100), `after`. */
+  /** Query: `ns` (required), `filter` (Extended JSON), `limit` (≤ 100), `after`, `ejson`. */
   "GET /api/storage/:id/backups/:backupId/documents": {
     request: undefined;
     response: DocumentPage;
+  };
+  /** Query: `ns` (required), `filter`, `size`. The first documents (operator, audited). */
+  "GET /api/storage/:id/backups/:backupId/sample": {
+    request: undefined;
+    response: DocumentSample;
+  };
+  /** Query: `ns` (required), `filter`, `format`, `limit`, `ejson` (operator, audited). */
+  "GET /api/storage/:id/backups/:backupId/export": {
+    request: undefined;
+    response: ExportResult;
   };
 
   "POST /api/restore/plan": { request: RestoreRequest; response: RestorePlanView };
@@ -1035,8 +1289,12 @@ export interface ApiRoutes {
 
   /** Query: `ns` (required). Operator. */
   "GET /api/live/:id/collection": { request: undefined; response: LiveCollectionInfo };
-  /** Query: `ns` (required), `filter`, `projection`, `sort`, `skip`, `limit`. Operator. */
+  /** Query: `ns` (required), `filter`, `projection`, `sort`, `skip`, `limit`, `ejson`. Operator. */
   "GET /api/live/:id/documents": { request: undefined; response: LiveDocumentPage };
+  /** Query: `ns` (required), `filter`, `size`. A random sample for the schema view. Operator. */
+  "GET /api/live/:id/sample": { request: undefined; response: DocumentSample };
+  /** Query: `ns` (required), `filter`, `projection`, `sort`, `format`, `limit`, `ejson`. Operator. */
+  "GET /api/live/:id/export": { request: undefined; response: ExportResult };
   /** The write routes need `data:write` and live edits turned on for the connection. */
   "POST /api/live/:id/documents": { request: LiveInsertRequest; response: LiveWriteResult };
   "PUT /api/live/:id/documents": { request: LiveReplaceRequest; response: LiveWriteResult };

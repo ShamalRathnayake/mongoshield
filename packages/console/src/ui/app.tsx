@@ -17,6 +17,7 @@ import { Button } from "./components/button.tsx";
 import { ErrorNotice, Loading, Notice, PageHeader } from "./components/layout.tsx";
 import { ToastProvider, useToast } from "./components/toast.tsx";
 import { ApiProvider, SessionProvider, useApi, useSession } from "./context.tsx";
+import { useWelcomeRedirect } from "./onboarding.ts";
 import { AuditPage } from "./pages/audit.tsx";
 import { BackupDetailPage } from "./pages/backup-detail.tsx";
 import { BackupsPage } from "./pages/backups.tsx";
@@ -35,6 +36,7 @@ import { SettingsPage } from "./pages/settings.tsx";
 import { SetupPage } from "./pages/setup.tsx";
 import { StoragePage } from "./pages/storage.tsx";
 import { UsersPage } from "./pages/users.tsx";
+import { WelcomePage } from "./pages/welcome.tsx";
 import { matchPath, useLocation } from "./router.ts";
 import { applyTheme, nextTheme, storedTheme, type ThemeChoice } from "./theme.ts";
 
@@ -114,6 +116,7 @@ function SessionGate(props: { mock: boolean }) {
         onDone={setSession}
         mock={props.mock}
         fromSetupLink={isSetupUrl}
+        {...(session.setup === undefined ? {} : { setup: session.setup })}
       />
     );
   }
@@ -141,6 +144,14 @@ interface RouteDefinition {
 const ROUTES: readonly RouteDefinition[] = [
   { pattern: "/", title: "Overview", section: "overview", render: () => <OverviewPage /> },
   {
+    // The first stop of a console without connections (onboarding.ts redirects here).
+    pattern: "/welcome",
+    title: "Welcome",
+    section: "connections",
+    role: "admin",
+    render: () => <WelcomePage />,
+  },
+  {
     pattern: "/connections",
     title: "Connections",
     section: "connections",
@@ -157,6 +168,7 @@ const ROUTES: readonly RouteDefinition[] = [
     title: "Live data",
     section: "connections",
     role: "operator",
+    // The page shows the backup actions bar (pages/backup-actions.tsx) under its title.
     render: (params, query) => (
       <LiveBrowserPage connectionId={params.id ?? ""} ns={query.get("ns") ?? undefined} />
     ),
@@ -305,6 +317,8 @@ function Shell(props: { mock: boolean }) {
   const { user, hasRole, logout } = useSession();
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme);
   const resolved = resolveRoute(location.path);
+  // An admin of a console without connections starts on the welcome page.
+  useWelcomeRedirect(location.path, hasRole("admin"));
 
   useEffect(() => {
     document.title = `${resolved?.route.title ?? "Not found"} · MongoShield`;

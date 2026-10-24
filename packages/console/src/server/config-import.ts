@@ -800,6 +800,16 @@ function resolveEncryption(
   planId: string,
   store: StateStore,
 ): PlanEncryptionRecord {
+  // A plan with a managed key exports as `recipients: [its public key]`. Importing that
+  // back keeps the managed key (and its sealed private key) instead of dropping it.
+  if (
+    existing?.encryption.kind === "managed" &&
+    config.encryption.kind === "recipients" &&
+    config.encryption.recipients.length === 1 &&
+    config.encryption.recipients[0] === existing.encryption.recipient
+  ) {
+    return existing.encryption;
+  }
   if (config.encryption.kind !== "passphrase") return config.encryption;
   if (secrets.passphrase !== undefined) {
     if (secrets.passphrase.length < MIN_PASSPHRASE_LENGTH) {
@@ -901,7 +911,9 @@ function planSummary(
   const encryption =
     plan.encryption.kind === "recipients"
       ? `recipients: ${plan.encryption.recipients.join(", ")}`
-      : plan.encryption.kind;
+      : plan.encryption.kind === "managed"
+        ? `key kept by the console: ${plan.encryption.recipient}`
+        : plan.encryption.kind;
   return {
     connection:
       connections.find((connection) => connection.id === plan.connectionId)?.name ??

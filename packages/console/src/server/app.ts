@@ -21,18 +21,20 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { PreviewLimits } from "../shared/api.ts";
-import { openConnectionUri, openPlanPassphrase } from "../state/secrets.ts";
+import { openConnectionUri, openPlanIdentity, openPlanPassphrase } from "../state/secrets.ts";
 import { authenticate, csrfProtection } from "./auth.ts";
 import type { AppEnv, ConsoleServices } from "./context.ts";
 import { describeError, isKnownError, notFound, statusOf } from "./errors.ts";
 import { auditRoutes } from "./routes/audit.ts";
 import { backupRoutes } from "./routes/backups.ts";
+import { browseExtrasRoutes } from "./routes/browse-extras.ts";
 import { configRoutes } from "./routes/config.ts";
 import { connectionRoutes } from "./routes/connections.ts";
 import { healthRoutes, type JournalStatusReader } from "./routes/health.ts";
 import { jobRoutes } from "./routes/jobs.ts";
 import { liveRoutes } from "./routes/live.ts";
 import { oidcRoutes } from "./routes/oidc.ts";
+import { type OnboardingRouteOptions, onboardingRoutes } from "./routes/onboarding.ts";
 import { planRoutes } from "./routes/plans.ts";
 import { restoreRoutes } from "./routes/restore.ts";
 import { restorePreviewRoutes } from "./routes/restore-preview.ts";
@@ -56,6 +58,8 @@ export interface ConsoleAppOptions {
   readonly readJournalStatus?: JournalStatusReader;
   /** Bounds of restore previews (sampling, listed ids, time); tests make them small. */
   readonly previewLimits?: PreviewLimits;
+  /** The onboarding routes' network and container detection; tests replace them. */
+  readonly onboarding?: OnboardingRouteOptions;
 }
 
 /** Builds the console's HTTP app. */
@@ -94,11 +98,15 @@ export function createConsoleApp(
   oidcRoutes(app, services);
   userRoutes(app, services);
   connectionRoutes(app, services);
+  // The welcome flow: check a pasted connection string, public IP, "Back up now".
+  onboardingRoutes(app, services, options.onboarding);
   storageRoutes(app, services);
   planRoutes(app, services);
   backupRoutes(app, services);
   restoreRoutes(app, services);
   liveRoutes(app, services);
+  // Samples and exports of live collections and backups (document viewer).
+  browseExtrasRoutes(app, services);
   restorePreviewRoutes(app, services, options.previewLimits);
   jobRoutes(
     app,
@@ -163,6 +171,8 @@ function knownSecrets(services: ConsoleServices): string[] {
     try {
       const passphrase = openPlanPassphrase(store, plan);
       if (passphrase !== undefined) secrets.push(passphrase);
+      const identity = openPlanIdentity(store, plan);
+      if (identity !== undefined) secrets.push(identity);
     } catch {
       // As above.
     }

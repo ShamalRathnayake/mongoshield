@@ -39,9 +39,15 @@ export interface DialogProps {
   readonly children: ReactNode;
   /** Buttons at the bottom, e.g. Cancel / Save. */
   readonly footer?: ReactNode;
-  readonly size?: "normal" | "wide";
+  /** `drawer`: a full-height panel on the right (the document detail panel). */
+  readonly size?: "normal" | "wide" | "drawer";
   /** Optional explanation shown under the title and announced with it. */
   readonly description?: ReactNode;
+  /**
+   * Extra keys for the whole dialog (after Escape and Tab, which the dialog handles), e.g.
+   * the detail panel's [ and ] for the previous and next document.
+   */
+  readonly onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
 }
 
 /** A modal dialog rendered into `document.body`. Renders nothing while closed. */
@@ -76,7 +82,11 @@ function OpenDialog(props: DialogProps) {
       onCloseRef.current();
       return;
     }
-    if (event.key !== "Tab" || panelRef.current === null) return;
+    if (event.key !== "Tab") {
+      props.onKeyDown?.(event);
+      return;
+    }
+    if (panelRef.current === null) return;
     const focusable = focusableElements(panelRef.current);
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -100,7 +110,7 @@ function OpenDialog(props: DialogProps) {
     // Clicking the backdrop is a mouse shortcut; keyboard users close with Escape.
     // biome-ignore lint/a11y/noStaticElementInteractions: see above.
     <div
-      className="dialog-backdrop"
+      className={`dialog-backdrop ${props.size === "drawer" ? "dialog-backdrop-drawer" : ""}`}
       onMouseDown={(event) => {
         // Only a press that starts on the backdrop closes; dragging out of a text field does not.
         if (event.target === event.currentTarget) onCloseRef.current();
@@ -113,7 +123,7 @@ function OpenDialog(props: DialogProps) {
         aria-labelledby={titleId}
         aria-describedby={props.description === undefined ? undefined : descriptionId}
         tabIndex={-1}
-        className={`dialog ${props.size === "wide" ? "dialog-wide" : ""}`}
+        className={`dialog ${props.size === "wide" ? "dialog-wide" : props.size === "drawer" ? "dialog-drawer" : ""}`}
         onKeyDown={onKeyDown}
       >
         <header className="dialog-header">

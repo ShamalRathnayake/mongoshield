@@ -5,7 +5,17 @@
  *   GET    /api/session   anyone   current user, CSRF token, setup state
  *   POST   /api/session   anyone   login (rate limited)
  *   DELETE /api/session   signed in
- *   POST   /api/setup     anyone with the setup token, only while no user exists
+ *   POST   /api/setup     only while no user exists: with the setup token, or without it
+ *                         during the setup window after start (MONGOSHIELD_SETUP_WINDOW_MINUTES)
+ *
+ * Why a setup window: the first admin used to need the token from the server log, which
+ * is one copy-and-paste too many for `docker run` and open the browser. For a limited
+ * time after start (15 minutes by default), the setup page may create the first admin
+ * without it, as Portainer does. Whoever opens the page first in that window becomes
+ * admin, so the window is short, closes for good once an admin exists, is announced on
+ * the page and in the log, and every setup is audited with the client address. The
+ * token keeps working the whole time (and after the window). docs/console-security.md
+ * compares this with the alternatives (token only, loopback only, environment admin).
  */
 
 import type { Context, Hono } from "hono";
@@ -36,7 +46,7 @@ import {
 import type { AppEnv, ConsoleServices, Principal } from "../context.ts";
 import { ConsoleError, invalid } from "../errors.ts";
 import { readJson } from "../security.ts";
-import { asObject, requiredString } from "../validate.ts";
+import { asObject, optionalString, requiredString } from "../validate.ts";
 import { userView } from "../views.ts";
 
 /** Registers the session routes. */
@@ -116,12 +126,27 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
       );
     }
     const body = asObject(await readJson(c));
-    const token = requiredString(body, "token", 128);
+    // The token is optional only while the setup window is open (see the file header).
+    const token = optionalString(body, "token", 128)?.trim() || undefined;
     const limiterKeys = [`address:${clientAddress(c)}`, "setup"];
     if (services.loginLimiter.retryAfterMs(limiterKeys) > 0) {
       throw new ConsoleError(429, "CONSOLE_RATE_LIMITED", "Too many failed setup attempts.");
     }
-    if (!isValidSetupToken(services.store, token, services.now())) {
+    if (token === undefined && !setupWindowOpen(services)) {
+      await recordAudit(services, {
+        actor: "anonymous",
+        action: "setup.failed",
+        outcome: "failure",
+        details: { reason: "window closed" },
+      });
+      throw new ConsoleError(
+        401,
+        "CONSOLE_SETUP_TOKEN_REQUIRED",
+        "The setup token is required.",
+        "Open the setup link printed in the console's log (docker logs <container>), or restart the console to open the setup window again.",
+      );
+    }
+    if (token !== undefined && !isValidSetupToken(services.store, token, services.now())) {
       services.loginLimiter.recordFailure(limiterKeys);
       await recordAudit(services, {
         actor: "anonymous",
@@ -148,7 +173,8 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
     };
     // Check and consume in one update: two concurrent setups cannot both win.
     const created = await services.store.update((state) => {
-      if (state.users.length > 0 || state.setupToken === undefined) return false;
+      if (state.users.length > 0) return false;
+      if (token !== undefined && state.setupToken === undefined) return false;
       state.users = [admin];
       delete state.setupToken;
       return true;
@@ -157,12 +183,17 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
       throw new ConsoleError(409, "CONSOLE_SETUP_DONE", "Setup is already complete.");
     }
     const principal = await startSession(c, services, admin);
+    const method = token === undefined ? "window" : "token";
     await recordAudit(services, {
       actor: principal,
       action: "setup.complete",
       target: username,
       outcome: "success",
+      // The address matters most for setups through the window: it is how an operator
+      // would tell that someone else claimed the console first.
+      details: { method, address: clientAddress(c) },
     });
+    services.logger.info("First admin created", { username, method, address: clientAddress(c) });
     return c.json(sessionInfo(services, principal));
   });
 }
@@ -174,13 +205,32 @@ function sessionInfo(services: ConsoleServices, principal: Principal | undefined
     ...(services.oidc === undefined ? [] : (["oidc"] as const)),
     ...(services.settings.proxySecret === undefined ? [] : (["proxy"] as const)),
   ];
+  const setupComplete = services.store.current.users.length > 0;
+  const windowOpen = setupWindowOpen(services);
   return {
-    setupComplete: services.store.current.users.length > 0,
+    setupComplete,
     authMethods,
+    ...(setupComplete
+      ? {}
+      : {
+          setup: {
+            tokenRequired: !windowOpen,
+            ...(windowOpen && services.setupWindowEndsAt !== undefined
+              ? { windowEndsAt: services.setupWindowEndsAt.toISOString() }
+              : {}),
+          },
+        }),
     ...(principal === undefined
       ? {}
       : { user: userView(principal.user), csrfToken: principal.csrfToken }),
   };
+}
+
+/** True while the first admin may be created without the setup token. */
+export function setupWindowOpen(services: ConsoleServices): boolean {
+  const endsAt = services.setupWindowEndsAt;
+  if (endsAt === undefined) return false;
+  return services.store.current.users.length === 0 && services.now().getTime() < endsAt.getTime();
 }
 
 /**

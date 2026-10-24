@@ -2,13 +2,15 @@
  * Page tests for the live data browser against the mock backend: browsing collections,
  * the query form (validation, projection, paging), read-only states, and the write
  * dialogs (edit with review, conflict and reload, insert, duplicate, delete, bulk edits
- * with a typed confirmation).
+ * with a typed confirmation). The document views themselves are tested in
+ * live-viewer.test.tsx.
  *
  * Mock fixtures: "Staging" (conn-staging) allows live edits; maya (operator) holds
  * data:write; admin does not.
  */
 
 import { screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { renderApp, requestsTo } from "../testing.tsx";
 
@@ -21,12 +23,24 @@ function bulkRuns(backend: Parameters<typeof requestsTo>[0]) {
   );
 }
 
-/** Waits for the first page of documents and returns the list. */
+/** Waits for the first page of documents (the table view) and returns the table. */
 async function documentList() {
-  return screen.findByRole("list", { name: "Documents" }).then(async (list) => {
-    await within(list).findAllByRole("listitem");
-    return list;
-  });
+  const table = await screen.findByRole("table", { name: "Documents" });
+  await within(table).findAllByRole("button", { name: /^Open document/ });
+  return table;
+}
+
+/** The document rows of the table (not its header). */
+function documentRows(table: HTMLElement): HTMLElement[] {
+  return within(table)
+    .getAllByRole("row")
+    .filter((row) => row.hasAttribute("data-index"));
+}
+
+/** Switches the viewer to the tree view, where every document has its edit buttons. */
+async function showTrees(user: UserEvent) {
+  await user.click(screen.getByRole("radio", { name: "Tree" }));
+  await screen.findAllByRole("button", { name: /^Open document/ });
 }
 
 describe("live data browser", () => {
@@ -37,17 +51,19 @@ describe("live data browser", () => {
     ).toBeTruthy();
     const nav = await screen.findByRole("navigation", { name: "Collections" });
     expect(await screen.findByText("Choose a collection")).toBeTruthy();
-    await user.click(await within(nav).findByRole("link", { name: "orders" }));
+    await user.click(await within(nav).findByRole("treeitem", { name: /^orders/ }));
     expect(await screen.findByRole("heading", { name: "shop.orders" })).toBeTruthy();
-    expect(within(nav).getByRole("link", { name: "orders" }).getAttribute("aria-current")).toBe(
-      "page",
-    );
+    expect(
+      within(nav)
+        .getByRole("treeitem", { name: /^orders/ })
+        .getAttribute("aria-current"),
+    ).toBe("page");
   });
 
   it("shows documents with a count, and pages through them", async () => {
     const { user, backend } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
-    const list = await documentList();
-    expect(within(list).getAllByRole("listitem")).toHaveLength(20);
+    const table = await documentList();
+    expect(documentRows(table)).toHaveLength(20);
     expect(screen.getByText("Showing 1–20 of about 45 documents")).toBeTruthy();
     const previous = screen.getByRole("button", { name: "Previous page" }) as HTMLButtonElement;
     expect(previous.disabled).toBe(true);
@@ -90,6 +106,7 @@ describe("live data browser", () => {
   it("shows projected documents read-only", async () => {
     const { user } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await documentList();
+    await showTrees(user);
     expect(screen.getAllByRole("button", { name: /^Edit document/ }).length).toBeGreaterThan(0);
     await user.type(screen.getByLabelText("Projection"), '{{"email": 1}');
     await user.click(screen.getByRole("button", { name: "Apply" }));
@@ -142,6 +159,7 @@ describe("editing live documents", () => {
   it("edits a document after reviewing the changed fields", async () => {
     const { user, backend } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await documentList();
+    await showTrees(user);
     await user.click(screen.getAllByRole("button", { name: /^Edit document/ })[0] as HTMLElement);
     const dialog = await screen.findByRole("dialog", { name: "Edit document" });
     const textarea = within(dialog).getByLabelText(
@@ -183,6 +201,7 @@ describe("editing live documents", () => {
   it("refuses to change _id", async () => {
     const { user } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await documentList();
+    await showTrees(user);
     await user.click(screen.getAllByRole("button", { name: /^Edit document/ })[0] as HTMLElement);
     const dialog = await screen.findByRole("dialog", { name: "Edit document" });
     const textarea = within(dialog).getByLabelText(
@@ -199,6 +218,7 @@ describe("editing live documents", () => {
   it("refuses an edit when the document changed meanwhile, and reloads it", async () => {
     const { user, backend } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await documentList();
+    await showTrees(user);
     await user.click(screen.getAllByRole("button", { name: /^Edit document/ })[0] as HTMLElement);
     const dialog = await screen.findByRole("dialog", { name: "Edit document" });
     const textarea = within(dialog).getByLabelText(
@@ -245,6 +265,7 @@ describe("editing live documents", () => {
   it("duplicates a document without its _id", async () => {
     const { user, backend } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await documentList();
+    await showTrees(user);
     await user.click(
       screen.getAllByRole("button", { name: /^Duplicate document/ })[0] as HTMLElement,
     );
@@ -263,6 +284,7 @@ describe("editing live documents", () => {
   it("deletes a document after confirmation, and reports a conflict", async () => {
     const { user, backend } = renderApp({ signedInAs: "maya", hash: STAGING_USERS });
     await documentList();
+    await showTrees(user);
     const second = backend.live.documents("conn-staging", "shop.users")[1];
     await user.click(screen.getAllByRole("button", { name: /^Delete document/ })[1] as HTMLElement);
     let dialog = await screen.findByRole("dialog", { name: /^Delete document/ });

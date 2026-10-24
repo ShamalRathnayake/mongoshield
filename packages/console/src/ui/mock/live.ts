@@ -18,10 +18,15 @@
 
 import {
   type ConnectionView,
+  EXPORT_DEFAULT_LIMIT,
+  EXPORT_MAX_LIMIT,
+  type ExportResult,
   type JobKind,
   type JobSummary,
   LIVE_BULK_DEFAULT_LIMIT,
   LIVE_BULK_HARD_LIMIT,
+  LIVE_SAMPLE_DEFAULT_SIZE,
+  LIVE_SAMPLE_MAX_SIZE,
   type LiveCollectionInfo,
   type LiveDocument,
   type LiveEditEntryView,
@@ -30,7 +35,9 @@ import {
   type UserView,
 } from "../../shared/api.ts";
 import type { RequestOf, ResponseOf, RouteKey } from "../api.ts";
+import { flattenDocument, shortText } from "../bson.ts";
 import { roleIncludes } from "../context.tsx";
+import type { JsonValue } from "../ejson.ts";
 import { generateDocument, type MockConnection, type MockData } from "./fixtures.ts";
 
 /** The live routes this module answers. */
@@ -59,6 +66,8 @@ export const LIVE_ROUTE_ROLES: { readonly [Route in LiveRoute]: "operator" | "ad
   "PUT /api/connections/:id/live-edits": "admin",
   "GET /api/live/:id/collection": "operator",
   "GET /api/live/:id/documents": "operator",
+  "GET /api/live/:id/sample": "operator",
+  "GET /api/live/:id/export": "operator",
   "POST /api/live/:id/documents": "operator",
   "PUT /api/live/:id/documents": "operator",
   "POST /api/live/:id/documents/delete": "operator",
@@ -389,12 +398,20 @@ export function createLiveMock(context: LiveMockContext): {
               ? "Changing live data needs the data:write permission, which an admin grants."
               : settingsRefusal(connection);
       const averageDocumentBytes = 412;
+      const sharedTier = connection.atlasSharedTier === true;
       const info: LiveCollectionInfo = {
         ns,
         type: node.type,
         estimatedDocuments: documents.length,
-        capped: false,
-        ...(node.type === "view"
+        capped: node.capped === true,
+        // An Atlas shared tier refuses $collStats: no sizes, and the reason instead.
+        ...(sharedTier
+          ? {
+              sharedTier: true,
+              statsUnavailable: "Atlas Free and Flex clusters do not report collection sizes.",
+            }
+          : {}),
+        ...(node.type === "view" || sharedTier
           ? {}
           : {
               sizeBytes: documents.length * averageDocumentBytes,
@@ -412,7 +429,7 @@ export function createLiveMock(context: LiveMockContext): {
                   unique: false,
                   sparse: false,
                   hidden: false,
-                  sizeBytes: 4096,
+                  ...(sharedTier ? {} : { sizeBytes: 4096 }),
                 },
                 ...(ns.endsWith(".users")
                   ? [
@@ -462,10 +479,14 @@ export function createLiveMock(context: LiveMockContext): {
       context.audit("live.browse", "success", `${connection.name}/${ns}`, {
         documents: page.length,
       });
+      const canonical = query.get("ejson") === "canonical";
       return {
-        documents: page.map((document) =>
-          liveView(projected ? project(document, projection) : document, !projected),
-        ),
+        documents: page.map((document) => {
+          const view = liveView(projected ? project(document, projection) : document, !projected);
+          return canonical
+            ? { ...view, canonical: JSON.stringify(toCanonical(JSON.parse(view.json))) }
+            : view;
+        }),
         skip,
         limit,
         count:
@@ -475,6 +496,56 @@ export function createLiveMock(context: LiveMockContext): {
         hasMore: skip + limit < documents.length,
         projected,
       };
+    },
+
+    "GET /api/live/:id/sample": ({ params, query }) => {
+      const connection = context.findConnection(params.id);
+      const ns = requireNamespace(query.get("ns"));
+      const filter = parseObject(query.get("filter"), "The filter");
+      const size = Math.min(
+        LIVE_SAMPLE_MAX_SIZE,
+        Number(query.get("size") ?? LIVE_SAMPLE_DEFAULT_SIZE),
+      );
+      const matching = documentsOf(connection.id, ns).filter(
+        (document) => filter === undefined || matches(document, filter),
+      );
+      // A deterministic "random" sample: every document when they fit (the mock is small).
+      const documents = matching.slice(0, size);
+      context.audit("live.browse", "success", `${connection.name}/${ns}`, {
+        documents: documents.length,
+        sample: true,
+      });
+      return {
+        documents: documents.map((document) => JSON.stringify(document)),
+        size,
+        method: "random",
+      };
+    },
+
+    "GET /api/live/:id/export": ({ params, query }) => {
+      const connection = context.findConnection(params.id);
+      const ns = requireNamespace(query.get("ns"));
+      const filter = parseObject(query.get("filter"), "The filter");
+      const projection = parseObject(query.get("projection"), "The projection");
+      const sort = parseObject(query.get("sort"), "The sort");
+      const limit = Math.min(EXPORT_MAX_LIMIT, Number(query.get("limit") ?? EXPORT_DEFAULT_LIMIT));
+      let documents = documentsOf(connection.id, ns).filter(
+        (document) => filter === undefined || matches(document, filter),
+      );
+      if (sort !== undefined) documents = sortDocuments(documents, sort);
+      const exported = documents.slice(0, limit).map((document) => project(document, projection));
+      const result = exportFile(
+        ns,
+        exported,
+        query.get("format") ?? "json",
+        query.get("ejson") === "canonical",
+        documents.length > limit,
+      );
+      context.audit("live.export", "success", `${connection.name}/${ns}`, {
+        documents: result.documents,
+        format: query.get("format") ?? "json",
+      });
+      return result;
     },
 
     "POST /api/live/:id/documents": ({ params, body, user }) => {
@@ -823,9 +894,34 @@ function valueAt(document: unknown, path: string): unknown {
   return current;
 }
 
-/** A number from a JSON number or a `{"$numberDecimal": "…"}`-style wrapper. */
+/**
+ * Every value at a dotted path, walking into arrays like MongoDB does: `items.sku` of
+ * `{items: [{sku: "A"}, {sku: "B"}]}` is `["A", "B"]`.
+ */
+function valuesAt(document: unknown, path: string): unknown[] {
+  let current: unknown[] = [document];
+  for (const part of path.split(".")) {
+    const next: unknown[] = [];
+    for (const value of current) {
+      if (Array.isArray(value) && !/^\d+$/.test(part)) {
+        for (const item of value) if (isRecord(item) && part in item) next.push(item[part]);
+      } else if (isRecord(value) || Array.isArray(value)) {
+        const child: unknown = Reflect.get(value, part);
+        if (child !== undefined) next.push(child);
+      }
+    }
+    current = next;
+  }
+  return current;
+}
+
+/** A number from a JSON number, a `{"$numberDecimal": "…"}`-style wrapper or a `{"$date": …}`. */
 function numeric(value: unknown): number | undefined {
   if (typeof value === "number") return value;
+  if (isRecord(value) && typeof value.$date === "string") {
+    const time = Date.parse(value.$date);
+    return Number.isNaN(time) ? undefined : time;
+  }
   if (isRecord(value)) {
     const inner = Object.values(value)[0];
     if (typeof inner === "string" && inner.trim() !== "" && !Number.isNaN(Number(inner)))
@@ -834,8 +930,8 @@ function numeric(value: unknown): number | undefined {
   return undefined;
 }
 
-/** The mock's filter matcher; see the file header for what it knows. */
-function matches(document: MockDocument, filter: MockDocument): boolean {
+/** The mock's filter matcher; see the file header for what it knows. Also used for backups. */
+export function matches(document: MockDocument, filter: MockDocument): boolean {
   return Object.entries(filter).every(([field, condition]) => {
     if (field === "$and" && Array.isArray(condition)) {
       return condition.every((part) => isRecord(part) && matches(document, part));
@@ -843,16 +939,27 @@ function matches(document: MockDocument, filter: MockDocument): boolean {
     if (field === "$or" && Array.isArray(condition)) {
       return condition.some((part) => isRecord(part) && matches(document, part));
     }
-    const value = valueAt(document, field);
+    // Candidates: the value(s) at the path, and the items of arrays there ("tags": "beta").
+    const values = valuesAt(document, field);
+    const candidates = values.flatMap((value) =>
+      Array.isArray(value) ? [value, ...value] : [value],
+    );
     if (
       isRecord(condition) &&
       Object.keys(condition).some((key) => key.startsWith("$") && OPERATORS.has(key))
     ) {
-      return Object.entries(condition).every(([operator, operand]) =>
-        compare(value, operator, operand),
-      );
+      return Object.entries(condition).every(([operator, operand]) => {
+        if (operator === "$exists") return values.length > 0 === (operand === true);
+        if (operator === "$ne" || operator === "$nin") {
+          return (
+            candidates.length === 0 ||
+            candidates.every((value) => compare(value, operator, operand))
+          );
+        }
+        return candidates.some((value) => compare(value, operator, operand));
+      });
     }
-    return JSON.stringify(value) === JSON.stringify(condition);
+    return candidates.some((value) => JSON.stringify(value) === JSON.stringify(condition));
   });
 }
 
@@ -935,4 +1042,84 @@ function applyUpdate(document: MockDocument, update: MockDocument): MockDocument
 function changedPaths(before: MockDocument, after: MockDocument): string[] {
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
   return [...keys].filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
+}
+
+/**
+ * A stand-in for canonical Extended JSON in the mock (the server uses the BSON library):
+ * whole numbers in Int32 range become `$numberInt`, other numbers `$numberDouble`, and
+ * ISO dates `{"$date": {"$numberLong": "<ms>"}}`.
+ */
+export function toCanonical(value: unknown): unknown {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && Math.abs(value) < 2 ** 31
+      ? { $numberInt: String(value) }
+      : { $numberDouble: String(value) };
+  }
+  if (Array.isArray(value)) return value.map(toCanonical);
+  if (isRecord(value)) {
+    if (typeof value.$date === "string" && Object.keys(value).length === 1) {
+      return { $date: { $numberLong: String(Date.parse(value.$date)) } };
+    }
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, toCanonical(child)]),
+    );
+  }
+  return value;
+}
+
+/** One CSV cell: quoted when needed, formula-looking text prefixed with `'`. */
+function csvCell(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  let text = typeof value === "string" ? value : shortText(value as JsonValue);
+  if (Array.isArray(value)) text = JSON.stringify(value);
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** The mock's export file, shaped like the server's (src/server/export-format.ts). */
+export function exportFile(
+  ns: string,
+  documents: readonly MockDocument[],
+  format: string,
+  canonical: boolean,
+  truncated: boolean,
+): ExportResult {
+  const texts = documents.map((document) =>
+    JSON.stringify(canonical ? toCanonical(document) : document),
+  );
+  if (format === "csv") {
+    const columns: string[] = [];
+    const rows = documents.map((document) => {
+      const pairs = new Map(flattenDocument(document as { [key: string]: JsonValue }));
+      for (const path of pairs.keys()) if (!columns.includes(path)) columns.push(path);
+      return pairs;
+    });
+    const lines = [
+      columns.map(csvCell).join(","),
+      ...rows.map((row) => columns.map((path) => csvCell(row.get(path))).join(",")),
+    ];
+    return {
+      filename: `${ns}.csv`,
+      contentType: "text/csv;charset=utf-8",
+      content: `${lines.join("\r\n")}\r\n`,
+      documents: documents.length,
+      truncated,
+    };
+  }
+  if (format === "jsonl") {
+    return {
+      filename: `${ns}.jsonl`,
+      contentType: "application/x-ndjson;charset=utf-8",
+      content: texts.map((text) => `${text}\n`).join(""),
+      documents: documents.length,
+      truncated,
+    };
+  }
+  return {
+    filename: `${ns}.json`,
+    contentType: "application/json;charset=utf-8",
+    content: `[\n${texts.join(",\n")}\n]\n`,
+    documents: documents.length,
+    truncated,
+  };
 }

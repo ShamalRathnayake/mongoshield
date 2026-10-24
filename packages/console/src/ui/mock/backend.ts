@@ -43,6 +43,12 @@ import type {
   StorageView,
   UserView,
 } from "../../shared/api.ts";
+import {
+  EXPORT_DEFAULT_LIMIT,
+  EXPORT_MAX_LIMIT,
+  LIVE_SAMPLE_DEFAULT_SIZE,
+  LIVE_SAMPLE_MAX_SIZE,
+} from "../../shared/api.ts";
 import type {
   EventSourceFactory,
   FetchLike,
@@ -56,7 +62,21 @@ import { roleIncludes } from "../context.tsx";
 import { applyRename, isSelected } from "../namespaces.ts";
 import { matchPath } from "../router.ts";
 import { createFixtures, generateDocument, type MockBackup, type MockData } from "./fixtures.ts";
-import { createLiveMock, LIVE_ROUTE_ROLES, type LiveMockControls, liveSettingsOf } from "./live.ts";
+import {
+  createLiveMock,
+  exportFile,
+  LIVE_ROUTE_ROLES,
+  type LiveMockControls,
+  liveSettingsOf,
+  matches,
+  toCanonical,
+} from "./live.ts";
+import {
+  createOnboardingMock,
+  freshStart,
+  mockManagedKey,
+  ONBOARDING_ROUTE_ROLES,
+} from "./onboarding.ts";
 
 // ---------------------------------------------------------------------------
 // Handler plumbing
@@ -124,6 +144,8 @@ const ROUTE_ROLES: { readonly [Route in RouteKey]: Role | "public" } = {
   "POST /api/storage/:id/backups/:backupId/hold": "operator",
   "DELETE /api/storage/:id/backups/:backupId/hold": "admin",
   "GET /api/storage/:id/backups/:backupId/documents": "operator",
+  "GET /api/storage/:id/backups/:backupId/sample": "operator",
+  "GET /api/storage/:id/backups/:backupId/export": "operator",
   "POST /api/restore/plan": "operator",
   "POST /api/restore": "operator",
   "POST /api/restore/preview": "operator",
@@ -138,6 +160,8 @@ const ROUTE_ROLES: { readonly [Route in RouteKey]: Role | "public" } = {
   "POST /api/config/import": "admin",
   // The live data browser (mock/live.ts); its write handlers also check data:write.
   ...LIVE_ROUTE_ROLES,
+  // The welcome flow (mock/onboarding.ts).
+  ...ONBOARDING_ROUTE_ROLES,
 };
 
 const ROUTE_KEYS = Object.keys(ROUTE_ROLES).filter((key): key is RouteKey => key in ROUTE_ROLES);
@@ -163,6 +187,13 @@ export interface MockBackendOptions {
    * `"proxy"` the login page offers single sign-on and admins may create SSO-only users.
    */
   readonly authMethods?: SessionInfo["authMethods"];
+  /**
+   * While setup is pending: true (default) behaves like a console within its setup
+   * window (no token needed), false like one whose window has closed.
+   */
+  readonly setupWindow?: boolean;
+  /** Start like a brand-new console: no connections, plans or backups (`?fresh=1`). */
+  readonly fresh?: boolean;
 }
 
 /** A running mock server. */
@@ -207,6 +238,10 @@ interface JobRuntime {
 export function createMockBackend(options: MockBackendOptions = {}): MockBackend {
   const now = options.now ?? Date.now();
   const data = createFixtures(now);
+  if (options.fresh === true) freshStart(data);
+  /** When the mock's setup window closes (15 minutes after it was created). */
+  const setupWindowEndsAt =
+    options.setupWindow === false ? undefined : new Date(now + 15 * 60_000).toISOString();
   let setupComplete = options.setupComplete ?? true;
   let sessionUserId: string | undefined = data.users.find(
     (user) => user.username === options.signedInAs,
@@ -238,6 +273,14 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     return {
       setupComplete,
       authMethods,
+      ...(setupComplete
+        ? {}
+        : {
+            setup: {
+              tokenRequired: setupWindowEndsAt === undefined,
+              ...(setupWindowEndsAt === undefined ? {} : { windowEndsAt: setupWindowEndsAt }),
+            },
+          }),
       ...(user === undefined ? {} : { user, csrfToken }),
     };
   };
@@ -433,6 +476,22 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     startJob: (kind, namespaces, extra) => startJob(kind, namespaces, extra),
   });
 
+  const onboarding = createOnboardingMock({
+    data,
+    fail: (status, code, message, hint) => new MockHttpError(status, code, message, hint),
+    findConnection,
+    audit,
+    newId,
+    // Runs the plan exactly like "Run now" (the handler is defined below; called later).
+    runPlan: (planId) =>
+      handlers["POST /api/plans/:id/run"]({
+        params: { id: planId },
+        query: new URLSearchParams(),
+        body: undefined,
+        user: currentUser(),
+      }),
+  });
+
   const backupNamespaces = (backup: BackupDetail | undefined) =>
     namespacesInManifest(backup?.manifest);
 
@@ -470,7 +529,9 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
           "Setup has already been completed.",
           "Sign in instead.",
         );
-      if (body.token !== MOCK_SETUP_TOKEN) {
+      // Within the setup window the token is optional; a given token must still be right.
+      const tokenOptional = setupWindowEndsAt !== undefined && body.token === undefined;
+      if (!tokenOptional && body.token !== MOCK_SETUP_TOKEN) {
         throw new MockHttpError(
           403,
           "CONSOLE_SETUP_TOKEN_INVALID",
@@ -866,7 +927,38 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
         );
       const limit = Math.min(100, Math.max(1, Number(query.get("limit") ?? "20")));
       const filter = parseMockFilter(query.get("filter"));
-      return pageOfDocuments(entry, backup, filter, Number(query.get("after") ?? "0"), limit);
+      const page = pageOfDocuments(entry, backup, filter, Number(query.get("after") ?? "0"), limit);
+      // `ejson=canonical`: the same documents with every type explicit (the JSON view).
+      return query.get("ejson") === "canonical"
+        ? {
+            ...page,
+            canonical: page.documents.map((text) => JSON.stringify(toCanonical(JSON.parse(text)))),
+          }
+        : page;
+    },
+    // The schema view's sample: the first documents in backup order, like the server.
+    "GET /api/storage/:id/backups/:backupId/sample": ({ params, query }) => {
+      const backup = findBackup(params.id, params.backupId);
+      const entry = backupNamespaceOf(backupNamespaces(backup), query.get("ns") ?? "");
+      const size = Math.min(
+        LIVE_SAMPLE_MAX_SIZE,
+        Number(query.get("size") ?? LIVE_SAMPLE_DEFAULT_SIZE),
+      );
+      const page = pageOfDocuments(entry, backup, parseMockFilter(query.get("filter")), 0, size);
+      return { documents: page.documents, size, method: "first" };
+    },
+    "GET /api/storage/:id/backups/:backupId/export": ({ params, query }) => {
+      const backup = findBackup(params.id, params.backupId);
+      const entry = backupNamespaceOf(backupNamespaces(backup), query.get("ns") ?? "");
+      const limit = Math.min(EXPORT_MAX_LIMIT, Number(query.get("limit") ?? EXPORT_DEFAULT_LIMIT));
+      const page = pageOfDocuments(entry, backup, parseMockFilter(query.get("filter")), 0, limit);
+      return exportFile(
+        entry.ns,
+        page.documents.map((text) => JSON.parse(text) as Record<string, unknown>),
+        query.get("format") ?? "json",
+        query.get("ejson") === "canonical",
+        page.next !== undefined,
+      );
     },
 
     "POST /api/restore/plan": ({ body }) => restorePlan(body),
@@ -972,6 +1064,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     "POST /api/config/import": ({ body }) => importConfig(body),
 
     ...live.handlers,
+    ...onboarding.handlers,
   };
 
   /**
@@ -1468,7 +1561,12 @@ function planFromInput(id: string, input: PlanInput, existing: PlanView | undefi
               existing?.encryption.kind === "passphrase",
           },
         }
-      : input.encryption;
+      : input.encryption.kind === "managed"
+        ? // Keep the plan's key (a key is never replaced), or "generate" one.
+          existing?.encryption.kind === "managed"
+          ? existing.encryption
+          : mockManagedKey()
+        : input.encryption;
   return {
     id,
     name: input.name,
@@ -1557,19 +1655,21 @@ function parseMockFilter(text: string | null): MockFilter | undefined {
   }
 }
 
+/** A namespace of a backup, or the server's 404. */
+function backupNamespaceOf(
+  entries: readonly { ns: string; documents: number }[],
+  ns: string,
+): { ns: string; documents: number } {
+  const entry = entries.find((candidate) => candidate.ns === ns);
+  if (entry === undefined) {
+    throw new MockHttpError(404, "MS_NAMESPACE_NOT_FOUND", `The backup has no namespace "${ns}".`);
+  }
+  return entry;
+}
+
+/** Backup documents match filters the way live ones do in the mock (mock/live.ts). */
 function documentMatches(document: Record<string, unknown>, filter: MockFilter): boolean {
-  return Object.entries(filter).every(([field, condition]) => {
-    const value = JSON.stringify(document[field]);
-    if (
-      typeof condition === "object" &&
-      condition !== null &&
-      "$in" in condition &&
-      Array.isArray(condition.$in)
-    ) {
-      return condition.$in.some((candidate: unknown) => JSON.stringify(candidate) === value);
-    }
-    return JSON.stringify(condition) === value;
-  });
+  return matches(document, { ...filter });
 }
 
 /** The mock only scans this many generated documents when filtering. */

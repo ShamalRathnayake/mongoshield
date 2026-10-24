@@ -9,6 +9,15 @@
  *   POST   /api/plans/:id/run    operator  → a backup job
  *   POST   /api/plans/:id/prune/plan  admin  dry run of the plan's retention policy
  *   POST   /api/plans/:id/prune       admin  → a prune job deleting what the dry run listed
+ *   POST   /api/plans/:id/recovery-key admin  the managed private key, for safekeeping (audited)
+ *
+ * Managed keys (`encryption.kind: "managed"`): the console generates an age key pair,
+ * encrypts backups to its public key and keeps the private key sealed, so restores need
+ * no typing. The private key is the one secret this API hands out on purpose: an admin
+ * downloads it once as the "recovery key", because without the console (a lost volume)
+ * it is the only way to restore those backups. Because of that, a plan whose recovery key
+ * was never downloaded can neither be deleted nor switched to another encryption: the
+ * key would be gone, and with it the backups.
  *
  * Plans are admin-only to edit because they hold secrets (backup passphrase,
  * webhook URLs) and decide what leaves the database; running one is an
@@ -16,6 +25,7 @@
  */
 
 import type { Hono } from "hono";
+import { generateIdentity } from "mongoshield";
 import { checkSchedule } from "../../jobs/schedules.ts";
 import {
   backupJob,
@@ -25,10 +35,15 @@ import {
   pruneJob,
   storageById,
 } from "../../jobs/tasks.ts";
-import type { PlanView } from "../../shared/api.ts";
+import type { PlanView, RecoveryKeyView } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
 import { redactUrlToOrigin } from "../../state/redact.ts";
-import { sealNotifyUrl, sealPlanPassphrase } from "../../state/secrets.ts";
+import {
+  openPlanIdentity,
+  sealNotifyUrl,
+  sealPlanIdentity,
+  sealPlanPassphrase,
+} from "../../state/secrets.ts";
 import type { NotifyRecord, PlanEncryptionRecord, PlanRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
@@ -103,6 +118,7 @@ export function planRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
     const body = asObject(await readJson(c));
     const existing = planById(store, id);
     const record = parsePlan(services, id, body, existing);
+    assertKeyNotLost(existing, record);
     await store.update((state) => {
       if (!state.plans.some((plan) => plan.id === id)) throw notFound("The plan");
       assertNameFree(state.plans, record.name, id);
@@ -125,6 +141,7 @@ export function planRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
     const removed = await store.update((state) => {
       const existing = state.plans.find((plan) => plan.id === id);
       if (existing === undefined) throw notFound("The plan");
+      assertKeyNotLost(existing, undefined);
       state.plans = state.plans.filter((plan) => plan.id !== id);
       return existing;
     });
@@ -153,6 +170,38 @@ export function planRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       details: { plan: plan.id, job: job.id },
     });
     return c.json(job);
+  });
+
+  app.post("/api/plans/:id/recovery-key", async (c) => {
+    const principal = requireRole(c, "admin");
+    const plan = planById(store, c.req.param("id"));
+    const identity = openPlanIdentity(store, plan);
+    if (identity === undefined || plan.encryption.kind !== "managed") {
+      throw new ConsoleError(
+        409,
+        "CONSOLE_NO_MANAGED_KEY",
+        `The plan "${plan.name}" does not use a key kept by the console.`,
+        'Only plans with "Encrypted with a key the console keeps" have a recovery key.',
+      );
+    }
+    const recipient = plan.encryption.recipient;
+    const savedAt = services.now().toISOString();
+    await store.update((state) => {
+      state.plans = state.plans.map((candidate) =>
+        candidate.id === plan.id && candidate.encryption.kind === "managed"
+          ? { ...candidate, encryption: { ...candidate.encryption, recoveryKeySavedAt: savedAt } }
+          : candidate,
+      );
+    });
+    await recordAudit(services, {
+      actor: principal,
+      action: "plan.recovery_key",
+      target: plan.name,
+      outcome: "success",
+      // The public key identifies which key was handed out; the private key is never logged.
+      details: { plan: plan.id, recipient },
+    });
+    return c.json(recoveryKeyView(plan, identity, recipient, savedAt));
   });
 
   app.post("/api/plans/:id/prune/plan", async (c) => {
@@ -253,8 +302,9 @@ function parseEncryption(
   existing: PlanRecord | undefined,
 ): PlanEncryptionRecord {
   const fields = asObject(value, '"encryption"');
-  const kind = oneOf(fields, "kind", ["none", "recipients", "passphrase"]);
+  const kind = oneOf(fields, "kind", ["none", "recipients", "passphrase", "managed"]);
   if (kind === "none") return { kind };
+  if (kind === "managed") return managedKeyFor(services, planId, existing);
   if (kind === "recipients") {
     const recipients =
       optionalStringArray(fields, "recipients", { maxItems: MAX_RECIPIENTS, maxLength: 200 }) ?? [];
@@ -275,6 +325,76 @@ function parseEncryption(
     );
   }
   return { kind, passphrase: sealPlanPassphrase(services.store, planId, passphrase) };
+}
+
+/**
+ * The plan's managed key: the one it has (a key is never replaced, or the backups made
+ * with it would become unreadable), or a newly generated one.
+ */
+export function managedKeyFor(
+  services: ConsoleServices,
+  planId: string,
+  existing: PlanRecord | undefined,
+): PlanEncryptionRecord {
+  if (existing?.encryption.kind === "managed") return existing.encryption;
+  const { identity, recipient } = generateIdentity();
+  return {
+    kind: "managed",
+    recipient,
+    identity: sealPlanIdentity(services.store, planId, identity),
+  };
+}
+
+/**
+ * Refuses changes that would throw away a managed key nobody has a copy of: deleting
+ * the plan (`next` undefined) or switching it to another encryption. Once the recovery
+ * key has been downloaded, the admin has the copy and may do either.
+ */
+function assertKeyNotLost(existing: PlanRecord, next: PlanRecord | undefined): void {
+  if (existing.encryption.kind !== "managed") return;
+  if (next?.encryption.kind === "managed") return;
+  if (existing.encryption.recoveryKeySavedAt !== undefined) return;
+  throw new ConsoleError(
+    409,
+    "CONSOLE_RECOVERY_KEY_NOT_SAVED",
+    `The backups of "${existing.name}" are encrypted with a key only the console has.`,
+    next === undefined
+      ? "Download the recovery key first (Backup plans → the plan → Recovery key): without it, those backups could never be restored once the plan is deleted."
+      : "Download the recovery key first (Backup plans → the plan → Recovery key): without it, the backups made so far could never be restored after the switch.",
+  );
+}
+
+/** The recovery key as a file: the key plus comments saying what it is and how to use it. */
+function recoveryKeyView(
+  plan: PlanRecord,
+  identity: string,
+  recipient: string,
+  savedAt: string,
+): RecoveryKeyView {
+  const safeName = plan.name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "plan";
+  return {
+    planId: plan.id,
+    planName: plan.name,
+    identity,
+    recipient,
+    filename: `mongoshield-recovery-key-${safeName}.txt`,
+    fileContent: [
+      `# MongoShield recovery key for the backup plan ${JSON.stringify(plan.name)}`,
+      `# Saved: ${savedAt}`,
+      `# Public key: ${recipient}`,
+      "#",
+      "# This private key decrypts the plan's backups. Keep it somewhere safe and",
+      "# separate from the console (a password manager, a vault). Anyone who has it",
+      "# and a copy of the backups can read them.",
+      "#",
+      "# Restore without the console:",
+      "#   MONGOSHIELD_STORAGE=<backup location> mongoshield restore latest \\",
+      "#     --to-uri <connection string> --identity-file <this file>",
+      "# or paste the key into the console's restore wizard.",
+      identity,
+      "",
+    ].join("\n"),
+  };
 }
 
 function parseNotify(

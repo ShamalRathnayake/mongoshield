@@ -9,7 +9,7 @@
 
 import type { APIRequestContext } from "@playwright/test";
 import { accessibilityProblems } from "./a11y.ts";
-import { ADMIN, NAMES } from "./env.ts";
+import { ADMIN, NAMES, SEED } from "./env.ts";
 import { expect, idByName, readableBackup, signIn, test } from "./fixtures.ts";
 
 /** Ids of the records the journey created, read through the API. */
@@ -36,8 +36,11 @@ test("every page is accessible and free of console errors and CSP violations", a
 
   const routes = [
     "/",
+    "/welcome",
     "/connections",
     `/connections/${ids.connectionId}`,
+    `/connections/${ids.connectionId}/data`,
+    `/connections/${ids.connectionId}/data?ns=${SEED.database}.${SEED.orders}`,
     "/storage",
     "/plans",
     "/plans/new",

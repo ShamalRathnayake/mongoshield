@@ -15,7 +15,8 @@ export function PageHeader(props: {
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
-  breadcrumbs?: readonly { readonly label: string; readonly href: string }[];
+  /** Links to the pages above this one; a crumb without `href` is the current place. */
+  breadcrumbs?: readonly { readonly label: string; readonly href?: string }[];
 }) {
   return (
     <header className="page-header">
@@ -23,9 +24,15 @@ export function PageHeader(props: {
         {props.breadcrumbs === undefined || props.breadcrumbs.length === 0 ? null : (
           <nav aria-label="Breadcrumb" className="breadcrumbs">
             <ol>
-              {props.breadcrumbs.map((crumb) => (
-                <li key={crumb.href}>
-                  <a href={crumb.href}>{crumb.label}</a>
+              {props.breadcrumbs.map((crumb, index) => (
+                // Crumbs are a fixed path for one render; the position is a stable key.
+                // biome-ignore lint/suspicious/noArrayIndexKey: see above.
+                <li key={index}>
+                  {crumb.href === undefined ? (
+                    <span aria-current="location">{crumb.label}</span>
+                  ) : (
+                    <a href={crumb.href}>{crumb.label}</a>
+                  )}
                 </li>
               ))}
             </ol>
@@ -210,8 +217,11 @@ export function Tabs(props: {
   selected: string;
   onSelect: (id: string) => void;
   children: ReactNode;
+  /** Prefix of the element ids, for pages with two tab sets (default `tab`). */
+  idPrefix?: string;
 }) {
   const { tabs, onSelect } = props;
+  const prefix = props.idPrefix ?? "tab";
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const index = tabs.findIndex((tab) => tab.id === props.selected);
     let next: TabItem | undefined;
@@ -222,7 +232,7 @@ export function Tabs(props: {
     if (next === undefined) return;
     event.preventDefault();
     onSelect(next.id);
-    document.getElementById(`tab-${next.id}`)?.focus();
+    document.getElementById(`${prefix}-${next.id}`)?.focus();
   };
   return (
     <div className="tabs">
@@ -230,11 +240,11 @@ export function Tabs(props: {
         {tabs.map((tab) => (
           <button
             key={tab.id}
-            id={`tab-${tab.id}`}
+            id={`${prefix}-${tab.id}`}
             type="button"
             role="tab"
             aria-selected={tab.id === props.selected}
-            aria-controls={`tabpanel-${tab.id}`}
+            aria-controls={`${prefix}panel-${tab.id}`}
             tabIndex={tab.id === props.selected ? 0 : -1}
             className="tab"
             onClick={() => onSelect(tab.id)}
@@ -245,8 +255,8 @@ export function Tabs(props: {
       </div>
       <div
         role="tabpanel"
-        id={`tabpanel-${props.selected}`}
-        aria-labelledby={`tab-${props.selected}`}
+        id={`${prefix}panel-${props.selected}`}
+        aria-labelledby={`${prefix}-${props.selected}`}
         className="tab-panel"
       >
         {props.children}

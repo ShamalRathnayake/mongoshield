@@ -1,9 +1,27 @@
 /**
  * The console's configuration, read from environment variables.
  *
- *   MONGOSHIELD_SECRET               required; ≥ 32 characters. Derives the key that encrypts
- *                                    stored secrets. Losing it makes stored secrets unreadable.
+ *   MONGOSHIELD_SECRET               ≥ 32 characters. Derives the key that encrypts stored
+ *                                    secrets. Losing it makes stored secrets unreadable.
+ *                                    Optional: without it (and without _FILE) the console
+ *                                    generates one on first start into <data>/secret.key
+ *                                    (src/state/secret-key.ts) and reuses it afterwards.
+ *   MONGOSHIELD_SECRET_FILE          read the secret from this file instead (Docker and
+ *                                    Kubernetes secrets); setting both is refused
  *   MONGOSHIELD_DATA_DIR             where console.json and audit.jsonl live (default /data)
+ *
+ * First run (see docs/console-security.md for the reasoning):
+ *
+ *   MONGOSHIELD_SETUP_WINDOW_MINUTES  while no admin exists, the setup page may create the
+ *                                    first admin WITHOUT the setup token for this many
+ *                                    minutes after start (default 15; 0 = always need the
+ *                                    token; at most 1440). The token always works.
+ *   MONGOSHIELD_ADMIN_USERNAME       create this admin at start when no user exists yet
+ *     (or MONGOSHIELD_ADMIN_EMAIL)   (headless installs: compose, Kubernetes); needs
+ *   MONGOSHIELD_ADMIN_PASSWORD       the password, ≥ 12 characters, or
+ *   MONGOSHIELD_ADMIN_PASSWORD_FILE  a file containing it. Ignored once any user exists.
+ *   MONGOSHIELD_DEFAULT_STORAGE      "false": do not create the "Local backups" storage
+ *                                    location (<data>/backups) on a fresh data directory
  *   PORT / HOST                      listen address (default 8080 / 0.0.0.0)
  *   MONGOSHIELD_PUBLIC_URL           e.g. https://backups.example.com: used for the setup link,
  *                                    the origin check, and HSTS when it is https
@@ -31,14 +49,29 @@
  *   MONGOSHIELD_OIDC_CLOCK_SKEW_SECONDS  tolerated clock difference (default 60, at most 300)
  */
 
+import { readFileSync } from "node:fs";
 import { ROLES, type Role } from "../shared/api.ts";
 import { MIN_SECRET_LENGTH } from "../state/crypto.ts";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../state/passwords.ts";
+import { USERNAME_PATTERN } from "./auth.ts";
 import { isAllowedEndpoint, isLoopbackHost } from "./oidc/provider.ts";
 import { DEFAULT_CLOCK_SKEW_MS, DEFAULT_SCOPES, type OidcSettings } from "./oidc/settings.ts";
 
 /** Everything main.ts needs from the environment. */
 export interface ConsoleEnvironment {
-  readonly secret: string;
+  /**
+   * The operator's secret (MONGOSHIELD_SECRET, or the contents of MONGOSHIELD_SECRET_FILE).
+   * Absent: main.ts uses the data directory's generated `secret.key` instead.
+   */
+  readonly secret?: string;
+  /** Where the secret came from, for the startup log (never the secret itself). */
+  readonly secretSource: "env" | "file" | "generated";
+  /** First-run setup without the token is allowed this long after start (0 = never). */
+  readonly setupWindowMs: number;
+  /** The admin to create at start while no user exists (MONGOSHIELD_ADMIN_*). */
+  readonly initialAdmin?: InitialAdmin;
+  /** Create the "Local backups" storage location on a fresh data directory. */
+  readonly defaultStorage: boolean;
   readonly dataDir: string;
   readonly port: number;
   readonly host: string;
@@ -52,6 +85,17 @@ export interface ConsoleEnvironment {
   readonly oidc?: OidcSettings;
 }
 
+/** The first admin, provisioned from the environment (headless installs). */
+export interface InitialAdmin {
+  readonly username: string;
+  readonly password: string;
+}
+
+/** Default setup window: 15 minutes, like Portainer's (which uses 5). */
+export const DEFAULT_SETUP_WINDOW_MINUTES = 15;
+/** Longest setup window: a day, the setup token's own lifetime. */
+const MAX_SETUP_WINDOW_MINUTES = 24 * 60;
+
 /** A configuration problem, explained for the operator. */
 export class EnvironmentError extends Error {
   override readonly name = "EnvironmentError";
@@ -62,23 +106,7 @@ const MIN_TOKEN_LENGTH = 32;
 
 /** Reads and checks the environment. */
 export function readEnvironment(env: NodeJS.ProcessEnv): ConsoleEnvironment {
-  const secret = env.MONGOSHIELD_SECRET ?? "";
-  if (secret === "") {
-    throw new EnvironmentError(
-      [
-        "MONGOSHIELD_SECRET is not set.",
-        "The console encrypts the connection strings, storage credentials and passphrases it stores",
-        "with a key derived from this secret, and refuses to start without one.",
-        "Generate one with `openssl rand -hex 32`, keep it safe (e.g. in your secret manager),",
-        "and pass the same value on every start: without it, stored secrets cannot be read.",
-      ].join("\n"),
-    );
-  }
-  if (secret.length < MIN_SECRET_LENGTH) {
-    throw new EnvironmentError(
-      `MONGOSHIELD_SECRET must be at least ${MIN_SECRET_LENGTH} characters (use \`openssl rand -hex 32\`).`,
-    );
-  }
+  const secret = readSecret(env);
 
   const port = Number(env.PORT ?? "8080");
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -111,8 +139,13 @@ export function readEnvironment(env: NodeJS.ProcessEnv): ConsoleEnvironment {
   const cookieSecure = env.MONGOSHIELD_COOKIE_SECURE?.toLowerCase() !== "false";
   const oidc = readOidcEnvironment(env, publicUrl?.replace(/\/+$/, ""), cookieSecure);
 
+  const initialAdmin = readInitialAdmin(env);
   return {
-    secret,
+    ...(secret === undefined ? {} : { secret: secret.value }),
+    secretSource: secret?.source ?? "generated",
+    setupWindowMs: readSetupWindowMinutes(env) * 60_000,
+    defaultStorage: readBoolean(env, "MONGOSHIELD_DEFAULT_STORAGE", true),
+    ...(initialAdmin === undefined ? {} : { initialAdmin }),
     dataDir: optional(env.MONGOSHIELD_DATA_DIR) ?? "/data",
     port,
     host: optional(env.HOST) ?? "0.0.0.0",
@@ -124,6 +157,119 @@ export function readEnvironment(env: NodeJS.ProcessEnv): ConsoleEnvironment {
     ...(metricsToken === undefined ? {} : { metricsToken }),
     ...(webhookSecret === undefined ? {} : { webhookSecret }),
   };
+}
+
+/**
+ * The operator's secret from MONGOSHIELD_SECRET or MONGOSHIELD_SECRET_FILE, or
+ * `undefined` when neither is set (the data directory's generated key is used then).
+ * Both at once is refused: it is unclear which one the operator meant.
+ */
+function readSecret(
+  env: NodeJS.ProcessEnv,
+): { readonly value: string; readonly source: "env" | "file" } | undefined {
+  // Used exactly as given, never trimmed: the key derived from it must not change
+  // for consoles that have been running with it (a stray space is part of the secret).
+  const direct = env.MONGOSHIELD_SECRET === "" ? undefined : env.MONGOSHIELD_SECRET;
+  const file = optional(env.MONGOSHIELD_SECRET_FILE);
+  if (direct !== undefined && file !== undefined) {
+    throw new EnvironmentError(
+      "Set either MONGOSHIELD_SECRET or MONGOSHIELD_SECRET_FILE, not both.",
+    );
+  }
+  if (direct === undefined && file === undefined) return undefined;
+  const value = direct ?? readSecretFile("MONGOSHIELD_SECRET_FILE", file ?? "").trim();
+  if (value.length < MIN_SECRET_LENGTH) {
+    throw new EnvironmentError(
+      `${direct === undefined ? "The file in MONGOSHIELD_SECRET_FILE" : "MONGOSHIELD_SECRET"} must hold at least ${MIN_SECRET_LENGTH} characters (use \`openssl rand -hex 32\`).`,
+    );
+  }
+  return { value, source: direct === undefined ? "file" : "env" };
+}
+
+/**
+ * Reads a `*_FILE` variable's file. Docker and Kubernetes mount secrets as files, often
+ * readable by everyone in the container (mode 0444/0644); that is their own access
+ * control, so the console does not insist on 0600 here (unlike its own secret.key).
+ */
+function readSecretFile(variable: string, path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    const code = error instanceof Error ? String(Reflect.get(error, "code") ?? "") : "";
+    throw new EnvironmentError(
+      `${variable}: cannot read ${path}${code === "" ? "" : ` (${code})`}.`,
+    );
+  }
+}
+
+/** MONGOSHIELD_SETUP_WINDOW_MINUTES: a whole number of minutes, 0 to turn the window off. */
+function readSetupWindowMinutes(env: NodeJS.ProcessEnv): number {
+  const raw = optional(env.MONGOSHIELD_SETUP_WINDOW_MINUTES);
+  if (raw === undefined) return DEFAULT_SETUP_WINDOW_MINUTES;
+  const minutes = Number(raw);
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > MAX_SETUP_WINDOW_MINUTES) {
+    throw new EnvironmentError(
+      `MONGOSHIELD_SETUP_WINDOW_MINUTES must be a whole number of minutes from 0 (always require the setup token) to ${MAX_SETUP_WINDOW_MINUTES}.`,
+    );
+  }
+  return minutes;
+}
+
+/**
+ * MONGOSHIELD_ADMIN_USERNAME (or its alias MONGOSHIELD_ADMIN_EMAIL) together with
+ * MONGOSHIELD_ADMIN_PASSWORD or MONGOSHIELD_ADMIN_PASSWORD_FILE. Half a pair is refused:
+ * an operator who set one of them expects an admin, and silently getting the setup
+ * page instead would leave the console open to whoever finds it first.
+ */
+function readInitialAdmin(env: NodeJS.ProcessEnv): InitialAdmin | undefined {
+  const byName = optional(env.MONGOSHIELD_ADMIN_USERNAME);
+  const byEmail = optional(env.MONGOSHIELD_ADMIN_EMAIL);
+  if (byName !== undefined && byEmail !== undefined && byName !== byEmail) {
+    throw new EnvironmentError(
+      "Set MONGOSHIELD_ADMIN_USERNAME or MONGOSHIELD_ADMIN_EMAIL, not two different values.",
+    );
+  }
+  const username = byName ?? byEmail;
+  const direct = env.MONGOSHIELD_ADMIN_PASSWORD;
+  const file = optional(env.MONGOSHIELD_ADMIN_PASSWORD_FILE);
+  const hasPassword = (direct !== undefined && direct !== "") || file !== undefined;
+  if (username === undefined && !hasPassword) return undefined;
+  if (username === undefined || !hasPassword) {
+    throw new EnvironmentError(
+      "To create the first admin from the environment, set both MONGOSHIELD_ADMIN_USERNAME (or MONGOSHIELD_ADMIN_EMAIL) and MONGOSHIELD_ADMIN_PASSWORD (or MONGOSHIELD_ADMIN_PASSWORD_FILE).",
+    );
+  }
+  if (direct !== undefined && direct !== "" && file !== undefined) {
+    throw new EnvironmentError(
+      "Set either MONGOSHIELD_ADMIN_PASSWORD or MONGOSHIELD_ADMIN_PASSWORD_FILE, not both.",
+    );
+  }
+  if (!USERNAME_PATTERN.test(username)) {
+    throw new EnvironmentError(
+      "MONGOSHIELD_ADMIN_USERNAME must be 1-64 characters: letters, digits, dots, dashes, underscores or @.",
+    );
+  }
+  // A password file usually ends with a newline that is not part of the password.
+  const password =
+    file === undefined
+      ? (direct ?? "")
+      : readSecretFile("MONGOSHIELD_ADMIN_PASSWORD_FILE", file).replace(/\r?\n$/, "");
+  if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+    throw new EnvironmentError(
+      `The admin password from the environment must be ${MIN_PASSWORD_LENGTH} to ${MAX_PASSWORD_LENGTH} characters long.`,
+    );
+  }
+  return { username, password };
+}
+
+/** A "true"/"false" variable (case-insensitive), with a default when unset. */
+function readBoolean(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = optional(env[name])?.toLowerCase();
+  if (raw === undefined) return fallback;
+  if (raw !== "true" && raw !== "false") {
+    throw new EnvironmentError(`${name} must be "true" or "false".`);
+  }
+  return raw === "true";
 }
 
 /** Every MONGOSHIELD_OIDC_* variable; anything else with that prefix is a typo and refused. */

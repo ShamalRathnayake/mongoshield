@@ -44,7 +44,12 @@ import { ConsoleError, invalid, notFound } from "../server/errors.ts";
 import type { PrunePlanView, RestorePlanView } from "../shared/api.ts";
 import { randomId } from "../state/crypto.ts";
 import { scrubText } from "../state/redact.ts";
-import { openConnectionUri, openNotifyUrl, openPlanPassphrase } from "../state/secrets.ts";
+import {
+  openConnectionUri,
+  openNotifyUrl,
+  openPlanIdentity,
+  openPlanPassphrase,
+} from "../state/secrets.ts";
 import type { StateStore } from "../state/store.ts";
 import type { ConnectionRecord, PlanRecord, StorageRecord } from "../state/types.ts";
 import type { JobContext, JobSpec } from "./runner.ts";
@@ -92,8 +97,9 @@ export function planById(store: StateStore, id: string): PlanRecord {
 
 /**
  * Keys for reading encrypted backups in a storage location: the ones given with
- * the request, else the passphrase of a plan that writes to that location (the
- * console already holds it, so the user need not type it again).
+ * the request, else the keys the console holds for plans writing to that location
+ * (the first passphrase, and every managed private key), so the user need not type
+ * them again. age tries each identity in turn, so several keys are fine.
  */
 export function decryptionFor(
   store: StateStore,
@@ -106,12 +112,19 @@ export function decryptionFor(
       ...(given.identities === undefined ? {} : { identities: given.identities }),
     };
   }
+  let passphrase: string | undefined;
+  const identities: string[] = [];
   for (const plan of store.current.plans) {
     if (plan.storageId !== storageId) continue;
-    const passphrase = openPlanPassphrase(store, plan);
-    if (passphrase !== undefined) return { passphrase };
+    passphrase ??= openPlanPassphrase(store, plan);
+    const identity = openPlanIdentity(store, plan);
+    if (identity !== undefined) identities.push(identity);
   }
-  return undefined;
+  if (passphrase === undefined && identities.length === 0) return undefined;
+  return {
+    ...(passphrase === undefined ? {} : { passphrase }),
+    ...(identities.length === 0 ? {} : { identities }),
+  };
 }
 
 /** A `MongoShield` for one storage location (and optionally a source connection). */
@@ -144,13 +157,23 @@ export function backupJob(deps: TaskDeps, plan: PlanRecord, startedBy: string): 
   const storage = storageById(deps.store, plan.storageId);
   const uri = openConnectionUri(deps.store, connection);
   const passphrase = openPlanPassphrase(deps.store, plan);
+  // A managed key's private half decrypts the new backup for the verify step.
+  const identity = openPlanIdentity(deps.store, plan);
+  const decryption = {
+    ...(passphrase === undefined ? {} : { passphrase }),
+    ...(identity === undefined ? {} : { identities: [identity] }),
+  };
   return {
     kind: "backup",
     lane: `connection:${connection.id}`,
     startedBy,
     planId: plan.id,
     storageId: storage.id,
-    secrets: [uri, ...(passphrase === undefined ? [] : [passphrase])],
+    secrets: [
+      uri,
+      ...(passphrase === undefined ? [] : [passphrase]),
+      ...(identity === undefined ? [] : [identity]),
+    ],
     run: async (context) => {
       const logger = jobLogger(context, deps.logger, [uri]);
       const encryption = encryptionOf(plan, passphrase);
@@ -168,7 +191,7 @@ export function backupJob(deps: TaskDeps, plan: PlanRecord, startedBy: string): 
         // the plan's own backups of this source.
         scopeLabels: planScopeLabels(plan),
         onProgress: context.progress,
-        ...(passphrase === undefined ? {} : { decryption: { passphrase } }),
+        ...(Object.keys(decryption).length === 0 ? {} : { decryption }),
         ...(deps.webhookSecret === undefined ? {} : { webhookSecret: deps.webhookSecret }),
       });
       return outcomeOf(report);
@@ -222,6 +245,9 @@ function encryptionOf(
       return { recipients: plan.encryption.recipients };
     case "passphrase":
       return passphrase === undefined ? undefined : { passphrase };
+    case "managed":
+      // Encrypting needs only the public key; the private key stays sealed.
+      return { recipients: [plan.encryption.recipient] };
   }
 }
 

@@ -5,6 +5,7 @@
 
 import { BSON, Double, Int32, Long, ObjectId } from "mongodb";
 import { describe, expect, it } from "vitest";
+import { relaxedText } from "../ejson-text.ts";
 import { parseNamespace } from "./apply.ts";
 import {
   assertNoServerJavaScript,
@@ -23,7 +24,8 @@ import {
 
 /** The relaxed text the browser shows, edited by `change`, parsed like the server does. */
 function editedFrom(original: BSON.Document, change: (value: Record<string, unknown>) => void) {
-  const shown = JSON.parse(BSON.EJSON.stringify(original, { relaxed: true }));
+  // Exactly the text the browser is shown (relaxed, unsafe Int64 values kept exact).
+  const shown = JSON.parse(relaxedText(original));
   change(shown);
   return parseDocumentText(JSON.stringify(shown));
 }
