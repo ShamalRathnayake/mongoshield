@@ -1,0 +1,20 @@
+# A restore drill: restore the latest backup of the "nightly" plan into temporary
+# databases on a scratch deployment, check counts, indexes and 100 documents per
+# collection, drop them, and record the measured restore time (RTO).
+#   kubectl create secret generic scratch-mongodb --from-literal=MONGODB_URI='mongodb://scratch:27017/'
+#   kubectl create -f drill.yaml
+#   kubectl get msdrill
+apiVersion: mongoshield.io/v1alpha1
+kind: MongoShieldDrill
+metadata:
+  generateName: nightly-drill-
+spec:
+  planRef:
+    name: nightly
+  backup:
+    id: latest
+  target:
+    # Only the Job sees this connection string (as MONGOSHIELD_DRILL_URI).
+    uriSecretRef:
+      name: scratch-mongodb
+  sample: 100

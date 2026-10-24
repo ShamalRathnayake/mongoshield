@@ -1,0 +1,37 @@
+# Restore the latest backup of the "nightly" plan into a staging cluster, next to
+# whatever is there (renamed), without touching existing collections.
+#   kubectl create secret generic staging-mongodb --from-literal=MONGODB_URI='mongodb://...'
+#   kubectl create -f restore.yaml
+apiVersion: mongoshield.io/v1alpha1
+kind: MongoShieldRestore
+metadata:
+  generateName: staging-refresh-
+spec:
+  planRef:
+    name: nightly
+  backup:
+    id: latest
+  target:
+    uriSecretRef:
+      name: staging-mongodb
+  rename:
+    - from: "app.*"
+      to: "app_restored.*"
+---
+# Replacing collections (mode drop/insert/upsert) must be confirmed by naming the
+# target Secret in spec.confirm; the API server refuses the object otherwise.
+apiVersion: mongoshield.io/v1alpha1
+kind: MongoShieldRestore
+metadata:
+  generateName: staging-replace-
+spec:
+  planRef:
+    name: nightly
+  backup:
+    # A MongoShieldBackup object: its backup id is restored (it must have succeeded).
+    name: nightly-29330000
+  target:
+    uriSecretRef:
+      name: staging-mongodb
+  mode: drop
+  confirm: staging-mongodb

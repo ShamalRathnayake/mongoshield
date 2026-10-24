@@ -1,0 +1,14 @@
+# An on-demand backup with the settings of the "nightly" plan, deeply verified.
+#   kubectl create -f backup.yaml
+#   kubectl get msbackup -w
+apiVersion: mongoshield.io/v1alpha1
+kind: MongoShieldBackup
+metadata:
+  # generateName: every `kubectl create` makes a new run.
+  generateName: nightly-manual-
+spec:
+  planRef:
+    name: nightly
+  verify: deep
+  # Delete: deleting this object also deletes the backup from storage (Retain is the default).
+  deletionPolicy: Retain
