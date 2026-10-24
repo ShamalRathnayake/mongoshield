@@ -58,7 +58,9 @@ function everyBsonType(index: number): Document {
     binary: new Binary(Buffer.from([0, 1, 2, 255])),
     uuid: new UUID(),
     customBinary: new Binary(Buffer.from("custom"), 0x80),
-    date: new Date(1_700_000_000_000 + index),
+    // In 2096: the collection has a TTL index (below), and the server's TTL monitor
+    // (every 60 s) would delete documents dated in the past in the middle of a test.
+    date: new Date(4_000_000_000_000 + index),
     regex: new BSONRegExp("^a.*b$", "imsx"),
     code: new Code("function () { return 1; }"),
     int32: new Int32(-42),

@@ -32,6 +32,16 @@ function ignoreBrokenPipe(error: NodeJS.ErrnoException): void {
   throw error;
 }
 
+/**
+ * Resolves once everything written to `stream` so far has been handed to the OS:
+ * pipes are asynchronous on macOS, so exiting right away could cut the output short.
+ */
+function flush(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise((done) => {
+    stream.write("", () => done());
+  });
+}
+
 process.on("SIGINT", onInterrupt);
 
 // Containers and process managers stop programs with SIGTERM. One-off commands treat
@@ -57,6 +67,15 @@ const io: CliIo = {
   ...(process.stderr.columns ? { columns: process.stderr.columns } : {}),
 };
 
-process.exitCode = await runCli(process.argv.slice(2), io);
+const exitCode = await runCli(process.argv.slice(2), io);
+process.exitCode = exitCode;
 process.off("SIGINT", onInterrupt);
 if (handlesTermination) process.off("SIGTERM", onInterrupt);
+
+// A cancelled command has reported its outcome, but the driver may still hold a
+// socket to a server that never answered (on Linux until connectTimeoutMS), which
+// would keep the process alive. Nothing is left to do, so exit once the output is out.
+if (controller.signal.aborted) {
+  await Promise.all([flush(process.stdout), flush(process.stderr)]);
+  process.exit(exitCode);
+}
