@@ -330,8 +330,10 @@ describe("consistency converge", () => {
     await seed(source, "a", 10);
     const storage = memoryStorage();
     const manifest = await backup(storage, source);
-    // The window includes T0 itself, which may be the seeding write (replaying it is harmless).
-    expect(manifest.changes?.events).toBeLessThanOrEqual(1);
+    // Nothing changed during the backup, but T0 errs early on purpose (an early start
+    // is safe), so on a busy server the window may still hold the 10 seeding inserts.
+    // Replaying them onto the dumped documents changes nothing.
+    expect(manifest.changes?.events).toBeLessThanOrEqual(10);
     const key = resolveBackupKey(manifest.id, manifest.changes?.key ?? "");
     expect(storage.keys()).toContain(key);
   });

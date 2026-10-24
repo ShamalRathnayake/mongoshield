@@ -180,6 +180,8 @@ jobs:
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          # Documented exceptions, each with a reason and an expiry date.
+          trivyignores: .trivyignore
           exit-code: "1"
           format: table
 

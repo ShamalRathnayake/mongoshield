@@ -32,7 +32,7 @@
 # Declared before the first FROM so every stage can read it.
 ARG CLOUD_SDKS=s3
 
-# Node.js major version. Debian 12 (bookworm) everywhere so the deps stage and the
+# Node.js major version. Debian 13 (trixie) everywhere so the deps stage and the
 # distroless runtime share the same glibc, should a dependency ever ship native code.
 ARG NODE_MAJOR=24
 
@@ -43,7 +43,7 @@ ARG NODE_MAJOR=24
 # Runs on the builder's own CPU architecture ($BUILDPLATFORM) even for arm64 images:
 # its output (JavaScript and an npm tarball) is identical on every platform, and
 # running natively avoids slow QEMU emulation in multi-arch builds.
-FROM --platform=$BUILDPLATFORM node:${NODE_MAJOR}-bookworm AS build
+FROM --platform=$BUILDPLATFORM node:${NODE_MAJOR}-trixie AS build
 
 WORKDIR /repo
 
@@ -86,7 +86,7 @@ RUN pnpm --filter mongoshield build \
 # Runs on the *target* platform. All dependencies are pure JavaScript today, but
 # installing on the target means a future dependency with platform-specific
 # optional packages still gets the right ones.
-FROM node:${NODE_MAJOR}-bookworm-slim AS deps
+FROM node:${NODE_MAJOR}-trixie-slim AS deps
 ARG CLOUD_SDKS
 
 # Why npm and not `pnpm deploy --prod`: the cloud SDKs are *optional peer*
@@ -126,7 +126,7 @@ RUN mkdir -p /backups
 #
 # The `nonroot` tag runs as uid/gid 65532. It is repeated below as a numeric
 # USER so Kubernetes can verify `runAsNonRoot: true` without guessing.
-FROM gcr.io/distroless/nodejs${NODE_MAJOR}-debian12:nonroot AS runtime
+FROM gcr.io/distroless/nodejs${NODE_MAJOR}-debian13:nonroot AS runtime
 
 ARG CLOUD_SDKS
 

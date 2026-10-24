@@ -59,7 +59,7 @@ import {
   clusterTimeOfResumeToken,
   compareClusterTimes,
   formatClusterTime,
-  readClusterTime,
+  readLatestClusterTime,
   toTimestamp,
 } from "./converge-time.ts";
 
@@ -346,7 +346,9 @@ class CaptureRun implements ChangeCapture {
   }
 
   async markDumped(ns: string): Promise<void> {
-    this.#dumpedAt.set(ns, await readClusterTime(this.#request.client));
+    // Erring late is the safe side here: a later "dumped at" only makes more renames
+    // take a destination snapshot (see #needsDestinationSnapshot).
+    this.#dumpedAt.set(ns, await readLatestClusterTime(this.#request.client));
   }
 
   async finish(): Promise<CapturedWindow> {
@@ -354,7 +356,8 @@ class CaptureRun implements ChangeCapture {
     let digest: { readonly size: number; readonly sha256: string };
     try {
       if (this.#failure !== undefined) throw this.#failure;
-      const to = await readClusterTime(this.#request.client);
+      // T1 must not be earlier than anything the dump read: see readLatestClusterTime.
+      const to = await readLatestClusterTime(this.#request.client);
       this.#stopAt = to;
       this.#drainStartedAt = performance.now();
       this.#request.logger.debug("Draining the change stream", { to: formatClusterTime(to) });

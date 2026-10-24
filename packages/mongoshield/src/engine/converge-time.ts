@@ -33,14 +33,14 @@ export function formatClusterTime(clusterTime: ClusterTime): string {
 }
 
 /**
- * Reads "now" as a cluster time, with a `ping`.
+ * Reads "now" as a cluster time, with a `ping`, erring EARLY: the reply's
+ * `operationTime`, which can lag behind writes the node has already applied (seen on
+ * MongoDB 8.0 under load). Use it where an early time is safe: the start of a window
+ * (T0) or a journal's starting point, where it only means a few extra events that
+ * replay harmlessly. For the end of a window use {@link readLatestClusterTime}.
  *
- * On a replica set every reply carries `operationTime`: the optime of the latest
- * write the node has applied. Every write a later read can see has a cluster time at
- * or before it, and every write committed later has a cluster time after it. That is
- * what both ends of the converge window need. A mongos may omit `operationTime` for
- * commands that reach no shard; then the gossiped `$clusterTime`, which is at or after
- * every write the client has seen, is used instead.
+ * A mongos may omit `operationTime` for commands that reach no shard; then the
+ * gossiped `$clusterTime` is used instead.
  *
  * @throws MS_UNSUPPORTED_TOPOLOGY when the reply carries no cluster time at all
  *   (a standalone server).
@@ -49,10 +49,30 @@ export async function readClusterTime(
   client: MongoClient,
   session?: ClientSession,
 ): Promise<ClusterTime> {
-  const reply = await client
-    .db("admin")
-    .command({ ping: 1 }, session === undefined ? {} : { session });
-  const clusterTime = clusterTimeOfReply(reply);
+  const reply = await pingForTime(client, session);
+  return requireClusterTime(clusterTimeOfReply(reply));
+}
+
+/**
+ * Reads "now" as a cluster time, erring LATE: the later of the reply's `$clusterTime`
+ * (the logical clock, which is never behind any write the node has applied or the
+ * client has seen) and its `operationTime`.
+ *
+ * This is what the END of a converge window (T1) needs. Every document the dump read
+ * must be at or before T1; if T1 came out early, the dump could hold changes from after
+ * T1 that the replay (which stops at T1) never reconciles, and the restore would mix
+ * moments. A late T1 only means the drain waits for, and replays, a few more events.
+ */
+export async function readLatestClusterTime(client: MongoClient): Promise<ClusterTime> {
+  const reply = await pingForTime(client);
+  return requireClusterTime(latestClusterTimeOfReply(reply));
+}
+
+async function pingForTime(client: MongoClient, session?: ClientSession): Promise<Document> {
+  return client.db("admin").command({ ping: 1 }, session === undefined ? {} : { session });
+}
+
+function requireClusterTime(clusterTime: ClusterTime | undefined): ClusterTime {
   if (clusterTime === undefined) {
     throw new MongoShieldError(
       "MS_UNSUPPORTED_TOPOLOGY",
@@ -63,15 +83,30 @@ export async function readClusterTime(
   return clusterTime;
 }
 
-/** `operationTime` of a command reply, falling back to `$clusterTime.clusterTime`. */
-export function clusterTimeOfReply(reply: Document): ClusterTime | undefined {
-  if (reply.operationTime instanceof Timestamp) return toClusterTime(reply.operationTime);
+/** The later of a reply's `$clusterTime.clusterTime` and `operationTime`. */
+export function latestClusterTimeOfReply(reply: Document): ClusterTime | undefined {
+  const operation =
+    reply.operationTime instanceof Timestamp ? toClusterTime(reply.operationTime) : undefined;
+  const gossiped = gossipedClusterTime(reply);
+  if (operation === undefined) return gossiped;
+  if (gossiped === undefined) return operation;
+  return compareClusterTimes(gossiped, operation) >= 0 ? gossiped : operation;
+}
+
+/** `$clusterTime.clusterTime` of a reply, if present. */
+function gossipedClusterTime(reply: Document): ClusterTime | undefined {
   const gossiped: unknown = reply.$clusterTime;
   const clusterTime: unknown =
     typeof gossiped === "object" && gossiped !== null
       ? Reflect.get(gossiped, "clusterTime")
       : undefined;
   return clusterTime instanceof Timestamp ? toClusterTime(clusterTime) : undefined;
+}
+
+/** `operationTime` of a command reply, falling back to `$clusterTime.clusterTime`. */
+export function clusterTimeOfReply(reply: Document): ClusterTime | undefined {
+  if (reply.operationTime instanceof Timestamp) return toClusterTime(reply.operationTime);
+  return gossipedClusterTime(reply);
 }
 
 /**

@@ -10,16 +10,22 @@ import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   simulatePosixRenameSupport,
   startSftpServer,
   type TestSftpServer,
 } from "../../test/helpers/sftp-server.ts";
 import { describeStorageConformance } from "../../test/helpers/storage-conformance.ts";
+
 import { isMongoShieldError } from "../errors.ts";
 import { type SftpStorageOptions, sftpStorage, sshFingerprint } from "./sftp.ts";
 import type { StorageAdapter } from "./types.ts";
+
+// Every operation here is a real SSH round trip (key exchange, encryption) through an
+// in-process server. The concurrency tests make dozens of them, which takes more than
+// Vitest's default 5 s on CI runners with coverage enabled.
+vi.setConfig({ testTimeout: 30_000 });
 
 let server: TestSftpServer;
 

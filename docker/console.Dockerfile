@@ -20,7 +20,7 @@ ARG NODE_MAJOR=24
 # ---------------------------------------------------------------------------
 # Stage 1: build both packages and pack them as npm tarballs
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM node:${NODE_MAJOR}-bookworm AS build
+FROM --platform=$BUILDPLATFORM node:${NODE_MAJOR}-trixie AS build
 WORKDIR /repo
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
@@ -52,7 +52,7 @@ RUN pnpm --filter mongoshield build \
 # ---------------------------------------------------------------------------
 # Stage 2: install the tarballs like a user would (flat node_modules, no symlinks)
 # ---------------------------------------------------------------------------
-FROM node:${NODE_MAJOR}-bookworm-slim AS deps
+FROM node:${NODE_MAJOR}-trixie-slim AS deps
 ARG CLOUD_SDKS
 WORKDIR /app
 COPY --from=build /pack/mongoshield.tgz /pack/console.tgz /tmp/
@@ -73,7 +73,7 @@ RUN mkdir -p /data
 # ---------------------------------------------------------------------------
 # Stage 3: distroless runtime, non-root
 # ---------------------------------------------------------------------------
-FROM gcr.io/distroless/nodejs${NODE_MAJOR}-debian12:nonroot AS runtime
+FROM gcr.io/distroless/nodejs${NODE_MAJOR}-debian13:nonroot AS runtime
 ARG CLOUD_SDKS
 
 LABEL org.opencontainers.image.title="MongoShield Console" \

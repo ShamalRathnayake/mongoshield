@@ -5,6 +5,7 @@ import {
   clusterTimeOfResumeToken,
   compareClusterTimes,
   formatClusterTime,
+  latestClusterTimeOfReply,
   toClusterTime,
   toTimestamp,
 } from "./converge-time.ts";
@@ -51,5 +52,36 @@ describe("clusterTimeOfResumeToken", () => {
     expect(clusterTimeOfResumeToken({ _data: "82AB" })).toBeUndefined();
     expect(clusterTimeOfResumeToken({ _data: "136AD7B3A000000017" })).toBeUndefined();
     expect(clusterTimeOfResumeToken({ _data: "82zzzzzzzzzzzzzzzz" })).toBeUndefined();
+  });
+});
+
+describe("latestClusterTimeOfReply", () => {
+  it("prefers the logical clock when operationTime lags behind it", () => {
+    // Seen on MongoDB 8.0 under load: operationTime behind writes already applied.
+    const reply = {
+      ok: 1,
+      operationTime: new Timestamp({ t: 10, i: 2 }),
+      $clusterTime: { clusterTime: new Timestamp({ t: 10, i: 9 }) },
+    };
+    expect(latestClusterTimeOfReply(reply)).toEqual({ t: 10, i: 9 });
+    // The early reader keeps using operationTime.
+    expect(clusterTimeOfReply(reply)).toEqual({ t: 10, i: 2 });
+  });
+
+  it("uses whichever time is present, and the later of the two", () => {
+    const time = new Timestamp({ t: 11, i: 1 });
+    expect(latestClusterTimeOfReply({ ok: 1, operationTime: time })).toEqual({ t: 11, i: 1 });
+    expect(latestClusterTimeOfReply({ ok: 1, $clusterTime: { clusterTime: time } })).toEqual({
+      t: 11,
+      i: 1,
+    });
+    expect(
+      latestClusterTimeOfReply({
+        ok: 1,
+        operationTime: new Timestamp({ t: 12, i: 0 }),
+        $clusterTime: { clusterTime: time },
+      }),
+    ).toEqual({ t: 12, i: 0 });
+    expect(latestClusterTimeOfReply({ ok: 1 })).toBeUndefined();
   });
 });

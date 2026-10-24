@@ -44,6 +44,17 @@ export interface StorageConformanceFixture {
   readonly objectLockConfigured?: boolean;
   /** How the store treats deleting or overwriting a locked object. Defaults to `"refused"`. */
   readonly lockedDeletes?: "refused" | "hidden";
+  /**
+   * Emulators only: behaviour the real service has but the emulator lacks. Each entry
+   * says why, and skips exactly the test that checks it instead of failing on a gap in
+   * the emulator. Real services must pass everything, so never set these for them.
+   */
+  readonly emulatorGaps?: {
+    /** `ifNoneMatch` is not enforced on streamed (resumable) uploads. */
+    readonly streamedConditionalCreates?: string;
+    /** Concurrent conditional creates are not atomic: more than one can win. */
+    readonly racingConditionalCreates?: string;
+  };
 }
 
 /** Registers the conformance tests for one adapter. */
@@ -56,12 +67,14 @@ export function describeStorageConformance(
     let cleanup: () => Promise<void>;
     let objectLockConfigured: boolean;
     let lockedDeletes: "refused" | "hidden";
+    let emulatorGaps: NonNullable<StorageConformanceFixture["emulatorGaps"]>;
 
     beforeEach(async () => {
       const fixture = await setup();
       ({ storage, cleanup } = fixture);
       objectLockConfigured = fixture.objectLockConfigured ?? true;
       lockedDeletes = fixture.lockedDeletes ?? "refused";
+      emulatorGaps = fixture.emulatorGaps ?? {};
     });
 
     /** True when retained puts are expected to succeed on this fixture. */
@@ -175,6 +188,7 @@ export function describeStorageConformance(
 
       it("supports conditional creates from a stream", async ({ skip }) => {
         if (!storage.capabilities.conditionalWrites) skip();
+        if (emulatorGaps.streamedConditionalCreates) skip(emulatorGaps.streamedConditionalCreates);
         await storage.put("locks/stream.lock", Readable.from([Buffer.from("a")]), {
           ifNoneMatch: "*",
         });
@@ -187,6 +201,7 @@ export function describeStorageConformance(
 
       it("lets exactly one of several racing conditional creates win", async ({ skip }) => {
         if (!storage.capabilities.conditionalWrites) skip();
+        if (emulatorGaps.racingConditionalCreates) skip(emulatorGaps.racingConditionalCreates);
         const attempts = Array.from({ length: 8 }, (_, index) =>
           storage.put("locks/race.lock", Buffer.from(`writer-${index}`), { ifNoneMatch: "*" }),
         );

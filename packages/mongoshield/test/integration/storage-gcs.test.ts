@@ -66,5 +66,13 @@ describe.skipIf(!dockerAvailable)("gcsStorage against fake-gcs-server", () => {
     cleanup: async () => {},
     // The emulator bucket has no object retention: retained puts must fail with MS_CONFIG_INVALID.
     objectLockConfigured: false,
+    // The adapter sends ifGenerationMatch: 0 on both upload paths. Real GCS enforces it
+    // on resumable sessions too, and the in-process fake (src/storage/gcs.test.ts) tests
+    // that path through the real SDK; fake-gcs-server only enforces it on single-request
+    // uploads.
+    emulatorGaps: {
+      streamedConditionalCreates:
+        "fake-gcs-server does not enforce ifGenerationMatch on resumable uploads",
+    },
   }));
 });
