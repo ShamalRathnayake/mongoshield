@@ -42,9 +42,8 @@ export interface NamespaceProgress {
 export interface JobLiveState {
   readonly job: JobSummary | undefined;
   readonly progress: Extract<JobEvent, { type: "progress" }> | undefined;
+  /** In the order the namespaces were first seen. */
   readonly namespaces: readonly NamespaceProgress[];
-  /** Total documents when the current namespace started, to count per namespace. */
-  readonly namespaceStart: number;
   readonly logs: readonly {
     readonly level: string;
     readonly message: string;
@@ -54,13 +53,28 @@ export interface JobLiveState {
 
 /** The initial state for a job loaded over REST. */
 export function initialJobState(job: JobSummary | undefined): JobLiveState {
-  return { job, progress: undefined, namespaces: [], namespaceStart: 0, logs: [] };
+  return { job, progress: undefined, namespaces: [], logs: [] };
+}
+
+/**
+ * Replaces the entry for `entry.ns`, or appends it. A namespace that is done stays
+ * done (a late, throttled progress event must not reopen it).
+ */
+function upsertNamespace(
+  namespaces: readonly NamespaceProgress[],
+  entry: NamespaceProgress,
+): readonly NamespaceProgress[] {
+  const index = namespaces.findIndex((existing) => existing.ns === entry.ns);
+  if (index === -1) return [...namespaces, entry];
+  if (namespaces[index]?.state === "done") return namespaces;
+  return namespaces.map((existing, position) => (position === index ? entry : existing));
 }
 
 /**
  * Folds one event into the state. Pure, so it is tested directly.
- * Per-namespace counts come from `progress.namespace`: when it changes, the previous
- * namespace is marked done and counting restarts for the new one.
+ * A `namespace` event marks a namespace done with its final count; a progress event
+ * names the namespace being worked on and its count so far. Several namespaces may
+ * be in progress at once (parallel backups).
  */
 export function reduceJobEvent(
   state: JobLiveState,
@@ -85,25 +99,24 @@ export function reduceJobEvent(
       ];
       return { ...state, logs: logs.length > MAX_LOG_LINES ? logs.slice(-MAX_LOG_LINES) : logs };
     }
+    case "namespace":
+      return {
+        ...state,
+        namespaces: upsertNamespace(state.namespaces, {
+          ns: event.ns,
+          documents: event.documents,
+          state: "done",
+        }),
+      };
     case "progress": {
-      let { namespaces, namespaceStart } = state;
-      const current = namespaces[namespaces.length - 1];
-      if (event.namespace !== undefined && event.namespace !== current?.ns) {
-        // A new namespace started: close the previous one at the count reached so far.
-        namespaces = [
-          ...namespaces.map((entry) => ({ ...entry, state: "done" as const })),
-          { ns: event.namespace, documents: 0, state: "active" },
-        ];
-        namespaceStart = state.progress?.documents ?? 0;
-      }
-      const last = namespaces[namespaces.length - 1];
-      if (last !== undefined) {
-        namespaces = [
-          ...namespaces.slice(0, -1),
-          { ...last, documents: Math.max(0, event.documents - namespaceStart) },
-        ];
-      }
-      return { ...state, progress: event, namespaces, namespaceStart };
+      if (event.namespace === undefined) return { ...state, progress: event };
+      const previous = state.namespaces.find((entry) => entry.ns === event.namespace);
+      const namespaces = upsertNamespace(state.namespaces, {
+        ns: event.namespace,
+        documents: event.namespaceDocuments ?? previous?.documents ?? 0,
+        state: "active",
+      });
+      return { ...state, progress: event, namespaces };
     }
   }
 }

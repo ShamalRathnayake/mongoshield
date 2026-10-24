@@ -17,8 +17,8 @@ describe("readEnvironment", () => {
       host: "0.0.0.0",
       cookieSecure: true,
       shutdownGraceMs: 60_000,
-      ignoredOidcVariables: [],
     });
+    expect(readEnvironment({ MONGOSHIELD_SECRET: SECRET }).oidc).toBeUndefined();
   });
 
   it("reads the optional settings and validates them", () => {
@@ -30,6 +30,7 @@ describe("readEnvironment", () => {
       MONGOSHIELD_METRICS_TOKEN: SECRET,
       MONGOSHIELD_COOKIE_SECURE: "false",
       MONGOSHIELD_OIDC_ISSUER: "https://id.example.com",
+      MONGOSHIELD_OIDC_CLIENT_ID: "console",
     });
     expect(environment).toMatchObject({
       port: 9000,
@@ -37,7 +38,11 @@ describe("readEnvironment", () => {
       proxySecret: SECRET,
       metricsToken: SECRET,
       cookieSecure: false,
-      ignoredOidcVariables: ["MONGOSHIELD_OIDC_ISSUER"],
+      oidc: {
+        issuer: "https://id.example.com",
+        clientId: "console",
+        redirectUrl: "https://backups.example.com/api/oidc/callback",
+      },
     });
     expect(() => readEnvironment({ MONGOSHIELD_SECRET: SECRET, PORT: "http" })).toThrow();
     expect(() =>

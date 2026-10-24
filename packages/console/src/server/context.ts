@@ -11,6 +11,8 @@ import type { TaskDeps } from "../jobs/tasks.ts";
 import type { AuditLog } from "../state/audit.ts";
 import type { StateStore } from "../state/store.ts";
 import type { UserRecord } from "../state/types.ts";
+import type { OidcClient } from "./oidc/client.ts";
+import type { OidcSettings } from "./oidc/settings.ts";
 import type { LoginRateLimiter } from "./rate-limit.ts";
 
 /** Settings read from the environment (see config.ts) that change how requests are handled. */
@@ -33,6 +35,8 @@ export interface ConsoleSettings {
   readonly https: boolean;
   /** Grace period for running jobs at shutdown. */
   readonly shutdownGraceMs: number;
+  /** OIDC single sign-on (MONGOSHIELD_OIDC_*). Unset: the OIDC endpoints answer 404. */
+  readonly oidc?: OidcSettings;
 }
 
 /** Everything a console is made of. Created by `openConsole()` (services.ts). */
@@ -47,6 +51,8 @@ export interface ConsoleServices {
   readonly settings: ConsoleSettings;
   readonly loginLimiter: LoginRateLimiter;
   readonly logger: Logger;
+  /** The OIDC relying party, when `settings.oidc` is set. */
+  readonly oidc: OidcClient | undefined;
   /** log2(N) for new password hashes (17 in production). */
   readonly passwordCost: number;
   /** The clock; tests move it. */

@@ -72,6 +72,8 @@ export interface JobRunnerOptions {
 
 /** Log lines kept per job for subscribers that connect late. */
 const KEPT_LOG_LINES = 500;
+/** Finished-namespace events kept per job for late subscribers (a backup may have thousands). */
+const KEPT_NAMESPACE_EVENTS = 1000;
 /**
  * Finished jobs whose log and last progress stay in memory for replay, so a job
  * page opened right after the job ended still shows what happened. Older ones
@@ -93,6 +95,10 @@ interface ActiveJob {
   progressTimer: NodeJS.Timeout | undefined;
   /** Namespace of the most recent per-namespace event, shown with the overall progress. */
   namespace: string | undefined;
+  /** Documents of `namespace` so far. */
+  namespaceDocuments: number | undefined;
+  /** `namespace` events of finished namespaces, for subscribers that connect late. */
+  readonly namespacesDone: JobEvent[];
   cancelRequested: boolean;
   readonly done: Promise<JobSummary>;
   resolveDone: (job: JobSummary) => void;
@@ -110,7 +116,11 @@ export class JobRunner {
   /** Replay data of recently finished jobs (insertion order = finishing order). */
   readonly #finished = new Map<
     string,
-    { readonly logs: readonly JobEvent[]; readonly progress: JobEvent | undefined }
+    {
+      readonly logs: readonly JobEvent[];
+      readonly progress: JobEvent | undefined;
+      readonly namespaces: readonly JobEvent[];
+    }
   >();
   #accepting = true;
 
@@ -175,6 +185,8 @@ export class JobRunner {
       lastProgressAt: 0,
       progressTimer: undefined,
       namespace: undefined,
+      namespaceDocuments: undefined,
+      namespacesDone: [],
       cancelRequested: false,
       done,
       resolveDone,
@@ -240,11 +252,13 @@ export class JobRunner {
       if (summary === undefined) return () => {};
       listener({ type: "status", job: summary });
       const replay = this.#finished.get(id);
+      for (const done of replay?.namespaces ?? []) listener(done);
       if (replay?.progress !== undefined) listener(replay.progress);
       for (const line of replay?.logs ?? []) listener(line);
       return () => {};
     }
     listener({ type: "status", job: job.summary });
+    for (const done of job.namespacesDone) listener(done);
     if (job.lastProgress !== undefined) listener(job.lastProgress);
     for (const line of job.logs) listener(line);
     job.listeners.add(listener);
@@ -349,13 +363,20 @@ export class JobRunner {
       ...result,
       finishedAt: this.#now().toISOString(),
     };
+    // Save before leaving #active: until the history holds the final status,
+    // get() and list() must answer from memory, or they would briefly report
+    // the saved "running" entry of a job that has already finished.
+    await this.#save(job.summary).catch(() => undefined);
     this.#active.delete(job.summary.id);
-    this.#finished.set(job.summary.id, { logs: job.logs, progress: job.lastProgress });
+    this.#finished.set(job.summary.id, {
+      logs: job.logs,
+      progress: job.lastProgress,
+      namespaces: job.namespacesDone,
+    });
     for (const oldest of this.#finished.keys()) {
       if (this.#finished.size <= KEPT_FINISHED_REPLAYS) break;
       this.#finished.delete(oldest);
     }
-    await this.#save(job.summary).catch(() => undefined);
     this.#emit(job, { type: "status", job: job.summary });
     job.listeners.clear();
     job.resolveDone(job.summary);
@@ -375,8 +396,22 @@ export class JobRunner {
 
   /** Turns library progress into throttled `progress` events. */
   #onProgress(job: ActiveJob, event: ProgressEvent): void {
-    if (event.type === "namespace:start" || event.type === "namespace:progress") {
+    if (event.type === "namespace:start") {
       job.namespace = event.ns;
+      job.namespaceDocuments = 0;
+      return;
+    }
+    if (event.type === "namespace:progress") {
+      job.namespace = event.ns;
+      job.namespaceDocuments = event.documents;
+      return;
+    }
+    if (event.type === "namespace:done") {
+      // Not throttled: one event per namespace, so none is lost between two progress events.
+      const done: JobEvent = { type: "namespace", ns: event.ns, documents: event.documents };
+      job.namespacesDone.push(done);
+      if (job.namespacesDone.length > KEPT_NAMESPACE_EVENTS) job.namespacesDone.shift();
+      this.#emit(job, done);
       return;
     }
     if (event.type !== "overall") return;
@@ -387,6 +422,9 @@ export class JobRunner {
       bytes: event.bytes,
       ...(event.etaMs === undefined ? {} : { etaMs: event.etaMs }),
       ...(job.namespace === undefined ? {} : { namespace: job.namespace }),
+      ...(job.namespaceDocuments === undefined
+        ? {}
+        : { namespaceDocuments: job.namespaceDocuments }),
     };
     job.pendingProgress = progress;
     const wait = job.lastProgressAt + this.#progressIntervalMs - Date.now();

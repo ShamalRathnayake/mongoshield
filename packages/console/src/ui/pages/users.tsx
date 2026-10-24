@@ -4,6 +4,10 @@
  * Roles build on each other: viewer (read everything except secrets) → operator (run
  * backups, verifies and drills, restore into non-production) → admin (everything).
  * Passwords are write-only; leaving the field empty when editing keeps the current one.
+ *
+ * With single sign-on enabled (OIDC or the trusted proxy), a new user may be created
+ * without a password: such an account can only sign in through SSO. That is how admins
+ * let people in when OIDC auto-provisioning is turned off.
  */
 
 import { type FormEvent, useState } from "react";
@@ -91,6 +95,12 @@ export function UsersPage() {
               render: (user) => user.role,
             },
             {
+              key: "signIn",
+              header: "Signs in with",
+              hideOnNarrow: true,
+              render: (user) => (user.signIn === "sso" ? "Single sign-on" : "Password"),
+            },
+            {
               key: "last",
               header: "Last sign-in",
               render: (user) =>
@@ -171,6 +181,9 @@ function UserDialog(props: {
   onSaved: (user: UserView) => void;
 }) {
   const client = useApi();
+  const { session } = useSession();
+  // SSO-only accounts make sense only when some single sign-on method is enabled.
+  const ssoEnabled = session.authMethods.includes("oidc") || session.authMethods.includes("proxy");
   const existing = props.user;
   const [username, setUsername] = useState(existing?.username ?? "");
   const [role, setRole] = useState<Role>(existing?.role ?? "viewer");
@@ -182,7 +195,7 @@ function UserDialog(props: {
   const errors = {
     username: username.trim() === "" ? "Enter a username." : undefined,
     password:
-      existing === undefined && password === ""
+      existing === undefined && password === "" && !ssoEnabled
         ? "Set an initial password."
         : password !== "" && password.length < MIN_PASSWORD_LENGTH
           ? `Use at least ${MIN_PASSWORD_LENGTH} characters.`
@@ -248,9 +261,11 @@ function UserDialog(props: {
           value={password}
           onValue={setPassword}
           hint={
-            existing === undefined
-              ? `At least ${MIN_PASSWORD_LENGTH} characters. Share it securely.`
-              : "Leave empty to keep the current password."
+            existing !== undefined
+              ? "Leave empty to keep the current password."
+              : ssoEnabled
+                ? `At least ${MIN_PASSWORD_LENGTH} characters, or leave empty for an account that signs in only with single sign-on.`
+                : `At least ${MIN_PASSWORD_LENGTH} characters. Share it securely.`
           }
           error={submitted ? errors.password : undefined}
         />

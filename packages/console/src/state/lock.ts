@@ -94,8 +94,14 @@ export async function acquireDataDirLock(
     await writeFileAtomic(path, `${JSON.stringify(content())}\n`);
   }
 
+  // The heartbeat in flight, if any. release() waits for it: a write that
+  // finished after the lock file was deleted would recreate it, and the next
+  // start would then wait for a lock nobody holds.
+  let heartbeat: Promise<void> = Promise.resolve();
   const timer = setInterval(() => {
-    writeFileAtomic(path, `${JSON.stringify(content())}\n`).catch(() => undefined);
+    heartbeat = heartbeat
+      .then(() => writeFileAtomic(path, `${JSON.stringify(content())}\n`))
+      .catch(() => undefined);
   }, options.heartbeatMs ?? HEARTBEAT_MS);
   // The heartbeat alone must never keep the process alive.
   timer.unref();
@@ -106,6 +112,7 @@ export async function acquireDataDirLock(
       if (released) return;
       released = true;
       clearInterval(timer);
+      await heartbeat;
       // Only delete the lock if it is still ours (a takeover may have happened).
       const current = await readLock(path);
       if (current?.owner === owner) await rm(path, { force: true });

@@ -27,8 +27,9 @@ import { auditRoutes } from "./routes/audit.ts";
 import { backupRoutes } from "./routes/backups.ts";
 import { configRoutes } from "./routes/config.ts";
 import { connectionRoutes } from "./routes/connections.ts";
-import { healthRoutes } from "./routes/health.ts";
+import { healthRoutes, type JournalStatusReader } from "./routes/health.ts";
 import { jobRoutes } from "./routes/jobs.ts";
+import { oidcRoutes } from "./routes/oidc.ts";
 import { planRoutes } from "./routes/plans.ts";
 import { restoreRoutes } from "./routes/restore.ts";
 import { sessionRoutes } from "./routes/session.ts";
@@ -45,6 +46,8 @@ export interface ConsoleAppOptions {
   readonly uiDir?: string;
   /** SSE heartbeat interval; tests shorten it. */
   readonly heartbeatMs?: number;
+  /** Reads journal status for /metrics; tests replace it to simulate failures. */
+  readonly readJournalStatus?: JournalStatusReader;
 }
 
 /** Builds the console's HTTP app. */
@@ -76,6 +79,7 @@ export function createConsoleApp(
   app.use("/api/*", csrfProtection());
 
   sessionRoutes(app, services);
+  oidcRoutes(app, services);
   userRoutes(app, services);
   connectionRoutes(app, services);
   storageRoutes(app, services);
@@ -89,7 +93,11 @@ export function createConsoleApp(
   );
   auditRoutes(app, services);
   configRoutes(app, services);
-  healthRoutes(app, services);
+  healthRoutes(
+    app,
+    services,
+    options.readJournalStatus === undefined ? {} : { readJournalStatus: options.readJournalStatus },
+  );
 
   // Unknown API paths are a JSON 404, never the UI's index.html.
   app.all("/api/*", () => {

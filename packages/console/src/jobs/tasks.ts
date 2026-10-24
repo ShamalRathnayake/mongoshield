@@ -3,10 +3,15 @@
  *
  *   backup   runScheduledJob: storage lock → backup (+ guard) → verify → prune → notify,
  *            exactly what `mongoshield run` does, so a console and a CLI CronJob can
- *            share a storage location safely (they take the same lock)
+ *            share a storage location safely (they take the same lock). Every backup
+ *            is labelled `mongoshield.plan=<plan id>`, and retention is scoped to that
+ *            label plus the source's cluster id (see `planScopeLabels`), so plans
+ *            sharing a storage location never prune each other's backups
  *   restore  shield.restore into a target connection
  *   verify   shield.verify (fast or deep), recorded next to the backup
  *   drill    shield.drill into a scratch connection, recorded next to the backup
+ *   prune    shield.prune with a plan's retention policy and scope, under the same
+ *            storage lock as backups, after re-checking the plan the admin confirmed
  *
  * Each `…Job` function looks up what it needs, decrypts secrets only inside the
  * job (never earlier, never into a response), and returns a `JobSpec` for the
@@ -14,6 +19,7 @@
  * the runner scrubs them.
  */
 
+import { hostname } from "node:os";
 import type { Document } from "mongodb";
 import type { RunReport } from "mongoshield";
 import {
@@ -25,13 +31,18 @@ import {
   MongoShield,
   type MongoShieldConfig,
   MongoShieldError,
+  PLAN_LABEL,
+  type PruneScope,
   type RestoreMode,
+  type RetentionPolicy,
   runScheduledJob,
+  storageLock,
   summarizeReport,
   type TenantRestoreMode,
 } from "mongoshield";
-import { notFound } from "../server/errors.ts";
-import type { RestorePlanView } from "../shared/api.ts";
+import { ConsoleError, invalid, notFound } from "../server/errors.ts";
+import type { PrunePlanView, RestorePlanView } from "../shared/api.ts";
+import { randomId } from "../state/crypto.ts";
 import { scrubText } from "../state/redact.ts";
 import { openConnectionUri, openNotifyUrl, openPlanPassphrase } from "../state/secrets.ts";
 import type { StateStore } from "../state/store.ts";
@@ -153,6 +164,9 @@ export function backupJob(deps: TaskDeps, plan: PlanRecord, startedBy: string): 
         signal: context.signal,
         logger,
         verify: plan.verify,
+        // Labels this run's backup as the plan's, and limits the automatic prune to
+        // the plan's own backups of this source.
+        scopeLabels: planScopeLabels(plan),
         onProgress: context.progress,
         ...(passphrase === undefined ? {} : { decryption: { passphrase } }),
         ...(deps.webhookSecret === undefined ? {} : { webhookSecret: deps.webhookSecret }),
@@ -160,6 +174,40 @@ export function backupJob(deps: TaskDeps, plan: PlanRecord, startedBy: string): 
       return outcomeOf(report);
     },
   };
+}
+
+/**
+ * The labels that mark a plan's backups: `mongoshield.plan=<plan id>`.
+ *
+ * Several plans often write to one storage location (a nightly full backup and
+ * an hourly one, two databases, two clusters). Retention must only see the
+ * plan's own backups, or one plan's "keep the last 3" deletes the others'. Plan
+ * ids never change when a plan is renamed or edited, so the label keeps working.
+ */
+function planScopeLabels(plan: PlanRecord): Record<string, string> {
+  return { [PLAN_LABEL]: plan.id };
+}
+
+/**
+ * The backups a plan's retention applies to: its own (by label) taken from its
+ * connection's deployment (by cluster id, read from the source). Backups the plan
+ * wrote before its connection pointed at another cluster are therefore left alone.
+ */
+async function planScope(
+  deps: TaskDeps,
+  plan: PlanRecord,
+  signal?: AbortSignal,
+): Promise<PruneScope> {
+  const connection = connectionById(deps.store, plan.connectionId);
+  const source = await shieldFor(deps, storageById(deps.store, plan.storageId), {
+    uri: openConnectionUri(deps.store, connection),
+  });
+  try {
+    const clusterId = await source.sourceClusterId(signal === undefined ? {} : { signal });
+    return { clusterId, labels: planScopeLabels(plan) };
+  } finally {
+    await source.close();
+  }
 }
 
 /** The library's encryption options for a plan. */
@@ -529,6 +577,134 @@ export function drillJob(
       };
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Prune
+// ---------------------------------------------------------------------------
+
+/**
+ * How long the prune job holds the storage lock. Deleting a few backups takes
+ * seconds; the lease is long so that even a slow storage cannot outlive it
+ * (prune does not renew its lease, unlike a backup run).
+ */
+const PRUNE_LEASE_MS = 30 * 60 * 1000;
+
+/** The plan's retention policy, or 400 when it has none. */
+function retentionOf(plan: PlanRecord): RetentionPolicy & NonNullable<PlanRecord["retention"]> {
+  if (plan.retention === undefined) {
+    throw invalid(
+      `The plan "${plan.name}" has no retention policy.`,
+      "Edit the plan and set how many backups to keep first.",
+    );
+  }
+  return { ...plan.retention };
+}
+
+/**
+ * The dry run of a plan's retention policy: which of the plan's backups stay and
+ * which would go. Backups of other plans and sources in the same storage are not
+ * planned over; `outOfScope` says how many were left alone.
+ */
+export async function planPrune(deps: TaskDeps, plan: PlanRecord): Promise<PrunePlanView> {
+  const policy = retentionOf(plan);
+  const storage = storageById(deps.store, plan.storageId);
+  const scope = await planScope(deps, plan);
+  const shield = await shieldFor(deps, storage);
+  const result = await shield.prune(policy, { dryRun: true, scope });
+  return {
+    planId: plan.id,
+    storageId: storage.id,
+    policy,
+    keep: result.plan.keep.map((kept) => ({ id: kept.id, reasons: [...kept.reasons] })),
+    remove: result.plan.remove.map((removed) => ({ id: removed.id, reason: removed.reason })),
+    warnings: [...result.plan.warnings],
+    outOfScope: result.outOfScope.length,
+  };
+}
+
+/**
+ * A prune job. `confirmed` are the ids the admin saw in the dry run: the job plans
+ * again (the catalog may have changed) and refuses to run if that plan would delete
+ * anything else, so confirming a dry run can never delete more than it showed.
+ */
+export function pruneJob(
+  deps: TaskDeps,
+  plan: PlanRecord,
+  confirmed: readonly string[],
+  startedBy: string,
+): JobSpec {
+  const policy = retentionOf(plan);
+  const storage = storageById(deps.store, plan.storageId);
+  const allowed = new Set(confirmed);
+  return {
+    kind: "prune",
+    lane: `storage:${storage.id}`,
+    startedBy,
+    planId: plan.id,
+    storageId: storage.id,
+    run: async (context) => {
+      const logger = jobLogger(context, deps.logger, []);
+      const scope = await planScope(deps, plan, context.signal);
+      const shield = await shieldFor(deps, storage, { logger });
+      const release = await lockStorage(shield, context);
+      try {
+        const check = await shield.prune(policy, { dryRun: true, signal: context.signal, scope });
+        const unexpected = check.plan.remove.filter((removed) => !allowed.has(removed.id));
+        if (unexpected.length > 0) {
+          throw new ConsoleError(
+            409,
+            "CONSOLE_PRUNE_PLAN_CHANGED",
+            `The backups have changed since the dry run: ${unexpected.length} more would be deleted.`,
+            "Review the retention plan again and confirm the new one.",
+          );
+        }
+        const result = await shield.prune(policy, { signal: context.signal, scope });
+        const skipped = result.skipped.length > 0 ? `, ${result.skipped.length} skipped` : "";
+        return {
+          summary: `Deleted ${result.deletedBackups} backups (${formatMiB(result.deletedBytes)}), kept ${result.plan.keep.length}${skipped}.`,
+        };
+      } finally {
+        await release();
+      }
+    },
+  };
+}
+
+/**
+ * Takes the storage lock that backup runs hold (`runScheduledJob`, the CLI's
+ * `mongoshield run`), so a prune never deletes while a backup is being written or
+ * pruned by someone else. Storage without conditional writes cannot hold the lock;
+ * the job then runs unlocked and says so in its log.
+ *
+ * @returns the function that releases the lock.
+ */
+async function lockStorage(shield: MongoShield, context: JobContext): Promise<() => Promise<void>> {
+  if (!shield.storage.capabilities.conditionalWrites) {
+    context.log("warn", "This storage cannot hold a lock; pruning without one.");
+    return async () => {};
+  }
+  const host = hostname();
+  const lock = storageLock({
+    storage: shield.storage,
+    owner: { id: `${host}:${process.pid}:console-prune-${randomId()}`, host, pid: process.pid },
+    leaseMs: PRUNE_LEASE_MS,
+  });
+  const attempt = await lock.tryAcquire({ signal: context.signal });
+  if (!attempt.acquired) {
+    throw new ConsoleError(
+      409,
+      "CONSOLE_STORAGE_BUSY",
+      "A backup or prune is running in this storage location right now.",
+      "Try again when it has finished.",
+    );
+  }
+  return () => attempt.lease.release();
+}
+
+/** Bytes as MiB with one decimal, for job summaries. */
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 // ---------------------------------------------------------------------------

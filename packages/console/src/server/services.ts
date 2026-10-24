@@ -15,6 +15,7 @@ import { openStorageCredentials } from "../state/secrets.ts";
 import { issueSetupToken } from "../state/sessions.ts";
 import { StateStore } from "../state/store.ts";
 import type { ConsoleServices, ConsoleSettings } from "./context.ts";
+import { OidcClient, type OidcClientOptions } from "./oidc/client.ts";
 import { LoginRateLimiter } from "./rate-limit.ts";
 
 /** Options for {@link openConsole}. */
@@ -33,6 +34,8 @@ export interface OpenConsoleOptions {
   readonly progressIntervalMs?: number;
   /** Webhook signing secret (MONGOSHIELD_WEBHOOK_SECRET). */
   readonly webhookSecret?: string;
+  /** Cache and timeout overrides for the OIDC provider client; tests shorten them. */
+  readonly oidcProvider?: OidcClientOptions["provider"];
 }
 
 /** An opened console and, while setup is pending, its one-time setup token. */
@@ -99,6 +102,16 @@ export async function openConsole(options: OpenConsoleOptions): Promise<OpenedCo
     backupJob: (plan) => backupJob(tasks, plan, "schedule"),
   });
 
+  const settings: ConsoleSettings = { ...DEFAULT_SETTINGS, ...options.settings };
+  const oidc =
+    settings.oidc === undefined
+      ? undefined
+      : new OidcClient({
+          settings: settings.oidc,
+          now: () => now().getTime(),
+          ...(options.oidcProvider === undefined ? {} : { provider: options.oidcProvider }),
+        });
+
   const services: ConsoleServices = {
     dataDir: options.dataDir,
     store,
@@ -107,9 +120,10 @@ export async function openConsole(options: OpenConsoleOptions): Promise<OpenedCo
     schedules,
     storage,
     tasks,
-    settings: { ...DEFAULT_SETTINGS, ...options.settings },
+    settings,
     loginLimiter: new LoginRateLimiter(() => now().getTime()),
     logger,
+    oidc,
     passwordCost: options.passwordCost ?? DEFAULT_PASSWORD_COST,
     now,
   };

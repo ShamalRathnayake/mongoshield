@@ -7,15 +7,24 @@
  *   PUT    /api/plans/:id        admin   (omit the passphrase / a notify URL to keep the stored one)
  *   DELETE /api/plans/:id        admin   (backups already taken are kept)
  *   POST   /api/plans/:id/run    operator  → a backup job
+ *   POST   /api/plans/:id/prune/plan  admin  dry run of the plan's retention policy
+ *   POST   /api/plans/:id/prune       admin  → a prune job deleting what the dry run listed
  *
  * Plans are admin-only to edit because they hold secrets (backup passphrase,
  * webhook URLs) and decide what leaves the database; running one is an
- * operator action.
+ * operator action. Pruning deletes backups for good, so it is admin-only too.
  */
 
 import type { Hono } from "hono";
 import { checkSchedule } from "../../jobs/schedules.ts";
-import { backupJob, connectionById, planById, storageById } from "../../jobs/tasks.ts";
+import {
+  backupJob,
+  connectionById,
+  planById,
+  planPrune,
+  pruneJob,
+  storageById,
+} from "../../jobs/tasks.ts";
 import type { PlanView } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
 import { redactUrlToOrigin } from "../../state/redact.ts";
@@ -28,6 +37,7 @@ import { ConsoleError, invalid, notFound } from "../errors.ts";
 import { readJson } from "../security.ts";
 import {
   asObject,
+  backupIdParam,
   type Fields,
   oneOf,
   optionalPositiveInt,
@@ -44,7 +54,9 @@ const MAX_RECIPIENTS = 20;
 /** Shortest backup passphrase: these protect data at rest for years. */
 const MIN_PASSPHRASE_LENGTH = 12;
 /** Largest retention count per bucket (about 3 years of dailies). */
-const MAX_RETENTION = 1000;
+export const MAX_RETENTION = 1000;
+/** Most backups one prune confirmation may list. */
+const MAX_PRUNE_IDS = 10_000;
 
 /** Registers the plan routes. */
 export function planRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
@@ -139,6 +151,37 @@ export function planRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       target: plan.name,
       outcome: "success",
       details: { plan: plan.id, job: job.id },
+    });
+    return c.json(job);
+  });
+
+  app.post("/api/plans/:id/prune/plan", async (c) => {
+    requireRole(c, "admin");
+    const plan = planById(store, c.req.param("id"));
+    return c.json(await planPrune(services.tasks, plan));
+  });
+
+  app.post("/api/plans/:id/prune", async (c) => {
+    const principal = requireRole(c, "admin");
+    const plan = planById(store, c.req.param("id"));
+    const body = asObject(await readJson(c));
+    const remove = optionalStringArray(body, "remove", { maxItems: MAX_PRUNE_IDS, maxLength: 64 });
+    if (remove === undefined || remove.length === 0) {
+      throw invalid(
+        '"remove" must list the backups the dry run would delete.',
+        "Run the dry run first (POST /api/plans/:id/prune/plan); there may be nothing to prune.",
+      );
+    }
+    for (const id of remove) backupIdParam(id);
+    const job = await services.runner.start(
+      pruneJob(services.tasks, plan, remove, principal.user.username),
+    );
+    await recordAudit(services, {
+      actor: principal,
+      action: "plan.prune",
+      target: plan.name,
+      outcome: "success",
+      details: { plan: plan.id, job: job.id, confirmed: remove.length },
     });
     return c.json(job);
   });

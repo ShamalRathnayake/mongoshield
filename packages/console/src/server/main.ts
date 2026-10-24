@@ -54,13 +54,13 @@ function findUiDirectory(): string | undefined {
 async function main(): Promise<void> {
   const logger = jsonLogger();
   const environment = readEnvironment(process.env);
-  if (environment.ignoredOidcVariables.length > 0) {
-    logger.warn(
-      "OIDC is not supported yet; use a reverse proxy with MONGOSHIELD_TRUST_PROXY_SECRET",
-      {
-        ignored: environment.ignoredOidcVariables,
-      },
-    );
+  if (environment.oidc !== undefined) {
+    // Never the client secret: issuer and client id are enough to tell what is configured.
+    logger.info("OIDC sign-in enabled", {
+      issuer: environment.oidc.issuer,
+      clientId: environment.oidc.clientId,
+      autoProvision: environment.oidc.autoProvision,
+    });
   }
 
   const { services, setupToken } = await openConsole({
@@ -74,6 +74,7 @@ async function main(): Promise<void> {
       ...(environment.publicUrl === undefined ? {} : { publicUrl: environment.publicUrl }),
       ...(environment.proxySecret === undefined ? {} : { proxySecret: environment.proxySecret }),
       ...(environment.metricsToken === undefined ? {} : { metricsToken: environment.metricsToken }),
+      ...(environment.oidc === undefined ? {} : { oidc: environment.oidc }),
     },
     ...(environment.webhookSecret === undefined
       ? {}

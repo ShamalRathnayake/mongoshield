@@ -1,4 +1,9 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+/**
+ * Tests for the audit log: append-only JSON lines, paging backwards, rotation
+ * and reading files that contain torn or foreign lines.
+ */
+
+import { appendFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -63,5 +68,33 @@ describe("AuditLog", () => {
     const all = await audit.read({ limit: 1000 });
     expect(all).toHaveLength(150);
     expect(all.every((item) => item.details?.note?.toString().startsWith("ünïcødé"))).toBe(true);
+  });
+
+  it("skips torn and foreign lines when reading", async () => {
+    const audit = await log();
+    await audit.append(entry(0));
+    await appendFile(
+      audit.pathOf(),
+      '{"at": "2026-01-01T00:00:00Z", "act\n[1, 2]\n{"no": "fields"}\n',
+    );
+    await audit.append(entry(1));
+    const read = await audit.read({ limit: 10 });
+    expect(read.map((item) => item.target)).toEqual(["t1", "t0"]);
+  });
+
+  it("reads an empty history when nothing was written yet", async () => {
+    const audit = await log();
+    expect(await audit.read({ limit: 10 })).toEqual([]);
+  });
+
+  it("keeps three rotated files and drops the oldest", async () => {
+    const audit = await log(150);
+    for (let index = 0; index < 20; index++) await audit.append(entry(index));
+    await expect(stat(audit.pathOf(3))).resolves.toBeDefined();
+    await expect(stat(audit.pathOf(4))).rejects.toMatchObject({ code: "ENOENT" });
+    const all = await audit.read({ limit: 100 });
+    expect(all[0]?.target).toBe("t19");
+    // Entries older than the third rotation are gone.
+    expect(all.some((item) => item.target === "t0")).toBe(false);
   });
 });

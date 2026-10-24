@@ -10,14 +10,19 @@
  *
  * It mirrors the real server's rules that matter to the UI: sessions and CSRF tokens,
  * role checks, secret redaction (URIs and passwords are never returned), the restore
- * confirmation for production targets, and jobs that progress over time and stream
- * events. It is deliberately simple everywhere else.
+ * confirmation for production targets, the dry-run-then-confirm flows of pruning and
+ * config import, and jobs that progress over time and stream events. It is
+ * deliberately simple everywhere else (retention, for example, only knows `last` and
+ * `daily`).
  */
 
 import type {
   ApiError,
   BackupDetail,
   BackupSummary,
+  ConfigImportChange,
+  ConfigImportRequest,
+  ConfigImportResult,
   ConnectionView,
   DocumentPage,
   JobEvent,
@@ -25,6 +30,7 @@ import type {
   JobSummary,
   PlanInput,
   PlanView,
+  PrunePlanView,
   RestorePlanView,
   RestoreRequest,
   Role,
@@ -103,6 +109,8 @@ const ROUTE_ROLES: { readonly [Route in RouteKey]: Role | "public" } = {
   "PUT /api/plans/:id": "admin",
   "DELETE /api/plans/:id": "admin",
   "POST /api/plans/:id/run": "operator",
+  "POST /api/plans/:id/prune/plan": "admin",
+  "POST /api/plans/:id/prune": "admin",
   "GET /api/storage/:id/backups": "viewer",
   "GET /api/storage/:id/backups/:backupId": "viewer",
   "POST /api/storage/:id/backups/:backupId/verify": "operator",
@@ -117,6 +125,7 @@ const ROUTE_ROLES: { readonly [Route in RouteKey]: Role | "public" } = {
   "POST /api/jobs/:id/cancel": "operator",
   "GET /api/audit": "viewer",
   "GET /api/config/export": "admin",
+  "POST /api/config/import": "admin",
 };
 
 const ROUTE_KEYS = Object.keys(ROUTE_ROLES).filter((key): key is RouteKey => key in ROUTE_ROLES);
@@ -137,6 +146,11 @@ export interface MockBackendOptions {
   readonly jobTickMs?: number;
   /** Fixed "now" for fixtures, so test output is stable. */
   readonly now?: number;
+  /**
+   * Sign-in methods the mock advertises. Default `["password"]`. With `"oidc"` or
+   * `"proxy"` the login page offers single sign-on and admins may create SSO-only users.
+   */
+  readonly authMethods?: SessionInfo["authMethods"];
 }
 
 /** A running mock server. */
@@ -183,6 +197,9 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
   )?.id;
   let csrfToken = randomToken();
   let nextId = 2000;
+  const authMethods = options.authMethods ?? ["password"];
+  // SSO-only accounts are possible only when some single sign-on method is enabled.
+  const ssoEnabled = authMethods.includes("oidc") || authMethods.includes("proxy");
   const runtimes = new Map<string, JobRuntime>();
   const requests: MockBackend["requests"] = [];
 
@@ -202,7 +219,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     const user = currentUser();
     return {
       setupComplete,
-      authMethods: ["password"],
+      authMethods,
       ...(user === undefined ? {} : { user, csrfToken }),
     };
   };
@@ -332,13 +349,21 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     runtime.step += 1;
     const total = runtime.namespaces.reduce((sum, entry) => sum + entry.documents, 0);
     const done = Math.round((total * runtime.step) / JOB_STEPS);
-    // Which namespace the cursor is in right now.
+    // Which namespace the cursor is in right now; the ones before it are finished,
+    // and each is reported once, like the server's unthrottled "namespace" events.
+    const previousDone = Math.round((total * (runtime.step - 1)) / JOB_STEPS);
     let cumulative = 0;
     let current = runtime.namespaces[0]?.ns;
+    let currentDocuments = 0;
     for (const entry of runtime.namespaces) {
+      const start = cumulative;
       cumulative += entry.documents;
       current = entry.ns;
-      if (cumulative >= done) break;
+      currentDocuments = done - start;
+      if (cumulative > done) break;
+      if (cumulative > previousDone) {
+        emit(job.id, { type: "namespace", ns: entry.ns, documents: entry.documents });
+      }
     }
     emit(job.id, {
       type: "progress",
@@ -346,7 +371,9 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       estimatedDocuments: total,
       bytes: done * 1_450,
       etaMs: (JOB_STEPS - runtime.step) * 4_000,
-      ...(current === undefined ? {} : { namespace: current }),
+      ...(current === undefined
+        ? {}
+        : { namespace: current, namespaceDocuments: currentDocuments }),
     });
     if (runtime.step % 4 === 0 && current !== undefined) {
       emit(job.id, { type: "log", level: "info", message: `copying ${current}` });
@@ -382,8 +409,12 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
   const handlers: Handlers = {
     "GET /api/session": () => sessionInfo(),
     "POST /api/session": ({ body }) => {
+      // SSO-only accounts have an empty password and can never sign in with one.
       const user = data.users.find(
-        (candidate) => candidate.username === body.username && candidate.password === body.password,
+        (candidate) =>
+          candidate.password !== "" &&
+          candidate.username === body.username &&
+          candidate.password === body.password,
       );
       if (user === undefined) {
         audit("session.login_failed", "failure", undefined, { username: body.username });
@@ -446,7 +477,14 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
           `A user named "${body.username}" already exists.`,
         );
       }
-      if (body.password === undefined || body.password.length < 12) {
+      if (body.password === undefined && !ssoEnabled) {
+        throw new MockHttpError(
+          400,
+          "CONSOLE_VALIDATION",
+          "A password is required for a new user.",
+        );
+      }
+      if (body.password !== undefined && body.password.length < 12) {
         throw new MockHttpError(
           400,
           "CONSOLE_WEAK_PASSWORD",
@@ -457,7 +495,8 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
         id: newId("user"),
         username: body.username,
         role: body.role,
-        password: body.password,
+        // An empty password marks an SSO-only account (see toUserView).
+        password: body.password ?? "",
         createdAt: new Date().toISOString(),
       };
       data.users.push(user);
@@ -666,6 +705,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
             ...(template ?? { drills: [] }),
             id,
             storageId: plan.storageId,
+            planId: plan.id,
             status: "complete",
             startedAt: started.toISOString(),
             completedAt: new Date().toISOString(),
@@ -673,6 +713,35 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
             drills: [],
           } satisfies MockBackup);
           return id;
+        },
+      });
+    },
+
+    "POST /api/plans/:id/prune/plan": ({ params }) => prunePlan(findPlan(params.id)),
+    "POST /api/plans/:id/prune": ({ params, body }) => {
+      const plan = findPlan(params.id);
+      const current = prunePlan(plan);
+      if (current.remove.length === 0) {
+        throw new MockHttpError(400, "CONSOLE_VALIDATION", "There is nothing to prune.");
+      }
+      // Never delete more than the user confirmed: the catalog may have changed since.
+      const confirmed = new Set(body.remove);
+      if (current.remove.some((entry) => !confirmed.has(entry.id))) {
+        throw new MockHttpError(
+          409,
+          "CONSOLE_PRUNE_PLAN_CHANGED",
+          "The backups to delete changed since the dry run.",
+          "Review the plan again.",
+        );
+      }
+      audit("plan.prune", "success", plan.name, { backups: current.remove.length });
+      return startJob("prune", [], {
+        planId: plan.id,
+        storageId: plan.storageId,
+        onSuccess: () => {
+          const removed = new Set(current.remove.map((entry) => entry.id));
+          data.backups = data.backups.filter((backup) => !removed.has(backup.id));
+          return `deleted ${removed.size} backups, kept ${current.keep.length}`;
         },
       });
     },
@@ -836,7 +905,177 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       filename: "mongoshield.config.ts",
       content: configExport(data),
     }),
+    "POST /api/config/import": ({ body }) => importConfig(body),
   };
+
+  /**
+   * The mock's retention planner, scoped like the real one to the plan's own backups
+   * (its `planId`); the rest of the storage is only counted as `outOfScope`. Holds and
+   * object locks always keep a backup, the newest `last` complete backups are kept,
+   * then the newest complete backup of each of the last `daily` days. Incomplete and
+   * invalid backups are removed.
+   */
+  function prunePlan(plan: PlanView): PrunePlanView {
+    const policy = plan.retention;
+    if (policy === undefined) {
+      throw new MockHttpError(
+        400,
+        "CONSOLE_VALIDATION",
+        `The plan "${plan.name}" has no retention policy.`,
+        "Add one in the plan editor first.",
+      );
+    }
+    const inStorage = data.backups.filter((backup) => backup.storageId === plan.storageId);
+    const backups = inStorage
+      .filter((backup) => backup.planId === plan.id)
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+    const keep: { id: string; reasons: string[] }[] = [];
+    const remove: { id: string; reason: string }[] = [];
+    const days = new Set<string>();
+    let lastKept = 0;
+    for (const backup of backups) {
+      const reasons: string[] = [];
+      if (backup.hold !== undefined) reasons.push("held");
+      if (backup.immutableUntil !== undefined && Date.parse(backup.immutableUntil) > Date.now()) {
+        reasons.push("immutable");
+      }
+      if (backup.status === "complete") {
+        if (lastKept < (policy.last ?? 0)) {
+          lastKept += 1;
+          reasons.push(`last ${policy.last}`);
+        }
+        const day = backup.startedAt.slice(0, 10);
+        if (!days.has(day) && days.size < (policy.daily ?? 0)) {
+          days.add(day);
+          reasons.push("daily");
+        }
+      }
+      if (reasons.length > 0) keep.push({ id: backup.id, reasons });
+      else
+        remove.push({
+          id: backup.id,
+          reason: backup.status === "complete" ? "not selected by the policy" : backup.status,
+        });
+    }
+    return {
+      planId: plan.id,
+      storageId: plan.storageId,
+      policy,
+      keep,
+      remove,
+      warnings: [],
+      outOfScope: inStorage.length - backups.length,
+    };
+  }
+
+  /** Dry run or apply of a config import (see `ConfigImportRequest`). */
+  function importConfig(body: ConfigImportRequest): ConfigImportResult {
+    const configs = importedConfigs(body);
+    const changes: ConfigImportChange[] = [];
+    const warnings: string[] = [];
+    const apply: (() => void)[] = [];
+
+    for (const [name, config] of configs) {
+      const secrets = body.secrets?.[name];
+      const existingPlan = data.plans.find((plan) => plan.name === name);
+
+      // Storage: matched by URL, created when new.
+      let storage = data.storage.find((candidate) => candidate.url === config.storage);
+      if (storage === undefined) {
+        const created = {
+          id: newId("st"),
+          name: config.storage,
+          url: config.storage,
+          credentials: { ...secrets?.storageCredentials },
+          createdAt: new Date().toISOString(),
+          objectLock: false,
+        };
+        storage = created;
+        changes.push({ kind: "storage", name: created.name, action: "create", fields: [] });
+        apply.push(() => data.storage.push(created));
+      }
+
+      // Connection: matched by the URI without its password.
+      const uri = secrets?.uri ?? config.uri;
+      let connectionId = existingPlan?.connectionId;
+      if (uri !== undefined) {
+        const match = data.connections.find(
+          (candidate) => redactUri(candidate.uri) === redactUri(uri),
+        );
+        if (match === undefined) {
+          const created = {
+            id: newId("conn"),
+            name: hostOf(uri),
+            uri,
+            // Imported connections are marked production: the safe default for restores.
+            production: true,
+            createdAt: new Date().toISOString(),
+            topology: "replicaSet",
+            serverVersion: "8.0.4",
+            missingBackupPrivileges: [],
+            missingRestorePrivileges: [],
+            namespaces: [],
+          };
+          connectionId = created.id;
+          changes.push({ kind: "connection", name: created.name, action: "create", fields: [] });
+          apply.push(() => data.connections.push(created));
+        } else {
+          connectionId = match.id;
+        }
+      }
+      if (connectionId === undefined) {
+        throw new MockHttpError(
+          400,
+          "CONSOLE_VALIDATION",
+          `"${name}" needs a connection string: set source.uri or secrets["${name}"].uri.`,
+        );
+      }
+
+      const input: PlanInput = {
+        name,
+        connectionId,
+        storageId: storage.id,
+        include: config.include,
+        exclude: config.exclude,
+        compression: config.compression,
+        encryption: config.encryption,
+        consistency: "auto",
+        verify: "fast",
+        notify: [],
+        ...(config.retention === undefined ? {} : { retention: config.retention }),
+        ...(config.cron === undefined
+          ? {}
+          : { schedule: { cron: config.cron, timezone: config.timezone ?? "UTC" } }),
+      };
+      if (existingPlan === undefined) {
+        changes.push({ kind: "plan", name, action: "create", fields: [] });
+        apply.push(() => data.plans.push(planFromInput(newId("plan"), input, undefined)));
+      } else {
+        const fields = planDifferences(existingPlan, input);
+        changes.push({
+          kind: "plan",
+          name,
+          action: fields.length === 0 ? "unchanged" : "update",
+          fields,
+        });
+        apply.push(() => {
+          const updated = planFromInput(existingPlan.id, input, existingPlan);
+          data.plans = data.plans.map((plan) => (plan.id === updated.id ? updated : plan));
+        });
+      }
+      warnings.push(
+        ...config.ignored.map(
+          (key) => `"${name}": ${key} is not managed by the console and was ignored.`,
+        ),
+      );
+    }
+
+    if (!body.dryRun) {
+      for (const step of apply) step();
+      audit("config.import", "success", undefined, { plans: configs.length });
+    }
+    return { dryRun: body.dryRun, changes, warnings };
+  }
 
   function replaceBackup(backup: BackupDetail) {
     data.backups = data.backups.map((candidate) =>
@@ -1007,6 +1246,7 @@ function toUserView(user: MockData["users"][number]): UserView {
     id: user.id,
     username: user.username,
     role: user.role,
+    signIn: user.password === "" ? "sso" : "password",
     createdAt: user.createdAt,
     ...(user.lastLoginAt === undefined ? {} : { lastLoginAt: user.lastLoginAt }),
   };
@@ -1218,4 +1458,147 @@ function configExport(data: MockData): string {
     "});",
     "",
   ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Config import (mock): a small subset of the real server's validation
+// ---------------------------------------------------------------------------
+
+/** The parts of one imported config the mock understands. */
+interface MockImportedConfig {
+  readonly storage: string;
+  readonly uri: string | undefined;
+  readonly include: readonly string[];
+  readonly exclude: readonly string[];
+  readonly compression: PlanInput["compression"];
+  readonly encryption: PlanInput["encryption"];
+  readonly retention: PlanInput["retention"];
+  readonly cron: string | undefined;
+  readonly timezone: string | undefined;
+  /** Top-level keys the mock does not model, reported as warnings. */
+  readonly ignored: readonly string[];
+}
+
+/** Config keys the mock models; anything else becomes a warning. */
+const MODELLED_KEYS = new Set([
+  "source",
+  "storage",
+  "compression",
+  "encryption",
+  "backup",
+  "retention",
+  "schedule",
+  "notify",
+]);
+
+function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalidImport(message: string, hint?: string): MockHttpError {
+  return new MockHttpError(400, "CONSOLE_VALIDATION", message, hint);
+}
+
+/** `{ storage, … }` is one config; anything else must map plan names to configs. */
+function importedConfigs(body: ConfigImportRequest): [string, MockImportedConfig][] {
+  const document = body.document;
+  if (!isPlainObject(document)) throw invalidImport("The document must be a JSON object.");
+  const entries: [string, unknown][] =
+    "storage" in document
+      ? [[body.planName?.trim() || "Imported plan", document]]
+      : Object.entries(document);
+  if (entries.length === 0) throw invalidImport("The document contains no config.");
+  return entries.map(([name, config]) => [name, parseImportedConfig(name, config)]);
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function parseImportedConfig(name: string, config: unknown): MockImportedConfig {
+  if (!isPlainObject(config)) throw invalidImport(`"${name}" must be a config object.`);
+  if (typeof config.storage !== "string" || config.storage.trim() === "") {
+    throw invalidImport(`"${name}": storage must be a storage URL.`);
+  }
+  const source = isPlainObject(config.source) ? config.source : {};
+  const uri = typeof source.uri === "string" ? source.uri : undefined;
+  // Secrets never travel inside the document; the real server refuses them the same way.
+  if (uri !== undefined && /\/\/[^/@]*:[^/@]*@/.test(uri)) {
+    throw invalidImport(
+      `"${name}": source.uri contains a password.`,
+      `Pass it as secrets["${name}"].uri instead.`,
+    );
+  }
+  const encryption = isPlainObject(config.encryption) ? config.encryption : undefined;
+  if (encryption !== undefined && "passphrase" in encryption) {
+    throw invalidImport(
+      `"${name}": encryption.passphrase is a secret.`,
+      `Pass it as secrets["${name}"].passphrase instead.`,
+    );
+  }
+  const notify = Array.isArray(config.notify) ? config.notify : [];
+  if (notify.some((target) => isPlainObject(target) && "url" in target)) {
+    throw invalidImport(
+      `"${name}": notify URLs are secrets.`,
+      `Pass them as secrets["${name}"].notifyUrls instead.`,
+    );
+  }
+  const backup = isPlainObject(config.backup) ? config.backup : {};
+  const schedule = isPlainObject(config.schedule) ? config.schedule : undefined;
+  const recipients = stringList(encryption?.recipients);
+  const compression =
+    config.compression === "gzip" || config.compression === "none" ? config.compression : "zstd";
+  const retention = isPlainObject(config.retention)
+    ? Object.fromEntries(
+        Object.entries(config.retention).filter(
+          (entry): entry is [string, number] => typeof entry[1] === "number",
+        ),
+      )
+    : undefined;
+  return {
+    storage: config.storage.trim(),
+    uri,
+    include: stringList(backup.include),
+    exclude: stringList(backup.exclude),
+    compression,
+    encryption: recipients.length > 0 ? { kind: "recipients", recipients } : { kind: "none" },
+    retention,
+    cron: typeof schedule?.cron === "string" ? schedule.cron : undefined,
+    timezone: typeof schedule?.timezone === "string" ? schedule.timezone : undefined,
+    ignored: Object.keys(config).filter((key) => !MODELLED_KEYS.has(key)),
+  };
+}
+
+/** The changed fields between a stored plan and an imported one, as display strings. */
+function planDifferences(existing: PlanView, input: PlanInput): ConfigImportChange["fields"] {
+  const compare: [string, unknown, unknown][] = [
+    ["storage", existing.storageId, input.storageId],
+    ["connection", existing.connectionId, input.connectionId],
+    ["compression", existing.compression, input.compression],
+    ["include", existing.include, input.include],
+    ["exclude", existing.exclude, input.exclude],
+    ["retention", existing.retention, input.retention],
+    ["schedule", existing.schedule?.cron, input.schedule?.cron],
+  ];
+  const fields: { field: string; from?: string; to?: string }[] = [];
+  for (const [field, from, to] of compare) {
+    const before = from === undefined ? undefined : JSON.stringify(from);
+    const after = to === undefined ? undefined : JSON.stringify(to);
+    if (before === after) continue;
+    fields.push({
+      field,
+      ...(before === undefined ? {} : { from: before }),
+      ...(after === undefined ? {} : { to: after }),
+    });
+  }
+  return fields;
+}
+
+/** `mongodb+srv://app@cluster0.example.net/db` → `cluster0.example.net`. */
+function hostOf(uri: string): string {
+  const afterScheme = uri.replace(/^[a-z+]+:\/\//i, "");
+  const afterCredentials = afterScheme.slice(afterScheme.indexOf("@") + 1);
+  return afterCredentials.split(/[/?]/)[0] || "Imported connection";
 }

@@ -6,7 +6,7 @@
  * an outline of what is on the screen.
  */
 
-import { type KeyboardEvent, type ReactNode, useEffect, useState } from "react";
+import { type KeyboardEvent, type ReactNode, type Ref, useEffect, useState } from "react";
 import { describeError } from "../api.ts";
 import { formatDateTime, formatRelative } from "../format.ts";
 
@@ -50,12 +50,27 @@ export function Panel(props: {
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
+  /**
+   * The heading element. Passing it also makes the heading focusable from script
+   * (tabindex -1), so a page can move focus to a panel that just appeared.
+   */
+  titleRef?: Ref<HTMLHeadingElement>;
 }) {
   return (
     <section className={`panel ${props.className ?? ""}`}>
       {props.title === undefined && props.actions === undefined ? null : (
         <header className="panel-header">
-          {props.title === undefined ? <span /> : <h2 className="panel-title">{props.title}</h2>}
+          {props.title === undefined ? (
+            <span />
+          ) : (
+            <h2
+              className="panel-title"
+              ref={props.titleRef}
+              tabIndex={props.titleRef === undefined ? undefined : -1}
+            >
+              {props.title}
+            </h2>
+          )}
           {props.actions === undefined ? null : (
             <div className="panel-actions">{props.actions}</div>
           )}

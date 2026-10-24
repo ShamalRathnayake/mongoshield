@@ -14,7 +14,7 @@ import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { Role, SessionInfo } from "../shared/api.ts";
 import type { ApiClient } from "./api.ts";
 import { Button } from "./components/button.tsx";
-import { ErrorNotice, Loading, Notice } from "./components/layout.tsx";
+import { ErrorNotice, Loading, Notice, PageHeader } from "./components/layout.tsx";
 import { ToastProvider, useToast } from "./components/toast.tsx";
 import { ApiProvider, SessionProvider, useApi, useSession } from "./context.tsx";
 import { AuditPage } from "./pages/audit.tsx";
@@ -245,6 +245,40 @@ export function resolveRoute(
   return undefined;
 }
 
+/** How long to wait for a page's heading after navigating (its data may still be loading). */
+const HEADING_WAIT_MS = 10_000;
+
+/**
+ * Focuses the page's `<h1>` as soon as it is rendered. Most pages show it only
+ * once their data has loaded, after this runs, so it watches `main` until the
+ * heading appears. If the user has moved focus elsewhere in the meantime, focus
+ * is left where they put it. Returns a function that stops watching.
+ */
+export function focusHeadingWhenRendered(main: HTMLElement | null): () => void {
+  if (main === null) return () => {};
+  const focusedAtNavigation = document.activeElement;
+  const tryFocus = (): boolean => {
+    const heading = main.querySelector<HTMLElement>("h1");
+    if (heading === null) return false;
+    const active = document.activeElement;
+    const userMovedFocus =
+      active !== null && active !== document.body && active !== focusedAtNavigation;
+    if (!userMovedFocus) heading.focus();
+    return true;
+  };
+  if (tryFocus()) return () => {};
+  const observer = new MutationObserver(() => {
+    if (tryFocus()) stop();
+  });
+  const timer = setTimeout(() => stop(), HEADING_WAIT_MS);
+  function stop(): void {
+    observer.disconnect();
+    clearTimeout(timer);
+  }
+  observer.observe(main, { childList: true, subtree: true });
+  return stop;
+}
+
 function Shell(props: { mock: boolean }) {
   const location = useLocation();
   const { user, hasRole, logout } = useSession();
@@ -258,7 +292,7 @@ function Shell(props: { mock: boolean }) {
   // Move focus to the page heading on navigation so screen readers announce the new page.
   useEffect(() => {
     if (location.path === "") return;
-    document.querySelector<HTMLElement>("#main h1")?.focus();
+    return focusHeadingWhenRendered(document.getElementById("main"));
   }, [location.path]);
 
   const toggleTheme = () => {
@@ -269,16 +303,24 @@ function Shell(props: { mock: boolean }) {
 
   let page: ReactNode;
   if (resolved === undefined) {
+    // These pages still get a heading: navigation moves focus to it, and screen
+    // reader users find their way by headings.
     page = (
-      <Notice tone="warning" title="Page not found">
-        There is no page at {location.path}. <a href="#/">Go to the overview</a>.
-      </Notice>
+      <>
+        <PageHeader title="Page not found" />
+        <Notice tone="warning">
+          There is no page at {location.path}. <a href="#/">Go to the overview</a>.
+        </Notice>
+      </>
     );
   } else if (resolved.route.role !== undefined && !hasRole(resolved.route.role)) {
     page = (
-      <Notice tone="warning" title="Not allowed">
-        This page needs the {resolved.route.role} role. You are signed in as {user?.role}.
-      </Notice>
+      <>
+        <PageHeader title="Not allowed" />
+        <Notice tone="warning">
+          This page needs the {resolved.route.role} role. You are signed in as {user?.role}.
+        </Notice>
+      </>
     );
   } else {
     page = resolved.route.render(resolved.params, location.query);

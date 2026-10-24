@@ -16,6 +16,8 @@ export function userView(user: UserRecord): UserView {
     id: user.id,
     username: user.username,
     role: user.role,
+    // Accounts without a password hash can only sign in through SSO (OIDC or the proxy).
+    signIn: user.passwordHash === "" ? "sso" : "password",
     createdAt: user.createdAt,
     ...(user.lastLoginAt === undefined ? {} : { lastLoginAt: user.lastLoginAt }),
   };

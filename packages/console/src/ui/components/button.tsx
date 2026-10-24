@@ -3,7 +3,7 @@
  * styles, the busy state and the danger styling are consistent.
  */
 
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode, Ref } from "react";
 
 /** Visual weight: one `primary` per view, `danger` for destructive actions. */
 export type ButtonVariant = "primary" | "secondary" | "danger" | "ghost";
@@ -14,6 +14,8 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   readonly size?: "normal" | "small";
   /** Shows a spinner and disables the button while an action runs. */
   readonly busy?: boolean;
+  /** The underlying `<button>`, e.g. to move focus to it. */
+  readonly ref?: Ref<HTMLButtonElement>;
 }
 
 function buttonClass(variant: ButtonVariant, size: "normal" | "small", extra?: string): string {

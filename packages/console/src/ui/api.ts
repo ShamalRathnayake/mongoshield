@@ -262,6 +262,15 @@ export function parseJobEvent(data: string): JobEvent | undefined {
   if (value.type === "progress" && "documents" in value && typeof value.documents === "number") {
     return value as JobEvent;
   }
+  if (
+    value.type === "namespace" &&
+    "ns" in value &&
+    typeof value.ns === "string" &&
+    "documents" in value &&
+    typeof value.documents === "number"
+  ) {
+    return value as JobEvent;
+  }
   if (value.type === "log" && "message" in value && typeof value.message === "string") {
     return value as JobEvent;
   }
@@ -295,6 +304,8 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 /** Typed access to every console endpoint. One instance per page load. */
 export class ApiClient {
   private csrfToken: string | undefined;
+  /** Who the token belongs to; a refreshed token is only used for the same user. */
+  private csrfUsername: string | undefined;
   private readonly fetchImpl: FetchLike;
   private readonly openEventSource: EventSourceFactory;
   private readonly baseUrl: string;
@@ -312,11 +323,13 @@ export class ApiClient {
   /** Stores the CSRF token from a session response (login, setup, `GET /api/session`). */
   rememberSession(session: SessionInfo): void {
     this.csrfToken = session.csrfToken;
+    this.csrfUsername = session.user?.username;
   }
 
   /** Forgets the CSRF token, e.g. after logging out. */
   forgetSession(): void {
     this.csrfToken = undefined;
+    this.csrfUsername = undefined;
   }
 
   /**
@@ -331,6 +344,47 @@ export class ApiClient {
   ): Promise<ResponseOf<Route>> {
     const [body, options]: UntypedCallArgs = args;
     const [method, pathTemplate] = splitRoute(route);
+    try {
+      return await this.send<Route>(method, pathTemplate, body, options);
+    } catch (error) {
+      if (!(await this.recoverFromStaleCsrfToken(error, method))) throw error;
+      // The same request once more, now with the current session's token.
+      return await this.send<Route>(method, pathTemplate, body, options);
+    }
+  }
+
+  /**
+   * After a CSRF refusal, fetches the current session's token. The token goes
+   * stale when the session cookie changes under this page: signing out and in
+   * again in another tab replaces the cookie, but this page still holds the old
+   * session's token. Returns true when the request may be retried: the session
+   * still belongs to the user this page knows. When it belongs to someone else
+   * (or nobody), retrying would act as a user the page does not show, so the app
+   * is sent back to the login page instead.
+   */
+  private async recoverFromStaleCsrfToken(error: unknown, method: string): Promise<boolean> {
+    const staleToken =
+      error instanceof ForbiddenError && error.code === "CONSOLE_CSRF" && !SAFE_METHODS.has(method);
+    if (!staleToken) return false;
+    const expectedUser = this.csrfUsername;
+    let session: SessionInfo;
+    try {
+      session = await this.send<"GET /api/session">("GET", "/api/session", undefined, undefined);
+    } catch {
+      return false;
+    }
+    if (session.user !== undefined && session.user.username === expectedUser) return true;
+    this.onUnauthorized?.();
+    return false;
+  }
+
+  /** One HTTP request and its typed JSON response (see {@link call}). */
+  private async send<Route extends RouteKey>(
+    method: string,
+    pathTemplate: string,
+    body: unknown,
+    options: UntypedCallArgs[1],
+  ): Promise<ResponseOf<Route>> {
     const url = this.baseUrl + buildPath(pathTemplate, options?.params, options?.query);
 
     const headers: Record<string, string> = { accept: "application/json" };

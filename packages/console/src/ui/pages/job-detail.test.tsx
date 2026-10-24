@@ -35,7 +35,7 @@ function controllableStream() {
   return { streams, openEventSource, send };
 }
 
-function progress(documents: number, namespace: string): JobEvent {
+function progress(documents: number, namespace: string, namespaceDocuments?: number): JobEvent {
   return {
     type: "progress",
     documents,
@@ -43,6 +43,7 @@ function progress(documents: number, namespace: string): JobEvent {
     bytes: documents * 1_000,
     etaMs: 90_000,
     namespace,
+    ...(namespaceDocuments === undefined ? {} : { namespaceDocuments }),
   };
 }
 
@@ -62,8 +63,9 @@ describe("job progress page", () => {
     expect(screen.getByText("Live")).toBeTruthy();
 
     sse.send({ type: "log", level: "info", message: "backup started by maya" });
-    sse.send(progress(500, "shop.users"));
-    sse.send(progress(1_000, "shop.orders"));
+    sse.send(progress(500, "shop.users", 500));
+    sse.send({ type: "namespace", ns: "shop.users", documents: 500 });
+    sse.send(progress(1_000, "shop.orders", 500));
     sse.send({ type: "log", level: "warn", message: "slow storage response" });
 
     const bar = screen.getByLabelText("Documents") as HTMLProgressElement;
@@ -114,15 +116,38 @@ describe("job progress page", () => {
 });
 
 describe("reduceJobEvent", () => {
-  it("counts documents per namespace from the running total", () => {
+  it("counts documents per namespace from progress and namespace events", () => {
     let state = initialJobState(RUNNING_JOB);
-    state = reduceJobEvent(state, progress(100, "a.x"));
-    state = reduceJobEvent(state, progress(300, "a.x"));
-    state = reduceJobEvent(state, progress(450, "a.y"));
-    state = reduceJobEvent(state, progress(700, "a.y"));
+    state = reduceJobEvent(state, progress(100, "a.x", 100));
+    state = reduceJobEvent(state, progress(300, "a.x", 300));
+    state = reduceJobEvent(state, { type: "namespace", ns: "a.x", documents: 320 });
+    state = reduceJobEvent(state, progress(450, "a.y", 130));
     expect(state.namespaces).toEqual([
-      { ns: "a.x", documents: 300, state: "done" },
-      { ns: "a.y", documents: 400, state: "active" },
+      { ns: "a.x", documents: 320, state: "done" },
+      { ns: "a.y", documents: 130, state: "active" },
+    ]);
+  });
+
+  it("keeps namespaces that finished between two throttled progress events", () => {
+    // A small collection can start and end without ever being named by a progress event.
+    let state = reduceJobEvent(initialJobState(RUNNING_JOB), progress(100, "a.big", 100));
+    state = reduceJobEvent(state, { type: "namespace", ns: "a.small", documents: 8 });
+    state = reduceJobEvent(state, { type: "namespace", ns: "a.big", documents: 120 });
+    expect(state.namespaces).toEqual([
+      { ns: "a.big", documents: 120, state: "done" },
+      { ns: "a.small", documents: 8, state: "done" },
+    ]);
+  });
+
+  it("tracks several namespaces in progress at once and never reopens a finished one", () => {
+    let state = reduceJobEvent(initialJobState(RUNNING_JOB), progress(10, "a.x", 10));
+    state = reduceJobEvent(state, progress(20, "a.y", 10));
+    state = reduceJobEvent(state, progress(30, "a.x", 20));
+    state = reduceJobEvent(state, { type: "namespace", ns: "a.x", documents: 25 });
+    state = reduceJobEvent(state, progress(40, "a.x", 25));
+    expect(state.namespaces).toEqual([
+      { ns: "a.x", documents: 25, state: "done" },
+      { ns: "a.y", documents: 10, state: "active" },
     ]);
   });
 

@@ -49,9 +49,51 @@ export interface SessionInfo {
   readonly user?: UserView;
   /** Send back as the `x-csrf-token` header on every state-changing request. */
   readonly csrfToken?: string;
-  /** Login methods the server accepts. */
+  /**
+   * Login methods the server accepts. With `"oidc"`, the login page offers a
+   * "Sign in with single sign-on" link to {@link OIDC_LOGIN_PATH}.
+   */
   readonly authMethods: readonly ("password" | "oidc" | "proxy")[];
 }
+
+/**
+ * OIDC sign-in is a browser redirect flow, not a JSON API, so its two endpoints
+ * are not in `ApiRoutes`:
+ *
+ *   GET /api/oidc/login      302 to the identity provider (authorization code + PKCE)
+ *   GET /api/oidc/callback   the provider redirects back here; on success the session
+ *                            cookie is set and the browser is sent to `/#/`, on failure
+ *                            to `/#/?sso_error=<code>` (one of {@link OidcErrorCode}).
+ */
+export const OIDC_LOGIN_PATH = "/api/oidc/login";
+
+/** Why a single sign-on attempt failed, as passed back to the UI in `sso_error`. */
+export type OidcErrorCode =
+  /** The provider reported an error (the user cancelled, consent denied, …). */
+  | "CONSOLE_OIDC_PROVIDER_ERROR"
+  /** The sign-in took too long, was started in another browser, or was replayed. */
+  | "CONSOLE_OIDC_STATE"
+  /** The provider's answer could not be verified (signature, issuer, audience, expiry, nonce). */
+  | "CONSOLE_OIDC_INVALID_TOKEN"
+  /** The provider could not be reached or answered with something unexpected. */
+  | "CONSOLE_OIDC_UNAVAILABLE"
+  /** The identity has no console role (no role mapping matched and there is no default role). */
+  | "CONSOLE_OIDC_NO_ROLE"
+  /** Auto-provisioning is off and no console account belongs to this identity. */
+  | "CONSOLE_OIDC_NOT_PROVISIONED"
+  /** A console account with the same username exists and belongs to someone else. */
+  | "CONSOLE_OIDC_ACCOUNT_CONFLICT";
+
+/** Every {@link OidcErrorCode}, for checking a code read from the URL. */
+export const OIDC_ERROR_CODES: readonly OidcErrorCode[] = [
+  "CONSOLE_OIDC_PROVIDER_ERROR",
+  "CONSOLE_OIDC_STATE",
+  "CONSOLE_OIDC_INVALID_TOKEN",
+  "CONSOLE_OIDC_UNAVAILABLE",
+  "CONSOLE_OIDC_NO_ROLE",
+  "CONSOLE_OIDC_NOT_PROVISIONED",
+  "CONSOLE_OIDC_ACCOUNT_CONFLICT",
+];
 
 export interface LoginRequest {
   readonly username: string;
@@ -69,6 +111,11 @@ export interface UserView {
   readonly id: string;
   readonly username: string;
   readonly role: Role;
+  /**
+   * How the account signs in: `"password"`, or `"sso"` for accounts without a
+   * password that only single sign-on (OIDC or the trusted proxy) can use.
+   */
+  readonly signIn: "password" | "sso";
   readonly createdAt: string;
   readonly lastLoginAt?: string;
 }
@@ -76,7 +123,11 @@ export interface UserView {
 export interface UserInput {
   readonly username: string;
   readonly role: Role;
-  /** Required when creating; optional when updating (omit to keep). */
+  /**
+   * Optional when updating (omit to keep). When creating it is required, unless
+   * single sign-on is enabled: then omitting it creates an `"sso"` account that
+   * signs in only through SSO (useful with OIDC auto-provisioning turned off).
+   */
   readonly password?: string;
 }
 
@@ -288,6 +339,104 @@ export interface RestorePlanView {
 }
 
 // ---------------------------------------------------------------------------
+// Pruning (applying a plan's retention policy)
+// ---------------------------------------------------------------------------
+
+/**
+ * The dry run of applying a plan's retention policy to its storage location.
+ * Retention applies to EVERY backup in that location, including backups written
+ * by other plans or by the CLI; `warnings` says so when another plan writes there.
+ */
+export interface PrunePlanView {
+  readonly planId: string;
+  readonly storageId: string;
+  readonly policy: NonNullable<PlanView["retention"]>;
+  /** Backups that stay, each with why (e.g. "last 7", "daily", "held", "immutable"). */
+  readonly keep: readonly { readonly id: string; readonly reasons: readonly string[] }[];
+  /** Backups the prune would delete, each with why. */
+  readonly remove: readonly { readonly id: string; readonly reason: string }[];
+  readonly warnings: readonly string[];
+  /**
+   * Backups in the same storage that are not this plan's (other plans, other
+   * sources, or runs nothing attributes to a plan). The plan's retention never
+   * touches them; they are neither in `keep` nor in `remove`.
+   */
+  readonly outOfScope: number;
+}
+
+/** Confirms a prune. */
+export interface PruneRequest {
+  /**
+   * The ids the dry run listed under `remove`. The job plans again when it runs and
+   * refuses to delete any backup that is not in this list (the catalog may have
+   * changed since the dry run), so a confirmation can never delete more than was shown.
+   */
+  readonly remove: readonly string[];
+}
+
+// ---------------------------------------------------------------------------
+// Config import
+// ---------------------------------------------------------------------------
+
+/**
+ * Imports a `mongoshield.config.ts` as JSON: the object passed to `defineConfig`,
+ * or several of them keyed by plan name (`{ "nightly prod": {...}, ... }`), which
+ * is what evaluating the console's own export and `JSON.stringify`-ing its named
+ * exports produces.
+ *
+ * Secrets never travel inside `document`. A connection string with a password,
+ * `encryption.passphrase` or a notification URL in the document is refused; give
+ * them in `secrets` instead. Leaving them out of the document (as the export does
+ * with unset `process.env` references: `source: {}`, `encryption: {}`, notify
+ * targets without `url`) means "take it from `secrets`, or keep what the console
+ * already stores for this plan".
+ *
+ * Send `dryRun: true` first to see the changes, then the same body with
+ * `dryRun: false` to apply them (all or nothing).
+ */
+export interface ConfigImportRequest {
+  readonly document: unknown;
+  /** The plan's name when `document` is a single config. Defaults to "Imported plan". */
+  readonly planName?: string;
+  /** Secrets per plan name. */
+  readonly secrets?: Readonly<Record<string, ConfigImportSecrets>>;
+  readonly dryRun: boolean;
+}
+
+/** The secrets of one imported plan, given explicitly. */
+export interface ConfigImportSecrets {
+  /** The source connection string (may contain credentials). Overrides `source.uri`. */
+  readonly uri?: string;
+  /** The backup passphrase, for passphrase encryption (`encryption: {}` in the document). */
+  readonly passphrase?: string;
+  /** Notification URLs, by position in the document's `notify` list. */
+  readonly notifyUrls?: readonly string[];
+  /** Credentials for a NEW storage location (environment-style pairs). */
+  readonly storageCredentials?: Readonly<Record<string, string>>;
+}
+
+/** One resource the import creates, changes or leaves as it is. */
+export interface ConfigImportChange {
+  readonly kind: "connection" | "storage" | "plan";
+  readonly name: string;
+  readonly action: "create" | "update" | "unchanged";
+  /** For updates: each changed field with its old and new value (secrets never shown). */
+  readonly fields: readonly {
+    readonly field: string;
+    readonly from?: string;
+    readonly to?: string;
+  }[];
+}
+
+/** What an import did (or, for a dry run, would do). */
+export interface ConfigImportResult {
+  readonly dryRun: boolean;
+  readonly changes: readonly ConfigImportChange[];
+  /** Settings in the document the console does not manage and therefore ignores. */
+  readonly warnings: readonly string[];
+}
+
+// ---------------------------------------------------------------------------
 // Jobs
 // ---------------------------------------------------------------------------
 
@@ -301,7 +450,7 @@ export interface JobSummary {
   readonly planId?: string;
   /** The storage location the job reads from or writes to, when there is one. */
   readonly storageId?: string;
-  /** The backup the job created (backup) or worked on (restore, verify, drill). */
+  /** The backup the job created (backup) or worked on (restore, verify, drill); absent for prune. */
   readonly backupId?: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
@@ -321,8 +470,16 @@ export type JobEvent =
       readonly estimatedDocuments: number;
       readonly bytes: number;
       readonly etaMs?: number;
+      /** The namespace being worked on most recently, and its documents so far. */
       readonly namespace?: string;
+      readonly namespaceDocuments?: number;
     }
+  /**
+   * A namespace has finished, with its final document count. Sent unthrottled, once per
+   * namespace: progress events are throttled, so a small collection can start and end
+   * between two of them, and several collections may be in progress at once.
+   */
+  | { readonly type: "namespace"; readonly ns: string; readonly documents: number }
   | { readonly type: "log"; readonly level: "info" | "warn" | "error"; readonly message: string };
 
 // ---------------------------------------------------------------------------
@@ -377,6 +534,10 @@ export interface ApiRoutes {
   "PUT /api/plans/:id": { request: PlanInput; response: PlanView };
   "DELETE /api/plans/:id": { request: undefined; response: { ok: true } };
   "POST /api/plans/:id/run": { request: undefined; response: JobSummary };
+  /** Dry run of the plan's retention policy (admin). */
+  "POST /api/plans/:id/prune/plan": { request: undefined; response: PrunePlanView };
+  /** Applies it as a `prune` job (admin). */
+  "POST /api/plans/:id/prune": { request: PruneRequest; response: JobSummary };
 
   "GET /api/storage/:id/backups": { request: undefined; response: readonly BackupSummary[] };
   "GET /api/storage/:id/backups/:backupId": { request: undefined; response: BackupDetail };
@@ -410,6 +571,8 @@ export interface ApiRoutes {
   "GET /api/audit": { request: undefined; response: readonly AuditEntry[] };
 
   "GET /api/config/export": { request: undefined; response: { filename: string; content: string } };
+  /** Dry run or apply (admin). */
+  "POST /api/config/import": { request: ConfigImportRequest; response: ConfigImportResult };
 }
 
 /** `"GET /api/plans"` → `"GET"`. */

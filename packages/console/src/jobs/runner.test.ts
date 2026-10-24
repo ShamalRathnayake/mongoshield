@@ -144,6 +144,63 @@ describe("JobRunner", () => {
     expect(events.at(-1)).toMatchObject({ type: "status", job: { status: "succeeded" } });
   });
 
+  it("reports every finished namespace with its count, live and to late subscribers", async () => {
+    // Progress is throttled (1 s here), so the small collection never appears in a
+    // progress event; its "namespace" event must still reach the page.
+    const throttled = new JobRunner({ store, progressIntervalMs: 1_000 });
+    const overall = (documents: number) =>
+      ({
+        type: "overall",
+        documents,
+        estimatedDocuments: 128,
+        bytes: documents,
+        elapsedMs: 1,
+        etaMs: undefined,
+      }) as const;
+    const live: JobEvent[] = [];
+    const started = await throttled.start({
+      kind: "backup",
+      lane: "connection:ns",
+      startedBy: "ada",
+      run: async (context) => {
+        context.progress({ type: "namespace:start", ns: "shop.orders", estimatedDocuments: 120 });
+        context.progress({
+          type: "namespace:progress",
+          ns: "shop.orders",
+          documents: 60,
+          bytes: 1,
+        });
+        context.progress(overall(60));
+        context.progress({ type: "namespace:start", ns: "shop.customers", estimatedDocuments: 8 });
+        context.progress({ type: "namespace:done", ns: "shop.customers", documents: 8 });
+        context.progress({ type: "namespace:done", ns: "shop.orders", documents: 120 });
+        context.progress(overall(128));
+        return { summary: "done" };
+      },
+    });
+    throttled.subscribe(started.id, (event) => live.push(event));
+    await throttled.finished(started.id);
+    const finished = (events: readonly JobEvent[]) =>
+      events.filter((event) => event.type === "namespace");
+    const expected = [
+      { type: "namespace", ns: "shop.customers", documents: 8 },
+      { type: "namespace", ns: "shop.orders", documents: 120 },
+    ];
+    expect(finished(live)).toEqual(expected);
+    expect(live).toContainEqual(
+      expect.objectContaining({
+        type: "progress",
+        namespace: "shop.orders",
+        namespaceDocuments: 60,
+      }),
+    );
+
+    const replayed: JobEvent[] = [];
+    throttled.subscribe(started.id, (event) => replayed.push(event))();
+    expect(finished(replayed)).toEqual(expected);
+    await throttled.shutdown(1000);
+  });
+
   it("marks jobs interrupted by a restart as failed", async () => {
     await store.update((state) => {
       state.jobs = [{ id: "old", kind: "backup", status: "running", startedBy: "ada" }];

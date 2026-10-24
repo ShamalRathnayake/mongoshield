@@ -14,9 +14,9 @@ import { join } from "node:path";
 import type { Hono } from "hono";
 import { MongoClient } from "mongodb";
 import { inject } from "vitest";
-import { createConsoleApp } from "../../src/server/app.ts";
+import { type ConsoleAppOptions, createConsoleApp } from "../../src/server/app.ts";
 import type { AppEnv, ConsoleServices, ConsoleSettings } from "../../src/server/context.ts";
-import { closeConsole, openConsole } from "../../src/server/services.ts";
+import { closeConsole, type OpenConsoleOptions, openConsole } from "../../src/server/services.ts";
 import type { Role, SessionInfo } from "../../src/shared/api.ts";
 
 declare module "vitest" {
@@ -76,6 +76,10 @@ export interface StartOptions {
   readonly clock?: TestClock;
   readonly settings?: Partial<ConsoleSettings>;
   readonly transcript?: string[];
+  /** OIDC provider cache/timeout overrides (see OpenConsoleOptions.oidcProvider). */
+  readonly oidcProvider?: OpenConsoleOptions["oidcProvider"];
+  /** Options for the HTTP app (e.g. a journal status reader for /metrics). */
+  readonly app?: Omit<ConsoleAppOptions, "heartbeatMs">;
 }
 
 /** Opens a console on a (new, by default) temporary data directory. */
@@ -89,8 +93,9 @@ export async function startConsole(options: StartOptions = {}): Promise<TestCons
     now: clock.now,
     progressIntervalMs: 0,
     settings: { cookieSecure: false, ...options.settings },
+    ...(options.oidcProvider === undefined ? {} : { oidcProvider: options.oidcProvider }),
   });
-  const app = createConsoleApp(services, { heartbeatMs: 50 });
+  const app = createConsoleApp(services, { heartbeatMs: 50, ...options.app });
   const transcript = options.transcript ?? [];
   return {
     dataDir,
@@ -113,12 +118,19 @@ export async function removeDataDir(dataDir: string): Promise<void> {
 export class TestClient {
   readonly #app: Hono<AppEnv>;
   readonly #transcript: string[];
-  #cookie: string | undefined;
+  /** Cookies by name, as a browser would keep them (attributes are not enforced). */
+  readonly #cookies = new Map<string, string>();
   csrfToken: string | undefined;
 
   constructor(app: Hono<AppEnv>, transcript: string[]) {
     this.#app = app;
     this.#transcript = transcript;
+  }
+
+  /** The `Cookie` header this client sends, or undefined without cookies. */
+  get cookieHeader(): string | undefined {
+    if (this.#cookies.size === 0) return undefined;
+    return [...this.#cookies].map(([name, value]) => `${name}=${value}`).join("; ");
   }
 
   /** Sends a request. `body` is sent as JSON; CSRF and cookie are added unless disabled. */
@@ -130,7 +142,8 @@ export class TestClient {
   ): Promise<RecordedResponse> {
     const headers: Record<string, string> = { ...options.headers };
     if (body !== undefined) headers["content-type"] = "application/json";
-    if (this.#cookie !== undefined) headers.cookie = this.#cookie;
+    const cookie = this.cookieHeader;
+    if (cookie !== undefined) headers.cookie = cookie;
     const csrf = options.csrf ?? true;
     if (typeof csrf === "string") headers["x-csrf-token"] = csrf;
     else if (csrf && this.csrfToken !== undefined) headers["x-csrf-token"] = this.csrfToken;
@@ -140,12 +153,7 @@ export class TestClient {
       headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    const setCookie = response.headers.get("set-cookie");
-    if (setCookie !== null) {
-      const pair = setCookie.split(";")[0] ?? "";
-      // An expired / emptied cookie means logout.
-      this.#cookie = /=\s*$/.test(pair) || /Max-Age=0/i.test(setCookie) ? undefined : pair;
-    }
+    this.#storeCookies(response.headers);
     const text = response.headers.get("content-type")?.includes("event-stream")
       ? ""
       : await response.text();
@@ -166,10 +174,24 @@ export class TestClient {
     return { status: response.status, headers: response.headers, text, body: parsed };
   }
 
+  /** Keeps every `Set-Cookie` of a response; an emptied or expired cookie is removed. */
+  #storeCookies(headers: Headers): void {
+    for (const setCookie of headers.getSetCookie()) {
+      const pair = setCookie.split(";")[0] ?? "";
+      const separator = pair.indexOf("=");
+      if (separator === -1) continue;
+      const name = pair.slice(0, separator).trim();
+      const value = pair.slice(separator + 1).trim();
+      if (value === "" || /Max-Age=0/i.test(setCookie)) this.#cookies.delete(name);
+      else this.#cookies.set(name, value);
+    }
+  }
+
   /** Opens an SSE stream and collects its `data:` events until it ends. */
   async events(path: string): Promise<unknown[]> {
     const headers: Record<string, string> = {};
-    if (this.#cookie !== undefined) headers.cookie = this.#cookie;
+    const cookie = this.cookieHeader;
+    if (cookie !== undefined) headers.cookie = cookie;
     const response = await this.#app.request(path, { headers });
     if (response.status !== 200 || response.body === null) {
       throw new Error(`SSE request failed with ${response.status}: ${await response.text()}`);

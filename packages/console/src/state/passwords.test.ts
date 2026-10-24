@@ -1,3 +1,8 @@
+/**
+ * Tests for password hashing: scrypt parameters, constant-time verification,
+ * and refusing malformed or downgraded stored hashes.
+ */
+
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PASSWORD_COST,
@@ -34,5 +39,18 @@ describe("password hashing", () => {
 
   it("spends time on unknown users and always fails", async () => {
     expect(await verifyAgainstDummy("anything", 14)).toBe(false);
+  });
+
+  it("rejects stored hashes with foreign block sizes, bad costs or truncated keys", async () => {
+    const hash = await hashPassword("x", 14);
+    const [scheme, cost, blockSize, parallelism, salt, key] = hash.split("$");
+    const variants = [
+      [scheme, "fourteen", blockSize, parallelism, salt, key],
+      [scheme, cost, "16", parallelism, salt, key],
+      [scheme, cost, blockSize, "2", salt, key],
+      [scheme, cost, blockSize, parallelism, salt, (key ?? "").slice(0, 20)],
+      [scheme, cost, blockSize, parallelism, salt],
+    ];
+    for (const parts of variants) expect(await verifyPassword("x", parts.join("$"))).toBe(false);
   });
 });

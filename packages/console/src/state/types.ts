@@ -26,10 +26,17 @@ export interface UserRecord {
   readonly id: string;
   readonly username: string;
   readonly role: Role;
-  /** `scrypt$<log2 N>$<r>$<p>$<salt>$<hash>`; empty for users that may only sign in via a proxy. */
+  /** `scrypt$<log2 N>$<r>$<p>$<salt>$<hash>`; empty for users that may only sign in via SSO. */
   readonly passwordHash: string;
   readonly createdAt: string;
   readonly lastLoginAt?: string;
+  /**
+   * The OIDC identity this account belongs to, set at its first OIDC sign-in.
+   * Identities are matched by issuer + subject only (the `sub` claim is stable and
+   * unique per issuer; usernames and emails are not). Added without a format bump:
+   * older files simply have no linked identities.
+   */
+  readonly oidc?: { readonly issuer: string; readonly subject: string };
 }
 
 /** A signed-in browser session. Only the SHA-256 of the session id is stored. */

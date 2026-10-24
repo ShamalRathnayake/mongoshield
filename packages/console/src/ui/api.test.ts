@@ -37,7 +37,13 @@ const SESSION: SessionInfo = {
   setupComplete: true,
   authMethods: ["password"],
   csrfToken: "csrf-123",
-  user: { id: "u1", username: "admin", role: "admin", createdAt: "2026-01-01T00:00:00Z" },
+  user: {
+    id: "u1",
+    username: "admin",
+    role: "admin",
+    signIn: "password",
+    createdAt: "2026-01-01T00:00:00Z",
+  },
 };
 
 describe("ApiClient.call", () => {
@@ -75,6 +81,82 @@ describe("ApiClient.call", () => {
     await client.call("POST /api/plans/:id/run", undefined, { params: { id: "p1" } });
     expect(calls[1]?.init.headers["x-csrf-token"]).toBeUndefined();
     expect(calls[2]?.init.headers["x-csrf-token"]).toBe("csrf-123");
+  });
+
+  describe("a stale CSRF token", () => {
+    const CSRF_REFUSAL = {
+      error: { code: "CONSOLE_CSRF", message: "The request is missing a valid CSRF token." },
+    };
+    const JOB = { id: "job-1", kind: "backup", status: "running", startedBy: "admin" };
+
+    it("is refreshed from the current session and the request retried once", async () => {
+      const { fetch, calls } = fakeFetch([
+        [200, SESSION],
+        [403, CSRF_REFUSAL],
+        [200, { ...SESSION, csrfToken: "csrf-new" }],
+        [200, JOB],
+      ]);
+      const client = new ApiClient({ fetch });
+      await client.call("GET /api/session");
+      const job = await client.call("POST /api/plans/:id/run", undefined, { params: { id: "p1" } });
+      expect(job.id).toBe("job-1");
+      expect(calls.map((call) => `${call.init.method} ${call.url}`)).toEqual([
+        "GET /api/session",
+        "POST /api/plans/p1/run",
+        "GET /api/session",
+        "POST /api/plans/p1/run",
+      ]);
+      expect(calls[3]?.init.headers["x-csrf-token"]).toBe("csrf-new");
+    });
+
+    it("is retried only once", async () => {
+      const { fetch, calls } = fakeFetch([
+        [200, SESSION],
+        [403, CSRF_REFUSAL],
+        [200, SESSION],
+        [403, CSRF_REFUSAL],
+      ]);
+      const client = new ApiClient({ fetch });
+      await client.call("GET /api/session");
+      await expect(
+        client.call("POST /api/plans/:id/run", undefined, { params: { id: "p1" } }),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+      expect(calls).toHaveLength(4);
+    });
+
+    it("is not retried when the cookie now belongs to someone else; the app signs out instead", async () => {
+      const other = {
+        ...SESSION,
+        csrfToken: "csrf-other",
+        user: { ...SESSION.user, username: "eve" },
+      };
+      const { fetch, calls } = fakeFetch([
+        [200, SESSION],
+        [403, CSRF_REFUSAL],
+        [200, other],
+      ]);
+      const onUnauthorized = vi.fn();
+      const client = new ApiClient({ fetch, onUnauthorized });
+      await client.call("GET /api/session");
+      await expect(
+        client.call("POST /api/plans/:id/run", undefined, { params: { id: "p1" } }),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+      expect(calls).toHaveLength(3);
+      expect(onUnauthorized).toHaveBeenCalledOnce();
+    });
+
+    it("does not affect other refusals", async () => {
+      const { fetch, calls } = fakeFetch([
+        [200, SESSION],
+        [403, { error: { code: "CONSOLE_FORBIDDEN", message: "Needs the admin role." } }],
+      ]);
+      const client = new ApiClient({ fetch });
+      await client.call("GET /api/session");
+      await expect(
+        client.call("POST /api/plans/:id/run", undefined, { params: { id: "p1" } }),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+      expect(calls).toHaveLength(2);
+    });
   });
 
   it("stops sending the CSRF token after forgetSession()", async () => {

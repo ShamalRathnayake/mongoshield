@@ -40,5 +40,12 @@ export default defineConfig({
         },
       },
     ],
+    coverage: {
+      provider: "v8",
+      // Floors just under the measured coverage (Oct 2026: lines 97.1, branches 90.5,
+      // functions 95.4, statements 96.1), with about a point of margin for paths that
+      // only run under certain timings. Raise them as tests improve.
+      thresholds: { lines: 96, branches: 89, functions: 94, statements: 95 },
+    },
   },
 });

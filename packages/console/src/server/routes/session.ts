@@ -67,9 +67,11 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
     }
 
     const user = services.store.current.users.find((candidate) => candidate.username === username);
+    // Unknown users and SSO-only accounts (no password hash) cost one dummy scrypt
+    // run, like a real check, so response times do not reveal which accounts exist.
     const ok =
-      user === undefined
-        ? await verifyAgainstDummy(password, services.passwordCost)
+      user === undefined || user.passwordHash === ""
+        ? (await verifyAgainstDummy(password, services.passwordCost)) && false
         : await verifyPassword(password, user.passwordHash);
     if (!ok || user === undefined) {
       services.loginLimiter.recordFailure(limiterKeys);
@@ -167,8 +169,11 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
 
 /** What `GET /api/session` returns for a principal (or nobody). */
 function sessionInfo(services: ConsoleServices, principal: Principal | undefined): SessionInfo {
-  const authMethods: SessionInfo["authMethods"] =
-    services.settings.proxySecret === undefined ? ["password"] : ["password", "proxy"];
+  const authMethods: SessionInfo["authMethods"] = [
+    "password",
+    ...(services.oidc === undefined ? [] : (["oidc"] as const)),
+    ...(services.settings.proxySecret === undefined ? [] : (["proxy"] as const)),
+  ];
   return {
     setupComplete: services.store.current.users.length > 0,
     authMethods,
@@ -181,8 +186,9 @@ function sessionInfo(services: ConsoleServices, principal: Principal | undefined
 /**
  * Creates a fresh session (a new id on every login: an id planted before login
  * is never promoted, which prevents session fixation) and sets the cookie.
+ * Used by password login, setup and OIDC sign-in.
  */
-async function startSession(
+export async function startSession(
   c: Context<AppEnv>,
   services: ConsoleServices,
   user: UserRecord,

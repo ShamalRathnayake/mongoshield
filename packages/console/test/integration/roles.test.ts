@@ -51,6 +51,8 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
   "PUT /api/plans/:id": "admin",
   "DELETE /api/plans/:id": "admin",
   "POST /api/plans/:id/run": "operator",
+  "POST /api/plans/:id/prune/plan": "admin",
+  "POST /api/plans/:id/prune": "admin",
 
   "GET /api/storage/:id/backups": "viewer",
   "GET /api/storage/:id/backups/:backupId": "viewer",
@@ -70,6 +72,7 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
   "GET /api/audit": "viewer",
 
   "GET /api/config/export": "viewer",
+  "POST /api/config/import": "admin",
 };
 
 /** `"POST /api/plans/:id/run"` → method and a concrete path with ids that do not exist. */

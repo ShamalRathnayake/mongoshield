@@ -22,4 +22,12 @@ describe("LoginRateLimiter", () => {
     limiter.reset("address:1");
     expect(limiter.retryAfterMs(["user:ada", "address:1"])).toBe(0);
   });
+
+  it("forgets the least recently failed keys beyond 10,000 so a flood cannot exhaust memory", () => {
+    const limiter = new LoginRateLimiter(() => 0);
+    for (let attempt = 0; attempt < MAX_FAILURES; attempt++) limiter.recordFailure(["user:first"]);
+    expect(limiter.retryAfterMs(["user:first"])).toBe(WINDOW_MS);
+    for (let index = 0; index < 10_000; index++) limiter.recordFailure([`user:flood-${index}`]);
+    expect(limiter.retryAfterMs(["user:first"])).toBe(0);
+  });
 });

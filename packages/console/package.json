@@ -35,6 +35,7 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
     "check:package": "publint --strict"
   },
   "dependencies": {
@@ -44,6 +45,7 @@
     "mongoshield": "workspace:*"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.8",
     "@types/node": "^24.19.2",

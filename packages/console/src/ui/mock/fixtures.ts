@@ -55,6 +55,11 @@ export interface MockStorage {
 /** A backup in the mock catalog: the API view plus which storage holds it. */
 export interface MockBackup extends BackupDetail {
   readonly storageId: string;
+  /**
+   * The plan that wrote the backup (its `mongoshield.plan` label), if any. Backups
+   * without one were written outside the console, e.g. by a CLI CronJob.
+   */
+  readonly planId?: string;
 }
 
 /** Everything the mock server knows. Mutable so the mock API can change it. */
@@ -544,7 +549,10 @@ export function createFixtures(now: number = Date.now()): MockData {
       "plan-hourly": { passphrase: "correct horse battery staple", notifyUrls: [] },
       "plan-local": { notifyUrls: [] },
     },
-    backups: [...nightly, ...weeklyBackups(now, "st-r2", 4)],
+    backups: [
+      ...nightly.map((backup) => ({ ...backup, planId: "plan-nightly" })),
+      ...weeklyBackups(now, "st-r2", 4),
+    ],
     jobs,
     audit: [
       { at: ago(now, 2 * HOUR), actor: "admin", action: "session.login", outcome: "success" },

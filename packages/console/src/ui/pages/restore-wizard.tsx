@@ -11,13 +11,17 @@
  * 4. Starting creates a job; the browser goes to its live progress page.
  *
  * Restoring selected documents (from the document browser) sends an `_id: {$in: …}`
- * Extended JSON filter. NOTE: `filter` is a proposed addition to `RestoreRequest`; until
- * the server supports it, the plan check below refuses to start when the server's plan
- * covers more documents than were selected, so a whole collection is never restored by
- * accident.
+ * Extended JSON filter (`RestoreRequest.filter`). As a safety net the review step still
+ * refuses to start when the server's plan covers more documents than were selected, so
+ * a whole collection is never restored by accident.
+ *
+ * Encrypted backups are read with a key the console stores (a plan's passphrase) or
+ * with keys typed here: a passphrase, or age private keys for backups encrypted to
+ * public keys, which the console never stores. Typed keys are sent with the plan and
+ * the restore request only and are cleared once the restore has started.
  */
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import type { ConnectionView, RestorePlanView, RestoreRequest } from "../../shared/api.ts";
 import { Button } from "../components/button.tsx";
 import {
@@ -38,11 +42,11 @@ import { patternProblem } from "../namespaces.ts";
 import { navigate, segment } from "../router.ts";
 import { lines } from "./plan-editor.tsx";
 
-/**
- * `RestoreRequest` plus the proposed `filter` (Extended JSON) used to restore only
- * selected documents. See the file header.
- */
-export type RestoreRequestWithFilter = RestoreRequest & { readonly filter?: string };
+/** Why a typed private key is not an age identity, or undefined when every key is one. */
+export function identitiesProblem(identities: readonly string[]): string | undefined {
+  const invalid = identities.find((line) => !/^AGE-SECRET-KEY-1[0-9A-Z]+$/.test(line));
+  return invalid === undefined ? undefined : "That is not an age private key (AGE-SECRET-KEY-1…).";
+}
 
 /** Restore modes with the explanation shown next to them. */
 const MODES: readonly { value: RestoreRequest["mode"]; label: string }[] = [
@@ -172,23 +176,47 @@ function RestoreWizard(
     selectedIds === undefined ? "fail-if-exists" : "upsert",
   );
   const [passphrase, setPassphrase] = useState("");
+  const [identitiesText, setIdentitiesText] = useState("");
   const [plan, setPlan] = useState<RestorePlanView | undefined>(undefined);
   const [confirmName, setConfirmName] = useState("");
-  const [errors, setErrors] = useState<{ namespaces?: string; rename?: string; target?: string }>(
-    {},
-  );
+  const [errors, setErrors] = useState<{
+    namespaces?: string;
+    rename?: string;
+    target?: string;
+    identities?: string;
+  }>({});
   const [requestError, setRequestError] = useState<unknown>(undefined);
   const [busy, setBusy] = useState(false);
 
+  const reviewHeading = useRef<HTMLHeadingElement>(null);
+  const reviewButton = useRef<HTMLButtonElement>(null);
+  const stepChanged = useRef(false);
+
+  // Changing step unmounts the focused button; without this, focus would fall to
+  // <body> and keyboard users would start again from the top of the page. On the
+  // first render the shell has already focused the page heading.
+  useEffect(() => {
+    if (!stepChanged.current) {
+      stepChanged.current = true;
+      return;
+    }
+    if (step === "review") reviewHeading.current?.focus();
+    else reviewButton.current?.focus();
+  }, [step]);
+
   const target = props.connections.find((connection) => connection.id === targetId);
   const rename = parseRenameRules(renameText);
+  // Masked input, so several keys are separated by spaces rather than lines.
+  const identities = identitiesText.split(/\s+/).filter((key) => key !== "");
 
   /** The request shared by the dry run and the real restore. */
-  const buildRequest = (): RestoreRequestWithFilter | undefined => {
+  const buildRequest = (): RestoreRequest | undefined => {
     const nextErrors: typeof errors = {};
     if (chosen.size === 0) nextErrors.namespaces = "Choose at least one namespace.";
     if (typeof rename === "string") nextErrors.rename = rename;
     if (target === undefined) nextErrors.target = "Choose a target connection.";
+    const identitiesError = identitiesProblem(identities);
+    if (identitiesError !== undefined) nextErrors.identities = identitiesError;
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0 || typeof rename === "string" || target === undefined)
       return undefined;
@@ -202,6 +230,7 @@ function RestoreWizard(
       ...(allChosen ? {} : { include: [...chosen] }),
       ...(Object.keys(rename).length === 0 ? {} : { rename }),
       ...(passphrase === "" ? {} : { passphrase }),
+      ...(identities.length === 0 ? {} : { identities }),
       ...(selectedIds === undefined
         ? {}
         : { filter: JSON.stringify({ _id: { $in: selectedIds } }) }),
@@ -235,6 +264,9 @@ function RestoreWizard(
         ...request,
         ...(target.production ? { confirmName } : {}),
       });
+      // The keys are not needed any more; do not keep them in memory.
+      setPassphrase("");
+      setIdentitiesText("");
       toast.show("success", `Restore into "${target.name}" started.`);
       navigate(`/jobs/${segment(job.id)}`);
     } catch (error) {
@@ -344,13 +376,32 @@ function RestoreWizard(
                 onValue={setPassphrase}
                 hint="Only needed when the console does not already store a matching key."
               />
+              <TextField
+                label="Private key (optional)"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={identitiesText}
+                onValue={setIdentitiesText}
+                placeholder="AGE-SECRET-KEY-1…"
+                hint="For backups encrypted to public keys: the matching age private key (several separated by spaces). Used for this restore only, never stored."
+                error={errors.identities}
+              />
             </FieldGroup>
           ) : null}
           {requestError === undefined ? null : (
             <ErrorNotice error={requestError} title="Could not plan the restore" />
           )}
           <div className="form-actions">
-            <Button type="submit" variant="primary" busy={busy}>
+            {/* The server refuses even to plan a restore into production for non-admins
+                (the notice above says why), so do not offer a request that must fail. */}
+            <Button
+              type="submit"
+              variant="primary"
+              busy={busy}
+              disabled={needsAdmin}
+              ref={reviewButton}
+            >
               Review plan
             </Button>
           </div>
@@ -360,6 +411,7 @@ function RestoreWizard(
       {step === "review" && plan !== undefined ? (
         <>
           <Panel
+            titleRef={reviewHeading}
             title={`Plan: ${plural(plan.entries.length, "namespace")}, ${formatNumber(plannedDocuments)} documents into ${target?.name ?? "?"}`}
           >
             {conflicts.length === 0 ? (

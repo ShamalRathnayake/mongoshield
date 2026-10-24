@@ -106,8 +106,8 @@ describe("restore wizard", () => {
       screen.getByLabelText("If a target collection already has data"),
       "drop",
     );
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
-    expect(await screen.findByText("Admin role required")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start restore" })).toHaveProperty("disabled", true);
+    expect(screen.getByText(/only admins can restore into production/)).toBeTruthy();
+    // The server refuses even the dry run for operators, so it is not offered.
+    expect(screen.getByRole("button", { name: "Review plan" })).toHaveProperty("disabled", true);
   });
 });

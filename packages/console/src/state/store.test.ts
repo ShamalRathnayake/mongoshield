@@ -1,4 +1,10 @@
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+/**
+ * Tests for the console's state store: initialisation, atomic and serialized
+ * updates, encryption bound to a context, refusing files it cannot trust
+ * (corrupt JSON, unknown versions, a different secret) and the data directory lock.
+ */
+
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -117,5 +123,86 @@ describe("StateStore", () => {
       JSON.stringify({ owner: "gone", host: "old", pid: 1, heartbeatAt: stale }),
     );
     await open(other);
+  });
+});
+
+describe("StateStore edge cases", () => {
+  /** A minimal valid state file with one field overridden. */
+  async function stateFileWith(dataDir: string, override: Record<string, unknown>): Promise<void> {
+    const store = await StateStore.open({ dataDir, secret: SECRET });
+    await store.close();
+    const saved = JSON.parse(await readFile(join(dataDir, STATE_FILE), "utf8"));
+    await writeFile(join(dataDir, STATE_FILE), JSON.stringify({ ...saved, ...override }));
+  }
+
+  it("refuses a state file of a version it does not know instead of guessing", async () => {
+    const dataDir = await tempDir();
+    await stateFileWith(dataDir, { version: 2 });
+    await expect(StateStore.open({ dataDir, secret: SECRET })).rejects.toThrow(
+      /not a MongoShield console state file of version 1/,
+    );
+  });
+
+  it("refuses a state file whose lists are missing or of the wrong type", async () => {
+    const dataDir = await tempDir();
+    await stateFileWith(dataDir, { users: "nobody" });
+    await expect(StateStore.open({ dataDir, secret: SECRET })).rejects.toBeInstanceOf(
+      StateOpenError,
+    );
+  });
+
+  it("refuses JSON that is not an object", async () => {
+    for (const content of ["null", "[]", '"text"']) {
+      const dataDir = await tempDir();
+      await writeFile(join(dataDir, STATE_FILE), content);
+      await expect(StateStore.open({ dataDir, secret: SECRET })).rejects.toBeInstanceOf(
+        StateOpenError,
+      );
+    }
+  });
+
+  it("passes on read errors other than a missing file and releases the lock", async () => {
+    const dataDir = await tempDir();
+    await mkdir(join(dataDir, STATE_FILE));
+    await expect(StateStore.open({ dataDir, secret: SECRET })).rejects.toMatchObject({
+      code: "EISDIR",
+    });
+    expect(await readdir(dataDir)).not.toContain(LOCK_FILE);
+  });
+
+  it("keeps the in-memory state when the file cannot be written, and recovers afterwards", async () => {
+    const dataDir = await tempDir();
+    const store = await open(dataDir);
+    // A read-only directory makes the temp file impossible to create.
+    await chmod(dataDir, 0o500);
+    try {
+      await expect(
+        store.update((state) => {
+          state.plans = [];
+          state.jobs = [{ id: "lost", kind: "backup", status: "queued", startedBy: "t" }];
+        }),
+      ).rejects.toMatchObject({ code: "EACCES" });
+      expect(store.current.jobs).toEqual([]);
+    } finally {
+      await chmod(dataDir, 0o700);
+    }
+    await store.update((state) => {
+      state.jobs = [{ id: "kept", kind: "backup", status: "queued", startedBy: "t" }];
+    });
+    const saved = JSON.parse(await readFile(join(dataDir, STATE_FILE), "utf8"));
+    expect(saved.jobs.map((job: { id: string }) => job.id)).toEqual(["kept"]);
+  });
+
+  it("reopens a directory with the same secret and keeps the data", async () => {
+    const dataDir = await tempDir();
+    const store = await open(dataDir);
+    await store.update((state) => {
+      state.jobs = [{ id: "j1", kind: "verify", status: "succeeded", startedBy: "t" }];
+    });
+    await store.close();
+    stores.splice(stores.indexOf(store), 1);
+    const reopened = await open(dataDir);
+    expect(reopened.current.jobs[0]?.id).toBe("j1");
+    expect(reopened.csrfKey).toHaveLength(32);
   });
 });

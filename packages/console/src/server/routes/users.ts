@@ -2,7 +2,8 @@
  * User management (admin only).
  *
  *   GET    /api/users
- *   POST   /api/users        create (password required)
+ *   POST   /api/users        create (password required, unless SSO is on: then omitting
+ *                             it creates an SSO-only account)
  *   PUT    /api/users/:id    rename, change role, or set a new password
  *   DELETE /api/users/:id
  *
@@ -40,11 +41,7 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
     const body = asObject(await readJson(c));
     const username = usernameField(body.username);
     const role: Role = oneOf(body, "role", ROLES);
-    if (body.password === undefined) throw invalid("A password is required for a new user.");
-    const passwordHash = await hashPassword(
-      passwordField(body.password, { checkStrength: true }),
-      services.passwordCost,
-    );
+    const passwordHash = await initialPasswordHash(services, body.password);
     const user: UserRecord = {
       id: randomId(),
       username,
@@ -61,7 +58,7 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       action: "user.create",
       target: username,
       outcome: "success",
-      details: { role },
+      details: { role, signIn: passwordHash === "" ? "sso" : "password" },
     });
     return c.json(userView(user));
   });
@@ -128,6 +125,26 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
     });
     return c.json({ ok: true as const });
   });
+}
+
+/**
+ * The password hash of a new account. Without a password the account can only
+ * sign in through SSO, which only makes sense (and is only allowed) when OIDC or
+ * the trusted proxy is configured: admins pre-create such accounts when OIDC
+ * auto-provisioning is off.
+ */
+async function initialPasswordHash(services: ConsoleServices, password: unknown): Promise<string> {
+  if (password !== undefined && password !== null) {
+    return hashPassword(passwordField(password, { checkStrength: true }), services.passwordCost);
+  }
+  const ssoEnabled = services.oidc !== undefined || services.settings.proxySecret !== undefined;
+  if (!ssoEnabled) {
+    throw invalid(
+      "A password is required for a new user.",
+      "Accounts without a password are only possible when single sign-on is configured.",
+    );
+  }
+  return "";
 }
 
 function assertUsernameFree(
