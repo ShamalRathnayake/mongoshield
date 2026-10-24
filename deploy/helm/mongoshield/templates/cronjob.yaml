@@ -1,0 +1,149 @@
+{{- /*
+The CronJob that runs `mongoshield <command>` on `.Values.schedule`.
+
+Inside the pod:
+  /etc/mongoshield/config/mongoshield.config.json   from the ConfigMap (passed with --config)
+  /etc/mongoshield/identity/<key>                     age identity, only if identity.secretName is set
+  /tmp                                                writable scratch space (root filesystem is read-only)
+  /backups                                            PersistentVolumeClaim, only if persistence.enabled
+*/}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "mongoshield.fullname" . }}
+  labels:
+    {{- include "mongoshield.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  {{- with .Values.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: {{ .Values.concurrencyPolicy }}
+  {{- with .Values.startingDeadlineSeconds }}
+  startingDeadlineSeconds: {{ . }}
+  {{- end }}
+  suspend: {{ .Values.suspend }}
+  successfulJobsHistoryLimit: {{ .Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "mongoshield.labels" . | nindent 8 }}
+    spec:
+      backoffLimit: {{ .Values.backoffLimit }}
+      {{- with .Values.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      {{- with .Values.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "mongoshield.selectorLabels" . | nindent 12 }}
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            # Changing the config re-renders this hash, which makes the change visible
+            # in `helm diff` and in the Job's pod template.
+            checksum/config: {{ toJson .Values.config | sha256sum }}
+            {{- with .Values.podAnnotations }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          # A failed pod is not restarted in place; the Job's backoffLimit decides
+          # whether a new pod tries again.
+          restartPolicy: Never
+          serviceAccountName: {{ include "mongoshield.serviceAccountName" . }}
+          automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: mongoshield
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              # The image's entrypoint is the mongoshield CLI, so `args` is the command line.
+              args:
+                - {{ .Values.command | quote }}
+                - "--config"
+                - "/etc/mongoshield/config/mongoshield.config.json"
+                {{- range .Values.args }}
+                - {{ . | quote }}
+                {{- end }}
+              env:
+                # Read by MongoShield directly (see src/config/env.ts); overrides the config file.
+                - name: MONGODB_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "mongodbUri.secretName is required" .Values.mongodbUri.secretName }}
+                      key: {{ .Values.mongodbUri.secretKey }}
+                {{- with .Values.recipients }}
+                - name: MONGOSHIELD_RECIPIENTS
+                  value: {{ join "," . | quote }}
+                {{- end }}
+                {{- if .Values.identity.secretName }}
+                - name: MONGOSHIELD_IDENTITY_FILE
+                  value: "/etc/mongoshield/identity/{{ .Values.identity.secretKey }}"
+                {{- end }}
+                {{- with .Values.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              {{- with .Values.extraEnvFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/mongoshield/config
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+                {{- if .Values.identity.secretName }}
+                - name: identity
+                  mountPath: /etc/mongoshield/identity
+                  readOnly: true
+                {{- end }}
+                {{- if .Values.persistence.enabled }}
+                - name: backups
+                  mountPath: {{ .Values.persistence.mountPath }}
+                {{- end }}
+          volumes:
+            - name: config
+              configMap:
+                name: {{ include "mongoshield.configMapName" . }}
+            - name: tmp
+              emptyDir: {}
+            {{- if .Values.identity.secretName }}
+            - name: identity
+              secret:
+                secretName: {{ .Values.identity.secretName }}
+                # Readable by root and by the pod's fsGroup (65532, the mongoshield user),
+                # nobody else. 0400 would hide it from the non-root user.
+                defaultMode: 0440
+            {{- end }}
+            {{- if .Values.persistence.enabled }}
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ required "persistence.existingClaim is required when persistence.enabled" .Values.persistence.existingClaim }}
+            {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

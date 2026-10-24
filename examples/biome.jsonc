@@ -1,0 +1,21 @@
+// Lint settings for the examples, on top of the repository's biome.json ("//").
+// Examples are small applications, not library code, so a few library rules don't fit.
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "root": false,
+  "extends": "//",
+  "javascript": {
+    "parser": {
+      // NestJS uses parameter decorators (@Inject...) for dependency injection.
+      "unsafeParameterDecoratorsEnabled": true
+    }
+  },
+  "linter": {
+    "rules": {
+      // Applications log to the console (Lambda and Vercel collect stdout).
+      "suspicious": { "noConsole": "off" },
+      // NestJS modules are classes with static forRoot()/forRootAsync() by convention.
+      "complexity": { "noStaticOnlyClass": "off" }
+    }
+  }
+}

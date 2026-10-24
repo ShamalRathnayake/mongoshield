@@ -1,0 +1,75 @@
+# Nightly MongoDB backup to S3 with MongoShield.
+# Copy to .github/workflows/nightly-backup.yml in your repository.
+#
+# Needs (Settings > Secrets and variables > Actions):
+#   secret   MONGODB_URI        connection string of a user with the `backup` role
+#   variable BACKUP_PUBLIC_KEY  age public key (age1...) from `npx mongoshield@next keygen`
+#   variable AWS_BACKUP_ROLE    ARN of an IAM role this repository may assume via OIDC
+#   variable BACKUP_BUCKET      e.g. acme-backups
+#
+# No AWS keys are stored: GitHub's OIDC token is exchanged for short-lived credentials.
+# The secret age key never comes near CI, so a leaked runner can't read backups.
+name: Nightly backup
+
+on:
+  schedule:
+    # 03:15 UTC daily. GitHub may start scheduled runs some minutes late under load.
+    - cron: "15 3 * * *"
+  # A "Run workflow" button for manual backups (before a migration, say).
+  workflow_dispatch:
+
+# Never run two backups at once; a manual run waits for the nightly one.
+concurrency:
+  group: mongodb-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read # checkout (only needed if you keep a mongoshield.config.* in the repo)
+  id-token: write # OIDC token for AWS
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    # Hard stop; GitHub's default is 6 hours.
+    timeout-minutes: 120
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4 # v4: current major
+        with:
+          role-to-assume: ${{ vars.AWS_BACKUP_ROLE }}
+          aws-region: eu-west-1
+
+      - name: Back up MongoDB
+        id: backup
+        uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or commit SHA
+        with:
+          command: backup
+          uri: ${{ secrets.MONGODB_URI }}
+          storage: s3://${{ vars.BACKUP_BUCKET }}/mongodb?region=eu-west-1
+          recipients: ${{ vars.BACKUP_PUBLIC_KEY }}
+          args: --exclude *.sessions --label trigger=github-actions --label run=${{ github.run_id }}
+
+      # Checks every file's checksum against the manifest. No key needed.
+      - name: Verify the new backup
+        uses: ShamalRathnayake/mongoshield/action@main
+        with:
+          command: verify
+          storage: s3://${{ vars.BACKUP_BUCKET }}/mongodb?region=eu-west-1
+          args: ${{ steps.backup.outputs.backup-id }}
+
+      # Keep the 3 newest backups plus 7 daily, 4 weekly and 12 monthly ones.
+      # The action has no `prune` command, so call the CLI directly (same npx install).
+      # --yes: deleting needs confirmation and nobody can answer a prompt in CI.
+      - name: Prune old backups
+        env:
+          MONGOSHIELD_STORAGE: s3://${{ vars.BACKUP_BUCKET }}/mongodb?region=eu-west-1
+        run: >-
+          npx --yes
+          --package=mongoshield@next
+          --package=@aws-sdk/client-s3@^3
+          --package=@aws-sdk/lib-storage@^3
+          -- mongoshield prune --last 3 --daily 7 --weekly 4 --monthly 12 --yes
+
+      - name: Summary
+        env:
+          BACKUP_ID: ${{ steps.backup.outputs.backup-id }}
+        run: echo "Backup \`${BACKUP_ID}\` created and verified." >> "$GITHUB_STEP_SUMMARY"

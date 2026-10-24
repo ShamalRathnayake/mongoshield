@@ -1,0 +1,6 @@
+# Files `helm package` leaves out of the chart archive.
+.DS_Store
+.git/
+*.swp
+*.bak
+*.tmp

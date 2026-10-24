@@ -1,0 +1,119 @@
+# AWS SAM template: a Lambda function that backs up MongoDB to S3 on a schedule.
+#
+#   npm install
+#   sam build && sam deploy --guided
+#
+# Parameters are asked for on the first `sam deploy --guided` and saved to samconfig.toml.
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Scheduled MongoDB backups with MongoShield
+
+Parameters:
+  BackupBucketName:
+    Type: String
+    Description: Name of the S3 bucket to create for backups (globally unique).
+  BackupPublicKey:
+    Type: String
+    Description: age public key (age1...) to encrypt backups for. Keep the secret key offline.
+  MongoUriSecretArn:
+    Type: String
+    Description: ARN of a Secrets Manager secret whose value is the MongoDB connection string.
+  Schedule:
+    Type: String
+    Default: cron(15 3 * * ? *)
+    Description: EventBridge schedule expression (UTC). Default 03:15 every day.
+
+Resources:
+  # Versioning keeps overwritten/deleted objects recoverable for a while, and the
+  # lifecycle rule cleans those old versions up so they don't cost money forever.
+  # Public access is blocked outright.
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain # never delete backups together with the stack
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BackupBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 2
+
+  BackupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handler.handler
+      CodeUri: .
+      # nodejs24.x if your region offers it; MongoShield needs Node.js 22.12 or newer.
+      Runtime: nodejs22.x
+      Architectures: [arm64] # Graviton: cheaper per GB-second, same speed for this workload
+      # Lambda's maximum. The handler stops the backup a minute before this.
+      Timeout: 900
+      # Memory also sets CPU: at 1769 MB a function gets one full vCPU, which keeps
+      # zstd compression and encryption from being the bottleneck. Memory use itself
+      # stays flat because everything streams.
+      MemorySize: 1769
+      # One run at a time. A run started while another is going waits in Lambda's queue.
+      ReservedConcurrentExecutions: 1
+      # Scheduled invocations are asynchronous, and Lambda retries failed async runs twice
+      # by default: up to 45 minutes of retrying. A failed backup should alert someone
+      # instead (see the CloudWatch alarm below); raise this if failures are usually blips.
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
+      Environment:
+        Variables:
+          BACKUP_BUCKET: !Ref BackupBucket
+          BACKUP_PREFIX: mongodb/
+          BACKUP_PUBLIC_KEY: !Ref BackupPublicKey
+          MONGODB_URI_SECRET_ARN: !Ref MongoUriSecretArn
+          # Reuse HTTP connections to S3 across requests.
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1"
+      Policies:
+        # List, read, write and delete in this bucket only (delete is for retention).
+        - S3CrudPolicy:
+            BucketName: !Ref BackupBucket
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref MongoUriSecretArn
+      Events:
+        Nightly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: !Ref Schedule
+
+  # Alarm when a run fails. Subscribe an SNS topic (email, Slack via Chatbot) to act on it.
+  BackupFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A MongoShield backup run failed
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BackupFunction
+      Statistic: Sum
+      Period: 86400 # one day: the schedule runs daily
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # No data (the function never ran) is also a problem worth an alarm.
+      TreatMissingData: breaching
+
+Outputs:
+  BucketName:
+    Value: !Ref BackupBucket
+  FunctionName:
+    Value: !Ref BackupFunction

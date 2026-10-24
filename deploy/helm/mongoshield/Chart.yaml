@@ -1,0 +1,20 @@
+# Helm chart metadata. `version` is the chart's own version (bump it when templates
+# change); `appVersion` is the MongoShield image tag used when image.tag is empty.
+apiVersion: v2
+name: mongoshield
+description: Scheduled MongoDB backups with MongoShield, as a Kubernetes CronJob. No mongodump required.
+type: application
+version: 0.1.0
+appVersion: "next"
+# CronJob `timeZone` needs Kubernetes 1.27 or newer.
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/ShamalRathnayake/mongoshield
+sources:
+  - https://github.com/ShamalRathnayake/mongoshield
+keywords:
+  - mongodb
+  - backup
+  - restore
+  - cronjob
+maintainers:
+  - name: Shamal Rathnayake

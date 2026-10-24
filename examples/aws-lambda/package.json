@@ -1,0 +1,13 @@
+{
+  "name": "mongoshield-lambda-backup",
+  "private": true,
+  "type": "module",
+  "description": "Scheduled MongoDB backups to S3 on AWS Lambda with MongoShield.",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1100.0",
+    "@aws-sdk/client-secrets-manager": "^3.1100.0",
+    "@aws-sdk/lib-storage": "^3.1100.0",
+    "mongodb": "^7.0.0",
+    "mongoshield": "next"
+  }
+}

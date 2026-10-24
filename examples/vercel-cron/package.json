@@ -1,0 +1,26 @@
+{
+  "name": "mongoshield-vercel-cron",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1100.0",
+    "@aws-sdk/lib-storage": "^3.1100.0",
+    "mongodb": "^7.0.0",
+    "mongoshield": "next",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

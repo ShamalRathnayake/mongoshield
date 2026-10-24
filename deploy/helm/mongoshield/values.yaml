@@ -1,0 +1,214 @@
+# Default values for the MongoShield chart.
+#
+# The chart creates one CronJob that runs `mongoshield run` on a schedule: take a
+# backup, verify it, apply the retention policy and send notifications, all as
+# configured in `config` below. Kubernetes decides *when*; MongoShield does the rest.
+#
+#   kubectl create secret generic mongoshield --from-literal=MONGODB_URI='mongodb+srv://...'
+#   helm install backups ./deploy/helm/mongoshield -f my-values.yaml
+#
+# Full guide: docs/guides/kubernetes.md
+
+image:
+  # The official image (docker/Dockerfile). It contains the AWS SDK by default;
+  # use an image built with CLOUD_SDKS=all (or gcs/azure) for other clouds.
+  repository: ghcr.io/shamalrathnayake/mongoshield
+  # Defaults to the chart's appVersion. Pin an exact version (e.g. "2.0.0") in
+  # production so a new release never changes your backups unannounced.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Secrets for pulling the image from a private registry: [{ name: my-registry }].
+imagePullSecrets: []
+
+# Overrides for the generated resource names.
+nameOverride: ""
+fullnameOverride: ""
+
+# --- When to run ------------------------------------------------------------
+
+# Standard 5-field cron expression. 03:15 every day by default: after midnight
+# batch jobs, before the working day.
+schedule: "15 3 * * *"
+
+# IANA time zone for `schedule` (Kubernetes 1.27+). Without it, the controller's
+# local time zone applies, which is usually UTC but not guaranteed.
+timeZone: "Etc/UTC"
+
+# Forbid: never start a backup while the previous one is still running. Two
+# overlapping backups would double the load on the database for no benefit.
+# (MongoShield's own lock also guards against this; this stops it earlier.)
+concurrencyPolicy: Forbid
+
+# If the controller missed the scheduled time (cluster down, controller restart),
+# still start the job up to this many seconds late. After that, skip this run.
+startingDeadlineSeconds: 3600
+
+# Set to true to pause backups without uninstalling, e.g. during a migration.
+suspend: false
+
+# How many finished Jobs (and their pods and logs) to keep for `kubectl logs`.
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 3
+
+# Pod retries after a failure, at the Kubernetes level. Keep this low: MongoShield
+# already retries inside a run (config.schedule.retries), and a whole new pod per
+# retry restarts the backup from scratch.
+backoffLimit: 1
+
+# Kill the job after this many seconds, whatever it is doing. 6 hours by default;
+# set it comfortably above your longest backup.
+activeDeadlineSeconds: 21600
+
+# Delete finished Jobs this long after they end (seconds). History limits above
+# still apply. Leave empty to keep them until the history limit removes them.
+ttlSecondsAfterFinished: ""
+
+# --- What to run ------------------------------------------------------------
+
+# The mongoshield command. `run` = one scheduled job (lock, backup, verify, prune,
+# notify). `backup` only backs up.
+command: run
+
+# Extra command-line arguments, e.g. ["--exclude", "*.sessions", "--verbose"].
+args: []
+
+# The contents of mongoshield.config.json, written as YAML. It is stored in a
+# ConfigMap and passed with --config. Do NOT put secrets here: ConfigMaps are not
+# encrypted and anyone who can read the namespace can read them. Secrets go in the
+# Secret referenced below (environment variables override this file).
+# Every field is documented in packages/mongoshield/src/config/schema.ts.
+config:
+  # Where backups go. s3:// works with AWS S3 and S3-compatible stores
+  # (add ?endpoint=https://...&forcePathStyle=true for MinIO and friends).
+  # For a PersistentVolume, use "/backups" and enable `persistence` below.
+  storage: "s3://my-backups/mongodb?region=eu-west-1"
+
+  # Defaults for each backup.
+  backup:
+    exclude:
+      - "*.sessions"
+    labels:
+      trigger: kubernetes
+
+  # Which backups to keep. Applied after each successful backup.
+  retention:
+    last: 3
+    daily: 7
+    weekly: 4
+    monthly: 12
+
+  # Options for `mongoshield run`. `cron` and `timezone` are filled in from
+  # `schedule` and `timeZone` above, so there is one place to change the time.
+  schedule:
+    # Lock object next to the backups, so two runs (e.g. a manual one) never overlap.
+    lock: storage
+    # Check every new backup's checksums (no key needed).
+    verify: fast
+    # Retries inside the pod, with backoff, before the job fails.
+    retries: 2
+
+  # Optional alerting. A "dead man's switch" URL alerts when backups stop
+  # arriving, which also catches a CronJob that never starts.
+  # heartbeat: "https://hc-ping.com/your-uuid"
+  # notify:
+  #   - type: slack
+  #     url: "https://hooks.slack.com/services/..."
+  #     on: ["failure"]
+
+# Use your own ConfigMap instead (it must contain a key mongoshield.config.json).
+# When set, `config` above is ignored.
+existingConfigMap: ""
+
+# --- Secrets ----------------------------------------------------------------
+# The chart never creates Secrets, so credentials don't end up in Helm release
+# history. Create them yourself, or with External Secrets / Sealed Secrets.
+
+# The MongoDB connection string, from an existing Secret. Use a database user with
+# only the `backup` role (read access plus what consistent backups need).
+mongodbUri:
+  secretName: mongoshield
+  secretKey: MONGODB_URI
+
+# Public age keys (age1...) to encrypt backups for. Public keys are not secret.
+# The matching secret key should NOT be in the cluster unless you need deep
+# verification or restores here: that way a compromised cluster can't read backups.
+recipients: []
+
+# Optional: an age identity (secret key) mounted as a file, for `verify: deep` or
+# running restores from the cluster. The Secret's key holds the key file contents.
+identity:
+  secretName: ""
+  secretKey: identity.txt
+
+# More environment variables, e.g. MONGOSHIELD_COMPRESSION, AWS_REGION, or
+# credentials for S3-compatible storage that can't use workload identity:
+#   - name: AWS_ACCESS_KEY_ID
+#     valueFrom: { secretKeyRef: { name: r2-credentials, key: access-key-id } }
+extraEnv: []
+
+# Whole Secrets/ConfigMaps exposed as environment variables:
+#   - secretRef: { name: cloud-credentials }
+extraEnvFrom: []
+
+# --- Identity for cloud storage ---------------------------------------------
+
+serviceAccount:
+  create: true
+  # Name of the ServiceAccount; generated from the release name if empty.
+  name: ""
+  # Annotations that link the ServiceAccount to a cloud identity, so no cloud keys
+  # are stored in the cluster at all:
+  #   AWS IRSA:            eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mongoshield
+  #   GKE Workload Identity: iam.gke.io/gcp-service-account: mongoshield@PROJECT.iam.gserviceaccount.com
+  #   Azure Workload Identity: azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000
+  #                          (also add the pod label azure.workload.identity/use: "true")
+  annotations: {}
+
+# Mount the Kubernetes API token into the pod. MongoShield never calls the
+# Kubernetes API, and IRSA / Workload Identity inject their own tokens, so off.
+automountServiceAccountToken: false
+
+# --- Local storage (optional) -----------------------------------------------
+
+# Mount a PersistentVolumeClaim at /backups and set config.storage to "/backups".
+# Prefer object storage: a volume in the same cluster shares its failure domain.
+persistence:
+  enabled: false
+  # An existing PVC to use. The chart does not create one.
+  existingClaim: ""
+  mountPath: /backups
+
+# --- Pod settings -------------------------------------------------------------
+
+podAnnotations: {}
+podLabels: {}
+
+# Backups stream: memory stays flat whatever the database size. CPU goes to
+# compression and encryption; more CPU (and config.backup.parallelism) is faster.
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# Hardened defaults. The image runs as uid 65532 and needs no writable root
+# filesystem; /tmp is an emptyDir for anything that wants scratch space.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
