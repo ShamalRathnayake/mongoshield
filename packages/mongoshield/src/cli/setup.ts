@@ -101,16 +101,19 @@ function describeStorage(storage: MongoShieldConfig["storage"]): string {
 }
 
 /**
- * Validates recipients up front: a typo in a public key should fail in a
- * second, with a clear message, not after connecting to the database.
+ * The configured encryption for new backups: recipients, a passphrase and cloud KMS
+ * keys, all passed on (a dropped `kms` would make KMS-only configs fail and mixed ones
+ * silently skip the KMS key). Validates recipients up front: a typo in a public key
+ * should fail in a second, with a clear message, not after connecting to the database.
  */
-function encryptionFromConfig(config: MongoShieldConfig): EncryptionOptions | undefined {
+export function encryptionFromConfig(config: MongoShieldConfig): EncryptionOptions | undefined {
   const encryption = config.encryption;
   if (!encryption) return undefined;
   for (const recipient of encryption.recipients ?? []) assertValidRecipient(recipient);
   return {
     ...(encryption.recipients ? { recipients: encryption.recipients } : {}),
     ...(encryption.passphrase ? { passphrase: encryption.passphrase } : {}),
+    ...(encryption.kms ? { kms: encryption.kms } : {}),
   };
 }
 

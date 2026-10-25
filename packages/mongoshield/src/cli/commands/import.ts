@@ -16,7 +16,6 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { MongoShieldConfig, MongoShieldConfigInput } from "../../config/schema.ts";
-import { assertValidRecipient } from "../../crypto/index.ts";
 import { MongoShieldError } from "../../errors.ts";
 import {
   type ImportMongodumpOptions,
@@ -24,12 +23,16 @@ import {
   importMongodump,
   type MongodumpSource,
 } from "../../interop/import.ts";
-import type { EncryptionOptions } from "../../types.ts";
 import { usageError } from "../args.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
 import { formatBytes, formatCount, formatDuration, plural } from "../format.ts";
 import { ProgressDisplay } from "../progress.ts";
-import { createCliLogger, createCliShield, readPassphraseEnv } from "../setup.ts";
+import {
+  createCliLogger,
+  createCliShield,
+  encryptionFromConfig,
+  readPassphraseEnv,
+} from "../setup.ts";
 import { renderDetails } from "../table.ts";
 import {
   assertNotBoth,
@@ -224,18 +227,6 @@ function importOptions(
     ...(labels ? { labels } : {}),
     ...(dumpedAt ? { dumpedAt } : {}),
     ...(context.flags.boolean("ignore-oplog") ? { ignoreOplog: true } : {}),
-  };
-}
-
-/** Encryption settings from the merged config, with recipients validated up front. */
-function encryptionFromConfig(config: MongoShieldConfig): EncryptionOptions | undefined {
-  const encryption = config.encryption;
-  if (!encryption) return undefined;
-  for (const recipient of encryption.recipients ?? []) assertValidRecipient(recipient);
-  return {
-    ...(encryption.recipients ? { recipients: encryption.recipients } : {}),
-    ...(encryption.passphrase ? { passphrase: encryption.passphrase } : {}),
-    ...(encryption.kms ? { kms: encryption.kms } : {}),
   };
 }
 

@@ -9,9 +9,11 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { writeTestBackup } from "../../test/helpers/backup-fixtures.ts";
 import { runTestCli } from "../../test/helpers/cli.ts";
+import { validateConfig } from "../config/load.ts";
 import { generateIdentity } from "../crypto/index.ts";
 import { fileStorage } from "../storage/file.ts";
 import { resolveStorage } from "../storage/resolve.ts";
+import { encryptionFromConfig } from "./setup.ts";
 
 let cwd: string;
 const key = generateIdentity();
@@ -260,5 +262,33 @@ describe("storage locations", () => {
     const run = await runTestCli(["list"], { cwd });
     expect(run.code).toBe(2);
     expect(run.stderr).toContain("hint");
+  });
+});
+
+describe("encryption from the config file", () => {
+  const kms = [{ provider: "aws" as const, key: "arn:aws:kms:eu-west-1:111122223333:key/abc" }];
+
+  it("passes cloud KMS keys on, alone or next to recipients (they used to be dropped)", () => {
+    const { recipient } = generateIdentity();
+    expect(encryptionFromConfig(validateConfig({ storage: "./b", encryption: { kms } }))).toEqual({
+      kms,
+    });
+    expect(
+      encryptionFromConfig(
+        validateConfig({ storage: "./b", encryption: { kms, recipients: [recipient] } }),
+      ),
+    ).toEqual({ kms, recipients: [recipient] });
+  });
+
+  it("keeps passphrases, is undefined without encryption, and refuses a mistyped recipient", () => {
+    expect(
+      encryptionFromConfig(validateConfig({ storage: "./b", encryption: { passphrase: "pw" } })),
+    ).toEqual({ passphrase: "pw" });
+    expect(encryptionFromConfig(validateConfig({ storage: "./b" }))).toBeUndefined();
+    expect(() =>
+      encryptionFromConfig(
+        validateConfig({ storage: "./b", encryption: { recipients: ["age1nope"] } }),
+      ),
+    ).toThrow();
   });
 });
