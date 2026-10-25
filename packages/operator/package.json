@@ -1,6 +1,6 @@
 {
   "name": "@mongoshield/operator",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Kubernetes operator for MongoShield: backup plans, backups and restores as custom resources.",
   "keywords": [
     "mongodb",

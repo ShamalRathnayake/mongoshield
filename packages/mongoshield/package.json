@@ -1,6 +1,6 @@
 {
   "name": "mongoshield",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Backup, restore and copy MongoDB from Node.js. No mongodump required.",
   "keywords": [
     "mongodb",

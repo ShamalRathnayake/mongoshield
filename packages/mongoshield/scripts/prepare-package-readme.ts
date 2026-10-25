@@ -23,6 +23,12 @@ import { fileURLToPath } from "node:url";
 /** Where repository-relative links point after the rewrite. */
 const REPOSITORY_BLOB_URL = "https://github.com/ShamalRathnayake/mongoshield/blob/main/";
 
+/** Where repository-relative images load from (served with their real content type). */
+const REPOSITORY_RAW_URL = "https://raw.githubusercontent.com/ShamalRathnayake/mongoshield/main/";
+
+/** The full configuration reference, in the README on GitHub. */
+const REFERENCE_URL = "https://github.com/ShamalRathnayake/mongoshield#configuration-reference";
+
 /** The README at the repository root (two levels above this package). */
 const SOURCE = fileURLToPath(new URL("../../../README.md", import.meta.url));
 
@@ -49,6 +55,81 @@ function absolutizeRelativeLinks(markdown: string): string {
   });
 }
 
+/**
+ * Points images at GitHub's raw file URLs: npm shows only images it can download, and the
+ * files under docs/assets are not in the tarball. Covers Markdown images
+ * (`![alt](docs/x.png)`) and the `src` / `srcset` attributes of HTML images. (Markdown
+ * images also match the link rewrite above, so this runs first and they keep their raw URL.)
+ */
+function absolutizeImages(markdown: string): string {
+  const raw = (target: string) =>
+    `${REPOSITORY_RAW_URL}${target.startsWith("./") ? target.slice(2) : target}`;
+  return markdown
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)/g, (match, alt: string, target: string) =>
+      isRepositoryRelative(target) ? `![${alt}](${raw(target)}` : match,
+    )
+    .replace(/\b(src|srcset)="([^"]+)"/g, (match, attribute: string, target: string) =>
+      isRepositoryRelative(target) ? `${attribute}="${raw(target)}"` : match,
+    );
+}
+
+/** Rewrites relative `href` attributes of HTML links (the cards and the jump menu). */
+function absolutizeHtmlLinks(markdown: string): string {
+  return markdown.replace(/\bhref="([^"]+)"/g, (match, target: string) => {
+    if (!isRepositoryRelative(target)) return match;
+    const withoutDotSlash = target.startsWith("./") ? target.slice(2) : target;
+    return `href="${REPOSITORY_BLOB_URL}${withoutDotSlash}"`;
+  });
+}
+
+/**
+ * npm keeps only the first 64 KiB of a README, so the long "Configuration reference"
+ * (everything up to the FAQ) is replaced by a link to it on GitHub, and links into it
+ * go there too.
+ */
+function shortenReference(markdown: string): string {
+  const start = markdown.indexOf("\n## Configuration reference\n");
+  const end = markdown.indexOf("\n## FAQ\n");
+  if (start === -1 || end === -1 || end < start) return markdown;
+  const pointer = [
+    "",
+    "## Configuration reference",
+    "",
+    "Every config key, environment variable, CLI flag, library option, storage URL and",
+    `deployment setting is listed in the [configuration reference on GitHub](${REFERENCE_URL}).`,
+    "",
+  ].join("\n");
+  return (markdown.slice(0, start) + pointer + markdown.slice(end)).replaceAll(
+    "](#configuration-reference)",
+    `](${REFERENCE_URL})`,
+  );
+}
+
+/**
+ * GitHub-only Markdown that npm shows as raw text: alerts (`> [!TIP]`) become a bold
+ * label, and the mermaid diagram becomes one line of text.
+ */
+function simplifyGitHubOnlySyntax(markdown: string): string {
+  const labels: Record<string, string> = {
+    NOTE: "Note",
+    TIP: "Tip",
+    IMPORTANT: "Important",
+    WARNING: "Warning",
+    CAUTION: "Caution",
+  };
+  return markdown
+    .replace(
+      /^> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\n> /gm,
+      (_match, kind: string) => `> **${labels[kind]}:** `,
+    )
+    .replace(
+      /```mermaid\n[\s\S]*?```\n/,
+      "**Your MongoDB → MongoShield** (stream · compress · encrypt · checksum) **→ your storage**" +
+        " (folder · S3 · GCS · Azure · SFTP) **→ verify, drill and restore** (rename · preview ·" +
+        " point in time)\n",
+    );
+}
+
 /** True for link targets that name a file in the repository rather than a URL or anchor. */
 function isRepositoryRelative(target: string): boolean {
   if (target.startsWith("#")) return false; // anchor within the README
@@ -65,7 +146,11 @@ function main(): void {
     return;
   }
   const readme = readFileSync(SOURCE, "utf8");
-  writeFileSync(TARGET, GENERATED_NOTICE + absolutizeRelativeLinks(readme));
+  // Images first: the link rewrite would otherwise send Markdown images to blob/ pages.
+  const forNpm = absolutizeRelativeLinks(
+    absolutizeHtmlLinks(absolutizeImages(simplifyGitHubOnlySyntax(shortenReference(readme)))),
+  );
+  writeFileSync(TARGET, GENERATED_NOTICE + forNpm);
 }
 
 main();

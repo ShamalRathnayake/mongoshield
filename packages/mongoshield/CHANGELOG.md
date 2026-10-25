@@ -1,5 +1,12 @@
 # mongoshield
 
+## 2.0.1
+
+### Patch Changes
+
+- The README on npmjs.com shows its images (they load from GitHub) and fits npm's size
+  limit: the full configuration reference stays on GitHub, linked from the npm page.
+
 ## 2.0.0
 
 ### Major Changes

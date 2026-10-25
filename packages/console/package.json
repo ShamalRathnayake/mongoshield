@@ -1,6 +1,6 @@
 {
   "name": "@mongoshield/console",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Self-hosted web console for MongoShield: connections, scheduled backups, verification, browsing and restoring backups.",
   "keywords": [
     "mongodb",
