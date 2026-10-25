@@ -24,7 +24,7 @@ jobs:
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
@@ -47,7 +47,7 @@ jobs:
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
       - run: pnpm install --frozen-lockfile
@@ -86,7 +86,7 @@ jobs:
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
@@ -108,7 +108,7 @@ jobs:
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
@@ -142,7 +142,7 @@ jobs:
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile

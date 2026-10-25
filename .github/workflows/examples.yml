@@ -71,7 +71,7 @@ jobs:
 
       # deploy/operator/operator.yaml is rendered from the operator chart; fail if it
       # was not regenerated after a chart change. (The script needs only Node and helm.)
-      - uses: actions/setup-node@v5 # v5: current major
+      - uses: actions/setup-node@v7 # v5: current major
         with:
           node-version: 24
           # setup-node v5 caches the package manager named in package.json (pnpm),
