@@ -9,7 +9,7 @@
 # Needs (Settings > Secrets and variables > Actions):
 #   secret   MONGODB_URI            mongodb+srv://… of a database user with the
 #                                   "Only read any database" role (readAnyDatabase)
-#   variable BACKUP_PUBLIC_KEY      age public key (age1…) from `npx mongoshield@next keygen`
+#   variable BACKUP_PUBLIC_KEY      age public key (age1…) from `npx mongoshield keygen`
 #   variable BACKUP_BUCKET          bucket name, e.g. acme-backups
 #   variable S3_ENDPOINT            R2 only: https://<account-id>.r2.cloudflarestorage.com
 #                                   (leave unset for AWS S3)
@@ -81,7 +81,7 @@ jobs:
 
       - name: Back up the Atlas cluster
         id: backup
-        uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or commit SHA
+        uses: ShamalRathnayake/mongoshield/action@v2 # pin to a release tag or commit SHA
         with:
           command: backup
           uri: ${{ secrets.MONGODB_URI }}
@@ -91,7 +91,7 @@ jobs:
 
       # Checks every file's checksum against the manifest. No key needed.
       - name: Verify the new backup
-        uses: ShamalRathnayake/mongoshield/action@main
+        uses: ShamalRathnayake/mongoshield/action@v2
         with:
           command: verify
           storage: ${{ env.STORAGE }}
@@ -105,7 +105,7 @@ jobs:
           MONGOSHIELD_STORAGE: ${{ env.STORAGE }}
         run: >-
           npx --yes
-          --package=mongoshield@next
+          --package=mongoshield
           --package=@aws-sdk/client-s3@^3
           --package=@aws-sdk/lib-storage@^3
           -- mongoshield prune --last 7 --weekly 4 --monthly 6 --yes

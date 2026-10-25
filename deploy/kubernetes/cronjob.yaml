@@ -93,7 +93,7 @@ spec:
           containers:
             - name: mongoshield
               # Pin an exact version in production, e.g. :2.0.0.
-              image: ghcr.io/shamalrathnayake/mongoshield:next
+              image: ghcr.io/shamalrathnayake/mongoshield:2
               # The image's entrypoint is the CLI: this is `mongoshield run --config ...`.
               # run = take a backup, verify it, prune old ones, notify.
               args: ["run", "--config", "/etc/mongoshield/config/mongoshield.config.json"]

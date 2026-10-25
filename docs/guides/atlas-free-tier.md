@@ -19,7 +19,7 @@ features are required.
 ## Quick start
 
 ```bash
-npx mongoshield@next init --preset atlas-free --keygen   # or --preset atlas-flex
+npx mongoshield init --preset atlas-free --keygen   # or --preset atlas-flex
 ```
 
 This writes `mongoshield.config.ts` and an encryption key pair. The config sets the
@@ -39,8 +39,8 @@ Then, in Atlas:
 
 ```bash
 export MONGODB_URI='mongodb+srv://backup:<password>@cluster0.abcde.mongodb.net/?compressors=zlib'
-npx mongoshield@next backup
-npx mongoshield@next verify
+npx mongoshield backup
+npx mongoshield verify
 ```
 
 ## What MongoShield does on Free and Flex clusters
@@ -119,7 +119,7 @@ side effect, not a feature: don't rely on it.
 The safest default is to restore next to the original data:
 
 ```bash
-npx mongoshield@next restore latest --identity-file mongoshield.key --rename 'app.*=app_restored.*'
+npx mongoshield restore latest --identity-file mongoshield.key --rename 'app.*=app_restored.*'
 ```
 
 Restoring needs a separate database user with **Read and write to any database**

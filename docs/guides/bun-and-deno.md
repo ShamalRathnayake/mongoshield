@@ -15,7 +15,7 @@ The `mongodb` driver is still a peer dependency (6.10+ or 7.x), whatever the run
 ## Bun
 
 ```bash
-bun add mongoshield@next mongodb
+bun add mongoshield mongodb
 bunx --bun mongoshield backup --to ./backups
 ```
 
@@ -42,21 +42,21 @@ await shield.close();
 Without installing anything:
 
 ```bash
-deno run -A npm:mongoshield@next backup --to ./backups
+deno run -A npm:mongoshield backup --to ./backups
 ```
 
 `-A` grants every permission. The CLI needs only these, if you prefer to list them:
 
 ```bash
 deno run --allow-env --allow-read --allow-write --allow-net --allow-sys \
-  npm:mongoshield@next backup --to ./backups
+  npm:mongoshield backup --to ./backups
 ```
 
 `--allow-sys` is for the MongoDB driver, which sends the host name and OS to the server
 when it connects. In a Deno project, add the packages and import them by name:
 
 ```bash
-deno add npm:mongoshield@next npm:mongodb
+deno add npm:mongoshield npm:mongodb
 ```
 
 ```ts

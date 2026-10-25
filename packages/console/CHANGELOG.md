@@ -1,6 +1,6 @@
 # @mongoshield/console
 
-## 2.0.0-next.2
+## 2.0.0
 
 ### Major Changes
 
@@ -28,7 +28,6 @@
   server-side JavaScript are ever run.
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`085d6a1`](https://github.com/ShamalRathnayake/mongoshield/commit/085d6a1b535fffb05d5a58ecac2ed5d4c3e7bcec) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - A record browser to rival Compass, for live data and backups alike:
-  
   - A navigation tree of connections, databases and collections (type icons for views,
     time series and capped collections, counts, search, keyboard navigation), breadcrumbs,
     and the last opened collection remembered.
@@ -62,7 +61,6 @@
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`085d6a1`](https://github.com/ShamalRathnayake/mongoshield/commit/085d6a1b535fffb05d5a58ecac2ed5d4c3e7bcec) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Zero-setup console: `docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console`
   and a browser are enough.
-  
   - **Secret.** Without `MONGOSHIELD_SECRET`, the console generates one on the first start
     into `/data/secret.key` (mode 0600, written atomically) and says so in the log; a
     malformed or world-readable key file is refused. `MONGOSHIELD_SECRET_FILE` reads the
@@ -95,7 +93,6 @@
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Incremental backups: store only what changed since the previous backup, in chains of a
   full backup followed by incrementals (docs/guides/incremental-backups.md).
-  
   - `shield.backup({ incremental: true })` (or `{ incremental: { from: "<id>" } }`) and
     `mongoshield backup --incremental [--from <id>]` record every change after the parent
     backup's end time with a change stream, DDL included (create, drop, rename, index
@@ -155,7 +152,6 @@
 ### Patch Changes
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`13a7f30`](https://github.com/ShamalRathnayake/mongoshield/commit/13a7f30b5eb8b52b784ecbea1efd5e3f5dcd2553) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Correctness fixes found by a full test sweep:
-  
   - Restore, copy, change replay and point-in-time recovery keep every document's field order,
     including integer-like keys, and so do index keys, validators, users and roles, part bounds,
     copy checkpoints and subset references.
@@ -168,5 +164,6 @@
   - mongodump interop handles time series buckets, users, roles, `system.js` and oplog files.
   - Console: OIDC sign-in, config import, scoped prune, metrics; a run's prune no longer deletes
     other plans' backups.
+
 - Updated dependencies [[`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad), [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad), [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad), [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad), [`13a7f30`](https://github.com/ShamalRathnayake/mongoshield/commit/13a7f30b5eb8b52b784ecbea1efd5e3f5dcd2553), [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad), [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad), [`13a7f30`](https://github.com/ShamalRathnayake/mongoshield/commit/13a7f30b5eb8b52b784ecbea1efd5e3f5dcd2553), [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad), [`f49712e`](https://github.com/ShamalRathnayake/mongoshield/commit/f49712ea1d356f78ab2f5f43bfdc37ae320dd888)]:
-  - mongoshield@2.0.0-next.2
+  - mongoshield@2.0.0

@@ -3,7 +3,7 @@
 #
 # Needs (Settings > Secrets and variables > Actions):
 #   secret   MONGODB_URI        connection string of a user with the `backup` role
-#   variable BACKUP_PUBLIC_KEY  age public key (age1...) from `npx mongoshield@next keygen`
+#   variable BACKUP_PUBLIC_KEY  age public key (age1...) from `npx mongoshield keygen`
 #   variable AWS_BACKUP_ROLE    ARN of an IAM role this repository may assume via OIDC
 #   variable BACKUP_BUCKET      e.g. acme-backups
 #
@@ -40,7 +40,7 @@ jobs:
 
       - name: Back up MongoDB
         id: backup
-        uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or commit SHA
+        uses: ShamalRathnayake/mongoshield/action@v2 # pin to a release tag or commit SHA
         with:
           command: backup
           uri: ${{ secrets.MONGODB_URI }}
@@ -50,7 +50,7 @@ jobs:
 
       # Checks every file's checksum against the manifest. No key needed.
       - name: Verify the new backup
-        uses: ShamalRathnayake/mongoshield/action@main
+        uses: ShamalRathnayake/mongoshield/action@v2
         with:
           command: verify
           storage: s3://${{ vars.BACKUP_BUCKET }}/mongodb?region=eu-west-1
@@ -64,7 +64,7 @@ jobs:
           MONGOSHIELD_STORAGE: s3://${{ vars.BACKUP_BUCKET }}/mongodb?region=eu-west-1
         run: >-
           npx --yes
-          --package=mongoshield@next
+          --package=mongoshield
           --package=@aws-sdk/client-s3@^3
           --package=@aws-sdk/lib-storage@^3
           -- mongoshield prune --last 3 --daily 7 --weekly 4 --monthly 12 --yes

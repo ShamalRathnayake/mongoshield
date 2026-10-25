@@ -11,7 +11,7 @@ Before the first run, make sure the Secret "{{ .Values.mongodbUri.secretName }}"
 {{- if not .Values.recipients }}
 
 WARNING: `recipients` is empty, so backups are NOT encrypted (unless your config sets encryption).
-  Generate a key pair with `npx mongoshield@next keygen --output backup.key` and set
+  Generate a key pair with `npx mongoshield keygen --output backup.key` and set
   recipients: ["age1..."]. Keep backup.key offline, outside the cluster.
 {{- end }}
 {{- if not (get (.Values.config | default dict) "heartbeat") }}

@@ -4,7 +4,7 @@ Back up, verify and restore MongoDB from a GitHub Actions workflow. It runs
 `npx mongoshield@<version>`, so there is no image to pull and nothing to install first.
 
 ```yaml
-- uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or commit SHA
+- uses: ShamalRathnayake/mongoshield/action@v2 # pin to a release tag or commit SHA
   id: backup
   with:
     uri: ${{ secrets.MONGODB_URI }}

@@ -8,11 +8,6 @@ copies MongoDB databases. It uses only the official Node.js driver: there is no
 `mongodump` binary to install, so it runs wherever Node.js runs — a laptop, a Docker
 container, a Kubernetes CronJob, GitHub Actions, AWS Lambda or Vercel.
 
-:::note[Status]
-The first stable release, MongoShield 2.0.0, is being prepared. Until it is out,
-install from the `next` npm tag.
-:::
-
 ## What a backup is
 
 A backup is a directory of ordinary files in storage you control: local disk, S3 or an

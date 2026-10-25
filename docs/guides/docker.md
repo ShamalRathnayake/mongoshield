@@ -123,7 +123,7 @@ docker run --rm --init \
   -e MONGOSHIELD_STORAGE='s3://acme-backups/prod?region=eu-west-1' \
   -e MONGOSHIELD_RECIPIENTS='age1…' \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  ghcr.io/shamalrathnayake/mongoshield:next backup
+  ghcr.io/shamalrathnayake/mongoshield:2 backup
 ```
 
 `--init` lets Ctrl-C and `docker stop` interrupt the command promptly (Node.js as PID 1
@@ -134,7 +134,7 @@ prepares for its non-root user (uid 65532):
 
 ```bash
 docker run --rm --init -e MONGODB_URI -v mongoshield-backups:/backups \
-  ghcr.io/shamalrathnayake/mongoshield:next backup --to /backups
+  ghcr.io/shamalrathnayake/mongoshield:2 backup --to /backups
 ```
 
 A bind-mounted host directory must be writable by uid 65532
@@ -151,7 +151,7 @@ for `mongoshield.config.{ts,js,mjs,json}`:
 docker run -d --name mongoshield --restart unless-stopped \
   -e MONGODB_URI -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   -v "$PWD/mongoshield.config.json:/app/mongoshield.config.json:ro" \
-  ghcr.io/shamalrathnayake/mongoshield:next
+  ghcr.io/shamalrathnayake/mongoshield:2
 ```
 
 ```json
@@ -204,7 +204,7 @@ Environment variables override the config file; command-line flags override both
 docker run --rm -it --init -e MONGODB_URI \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   -v "$HOME/backup.key:/run/secrets/backup.key:ro" -e MONGOSHIELD_IDENTITY_FILE=/run/secrets/backup.key \
-  ghcr.io/shamalrathnayake/mongoshield:next \
+  ghcr.io/shamalrathnayake/mongoshield:2 \
   restore latest --from s3://acme-backups/prod --rename 'app.*=app_restored.*'
 ```
 
@@ -226,7 +226,7 @@ The image has no shell. To debug, build `--target deps` (Debian slim with the sa
 ## Verifying the signature
 
 ```bash
-cosign verify ghcr.io/shamalrathnayake/mongoshield:next \
+cosign verify ghcr.io/shamalrathnayake/mongoshield:2 \
   --certificate-identity-regexp '^https://github.com/ShamalRathnayake/mongoshield/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```

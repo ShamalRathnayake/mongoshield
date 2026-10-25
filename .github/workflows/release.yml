@@ -66,6 +66,17 @@ jobs:
       # package must never reach npm even if CI was skipped for the merge.
       - run: pnpm check:package
 
+      # pnpm 12 cannot publish with npm trusted publishing (the registry refuses its OIDC
+      # token exchange), so `pnpm publish` is routed through the npm CLI by a stand-in
+      # `pnpm` placed first on PATH: .github/scripts/npm-publish/pnpm. Trusted publishing
+      # needs npm 11.5.1 or newer.
+      - name: Publish with the npm CLI
+        run: |
+          npm install --global npm@11
+          npm --version
+          echo "REAL_PNPM=$(command -v pnpm)" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.github/scripts/npm-publish" >> "$GITHUB_PATH"
+
       # changesets/action v2 needs @changesets/cli v3 (this repository uses v3).
       - uses: changesets/action@v2
         id: changesets

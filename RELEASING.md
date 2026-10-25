@@ -29,20 +29,19 @@ and SLSA provenance.
   prototype's `@mongoshield/core`, `@mongoshield/provider-local` and
   `@mongoshield/provider-s3` packages, are deprecated after the release (step 8).
 - **`@mongoshield/console` is released in lockstep** with `mongoshield`
-  (`"fixed": [["mongoshield", "@mongoshield/console"]]` in `.changeset/config.json`), so its
+  (`"fixed": [["mongoshield", "@mongoshield/console", "@mongoshield/operator"]]` in
+  `.changeset/config.json`), so its
   first version is also 2.0.0. The console depends on the exact library version it was
   built with (`workspace:*` becomes `"mongoshield": "2.0.0"` on publish), both Docker images
   are built from one commit with one version tag, and "console X runs on mongoshield X" is
   the only compatibility rule anyone has to know. A separate 0.x line would suggest the
   console is experimental and need a compatibility table; it has its own full test suite
   (unit, integration, Playwright) and is not experimental.
-- **`@mongoshield/operator` has its own version line, starting at 0.1.0.** Its API is
-  `mongoshield.io/v1alpha1` and will change; a 0.x version says so, where lockstep with
-  the library would imply a stable 2.x API. It depends on the exact library version it
-  was built with (for config validation), but users pair it with the MongoShield image
-  they run in Jobs (`jobImage.tag`), not through npm. `docker.yml` tags its image with
-  `packages/operator/package.json`'s version. Like the console, its first npm version
-  needs the bootstrap below (`@mongoshield/operator@0.0.0-bootstrap.0`).
+- **`@mongoshield/operator` is released in lockstep too** (it is in the same `fixed`
+  group), so its first version is also 2.0.0 and "operator X runs MongoShield X" holds.
+  Its custom resources are still `mongoshield.io/v1alpha1`: the API version, not the
+  package version, says that they may change. `docker.yml` tags its image with
+  `packages/operator/package.json`'s version.
 - Any other non-private package under `packages/` is published too. A new package must
   either join the `fixed` group, set `"private": true`, or go through the first-publish
   bootstrap below, and it must pass `pnpm check:package` (the release job runs it).

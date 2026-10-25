@@ -80,7 +80,7 @@ services:
   # The MongoShield scheduler: runs a backup on config.schedule.cron, verifies it,
   # prunes old backups and sends notifications, until stopped.
   mongoshield:
-    image: ghcr.io/shamalrathnayake/mongoshield:next
+    image: ghcr.io/shamalrathnayake/mongoshield:2
     # To test local changes instead, build the image from this repository:
     # build:
     #   context: ../..

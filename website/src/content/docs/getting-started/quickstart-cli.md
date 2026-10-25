@@ -12,9 +12,9 @@ change.
 The short version:
 
 ```sh
-npx mongoshield@next init      # writes mongoshield.config.ts and generates an encryption key
-npx mongoshield@next backup
-npx mongoshield@next restore latest --rename 'app.*=app_restored.*'
+npx mongoshield init      # writes mongoshield.config.ts and generates an encryption key
+npx mongoshield backup
+npx mongoshield restore latest --rename 'app.*=app_restored.*'
 ```
 
 ## 1. Point it at a database
@@ -28,7 +28,7 @@ The connection string stays in the environment; it never goes in the config file
 ## 2. Create a config
 
 ```sh
-npx mongoshield@next init
+npx mongoshield init
 ```
 
 `init` asks where to store backups, which environment variable holds the connection
@@ -58,7 +58,7 @@ commit it.
 ## 3. Back up
 
 ```sh
-npx mongoshield@next backup
+npx mongoshield backup
 ```
 
 Progress is shown while it runs; at the end it prints the backup id, document count,
@@ -68,9 +68,9 @@ written, so an interrupted run never looks like a good backup.
 ## 4. Look at it
 
 ```sh
-npx mongoshield@next list             # every backup, newest first
-npx mongoshield@next inspect latest   # namespaces, documents, sizes, consistency
-npx mongoshield@next verify latest    # checks every file's size and SHA-256; no key needed
+npx mongoshield list             # every backup, newest first
+npx mongoshield inspect latest   # namespaces, documents, sizes, consistency
+npx mongoshield verify latest    # checks every file's size and SHA-256; no key needed
 ```
 
 `verify --deep --identity-file ./mongoshield.key` also decrypts and parses every
@@ -79,7 +79,7 @@ document.
 ## 5. Restore next to the original
 
 ```sh
-npx mongoshield@next restore latest \
+npx mongoshield restore latest \
   --rename 'app.*=app_restored.*' \
   --identity-file ./mongoshield.key
 ```

@@ -7,7 +7,7 @@ the new backup and prunes old ones, using the [MongoShield action](../../action/
    (a password manager, a hardware token, a printed copy in a safe):
 
    ```bash
-   npx mongoshield@next keygen --output backup.key   # prints the public key (age1…)
+   npx mongoshield keygen --output backup.key   # prints the public key (age1…)
    ```
 
 2. In the repository settings, add the secret `MONGODB_URI` and the variables

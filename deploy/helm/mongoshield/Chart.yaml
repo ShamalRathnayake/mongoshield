@@ -4,8 +4,8 @@ apiVersion: v2
 name: mongoshield
 description: Scheduled MongoDB backups with MongoShield, as a Kubernetes CronJob. No mongodump required.
 type: application
-version: 0.1.0
-appVersion: "next"
+version: 0.2.0
+appVersion: "2.0.0"
 # CronJob `timeZone` needs Kubernetes 1.27 or newer.
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/ShamalRathnayake/mongoshield

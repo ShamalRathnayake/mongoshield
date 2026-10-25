@@ -4,7 +4,7 @@ description: Install the MongoShield CLI or library, and the optional packages f
 ---
 
 MongoShield needs **Node.js 22.12 or newer**. It also runs on **Bun 1.4** and
-**Deno 2.9** or newer (`bunx --bun mongoshield@next`, `deno run -A npm:mongoshield@next`);
+**Deno 2.9** or newer (`bunx --bun mongoshield`, `deno run -A npm:mongoshield`);
 see the [Bun and Deno guide](/guides/bun-and-deno/) for what is tested there.
 
 ## The CLI
@@ -12,13 +12,13 @@ see the [Bun and Deno guide](/guides/bun-and-deno/) for what is tested there.
 Run it without installing:
 
 ```sh
-npx mongoshield@next --help
+npx mongoshield --help
 ```
 
 Or install it into a project (recommended, so the version is pinned):
 
 ```sh
-npm install --save-dev mongoshield@next mongodb
+npm install --save-dev mongoshield mongodb
 npx mongoshield --help
 ```
 
@@ -28,7 +28,7 @@ A Docker image is also available (`ghcr.io/shamalrathnayake/mongoshield`); see t
 ## The library
 
 ```sh
-npm install mongoshield@next mongodb
+npm install mongoshield mongodb
 ```
 
 `mongodb` (driver 6.10+ or 7.x) is a peer dependency, so MongoShield uses the same driver

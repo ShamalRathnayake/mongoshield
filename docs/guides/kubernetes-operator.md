@@ -64,7 +64,7 @@ With Helm (CRDs are in the chart's `crds/` folder and installed first):
 ```bash
 helm install mongoshield-operator ./deploy/helm/mongoshield-operator \
   --namespace mongoshield-system --create-namespace \
-  --set image.tag=0.1.0 --set jobImage.tag=2.0.0
+  --set image.tag=2.0.0 --set jobImage.tag=2.0.0
 ```
 
 Or with plain manifests:

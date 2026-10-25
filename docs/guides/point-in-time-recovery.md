@@ -40,7 +40,7 @@ docker run -d --name mongoshield-journal --restart unless-stopped --init \
   -e MONGODB_URI='mongodb+srv://journal:…@cluster0.example.mongodb.net/' \
   -e MONGOSHIELD_STORAGE='s3://acme-backups/prod?region=eu-west-1' \
   -e MONGOSHIELD_RECIPIENTS='age1…' \
-  ghcr.io/shamalrathnayake/mongoshield:next \
+  ghcr.io/shamalrathnayake/mongoshield:2 \
   journal start --heartbeat https://hc-ping.com/<uuid> --wait-for-lease
 ```
 
@@ -72,7 +72,7 @@ spec:
       terminationGracePeriodSeconds: 60        # time to commit the last segment
       containers:
         - name: journal
-          image: ghcr.io/shamalrathnayake/mongoshield:next
+          image: ghcr.io/shamalrathnayake/mongoshield:2
           args: ["journal", "start", "--wait-for-lease", "--heartbeat", "$(HEARTBEAT_URL)"]
           envFrom:
             - secretRef: { name: mongoshield }   # MONGODB_URI, HEARTBEAT_URL

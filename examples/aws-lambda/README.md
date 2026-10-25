@@ -5,7 +5,7 @@ verifies the result and prunes old backups. [`template.yaml`](./template.yaml) (
 creates the bucket, the function and an EventBridge schedule.
 
 ```bash
-npx mongoshield@next keygen --output backup.key     # keep backup.key offline
+npx mongoshield keygen --output backup.key     # keep backup.key offline
 aws secretsmanager create-secret --name mongoshield/mongodb-uri --secret-string 'mongodb+srv://…'
 npm install
 sam build && sam deploy --guided

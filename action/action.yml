@@ -1,7 +1,7 @@
 # MongoShield GitHub Action: run a MongoShield command (backup, run, verify, restore)
 # in a workflow, with no Docker image and nothing installed on the runner beforehand.
 #
-#   - uses: ShamalRathnayake/mongoshield/action@main
+#   - uses: ShamalRathnayake/mongoshield/action@v2
 #     id: backup
 #     with:
 #       uri: ${{ secrets.MONGODB_URI }}
@@ -55,7 +55,7 @@ inputs:
   version:
     description: The mongoshield npm version or dist-tag to run.
     required: false
-    default: next
+    default: latest
   node-version:
     description: Node.js version to set up (MongoShield needs 22.12 or newer). Set to "" to use the runner's Node.js.
     required: false
