@@ -1,6 +1,6 @@
 /**
- * Page tests for the restore wizard's "Preview changes" step (restore-preview.tsx)
- * against the mock backend: starting the preview from the plan, the summary per
+ * Page tests for the restore wizard's "Preview" step (restore-preview.tsx) against the
+ * mock backend: opening the step from the plan and starting the preview, the summary per
  * namespace with exact and estimated counts, the drill-down to listed `_id`s and to one
  * document's fields side by side, cancelling and leaving a running preview, errors,
  * documents hidden by role, and continuing to the confirmation.
@@ -13,19 +13,25 @@ import { type FailureRule, renderFailingApp } from "../failing-backend.testkit.t
 import { createMockBackend, type MockBackend } from "../mock/backend.ts";
 import { renderApp, requestsTo } from "../testing.tsx";
 import { describeEffect, describeMetadata, formatValue } from "./restore-preview.tsx";
+import {
+  currentStep,
+  isLocked,
+  newestBackupId,
+  openStep,
+  reviewPlan,
+  stepTab,
+} from "./restore-wizard.testkit.tsx";
 
-/** The newest complete S3 backup id (the fixtures are the same for every backend). */
-function newestBackupId(): string {
-  const probe = createMockBackend({ jobTickMs: 0 });
-  probe.dispose();
-  const backup = probe.data.backups.find(
-    (candidate) => candidate.storageId === "st-s3" && candidate.status === "complete",
-  );
-  if (backup === undefined) throw new Error("no complete backup");
-  return backup.id;
+/** The `user` of a rendered app. */
+type User = ReturnType<typeof renderApp>["user"];
+
+/** From the Review step: "Next: Preview", then the step's "Preview changes" button. */
+async function startPreview(user: User) {
+  await user.click(screen.getByRole("button", { name: /Next: Preview/ }));
+  await user.click(screen.getByRole("button", { name: "Preview changes" }));
 }
 
-/** Opens the wizard as maya (operator), plans an upsert into Staging, starts the preview. */
+/** Opens the wizard as maya (operator) and plans an upsert into Staging (on the Review step). */
 async function openPreview(options: { failures?: FailureRule[]; query?: string } = {}) {
   const hash = `#/backups/st-s3/${newestBackupId()}/restore${options.query ?? ""}`;
   const rendered =
@@ -34,11 +40,12 @@ async function openPreview(options: { failures?: FailureRule[]; query?: string }
       : renderFailingApp({ signedInAs: "maya", hash, failures: options.failures });
   const { user } = rendered;
   await screen.findByRole("heading", { name: "Restore" });
+  await openStep(user, "Where");
   await user.selectOptions(
     screen.getByLabelText("If a target collection already has data"),
     "upsert",
   );
-  await user.click(screen.getByRole("button", { name: "Review plan" }));
+  await reviewPlan(user);
   await screen.findByRole("table", { name: "Dry-run plan" });
   return rendered;
 }
@@ -53,11 +60,18 @@ function finishJobs(backend: MockBackend) {
 describe("the preview step", () => {
   it("previews the plan's request, then shows the changes per namespace", async () => {
     const { user, backend } = await openPreview();
+    await user.click(screen.getByRole("button", { name: /Next: Preview/ }));
+    // The step opens with its introduction, heading focused; nothing runs yet.
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: /^Preview: / }));
+    expect(stepTab("Preview").textContent).toContain("Optional");
+    expect(requestsTo(backend, "POST", "/api/restore/preview")).toHaveLength(0);
     await user.click(screen.getByRole("button", { name: "Preview changes" }));
 
     const heading = await screen.findByRole("heading", { name: /^Preview: / });
+    // The preview's own panel replaced the introduction; its heading has focus.
     expect(document.activeElement).toBe(heading);
     expect(screen.getByText("Comparing the backup with the target…")).toBeTruthy();
+    expect(stepTab("Preview").textContent).toContain("Comparing…");
     const [plan] = requestsTo(backend, "POST", "/api/restore/plan");
     const [preview] = requestsTo(backend, "POST", "/api/restore/preview");
     expect(preview?.body).toEqual(plan?.body);
@@ -77,11 +91,13 @@ describe("the preview step", () => {
     expect(within(orders).getAllByText(/^≈ /).length).toBeGreaterThan(0);
     expect(screen.getByText("Some counts are estimates")).toBeTruthy();
     expect(screen.getByText(/namespaces? would change/)).toBeTruthy();
+    expect(stepTab("Preview").textContent).toContain("Compared");
+    expect(stepTab("Preview").textContent).toContain("(done)");
   });
 
   it("drills down to the listed ids and one document, side by side", async () => {
     const { user, backend } = await openPreview();
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     await user.click(await screen.findByRole("button", { name: "Documents of shop.users" }));
 
@@ -128,7 +144,7 @@ describe("the preview step", () => {
 
   it("shows documents only on one side, and empty categories", async () => {
     const { user, backend } = await openPreview();
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     await user.click(await screen.findByRole("button", { name: "Documents of shop.users" }));
     await screen.findByRole("list", { name: "Changed: ids" });
@@ -151,38 +167,53 @@ describe("the preview step", () => {
 
   it("continues to the confirmation and starts the restore", async () => {
     const { user, backend } = await openPreview();
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     await screen.findByRole("table", { name: "Changes per namespace" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: /Next: Confirm/ }));
     const confirm = await screen.findByRole("heading", { name: "Confirm restore" });
     expect(document.activeElement).toBe(confirm);
     // Back returns to the finished preview without running it again.
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(await screen.findByRole("table", { name: "Changes per namespace" })).toBeTruthy();
     expect(requestsTo(backend, "POST", "/api/restore/preview")).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: /Next: Confirm/ }));
     await user.click(await screen.findByRole("button", { name: "Start restore" }));
     expect(await screen.findByRole("heading", { name: "Restore job" })).toBeTruthy();
   });
 
   it("cancels a running preview, and still lets the restore go on", async () => {
     const { user, backend } = await openPreview();
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     await user.click(await screen.findByRole("button", { name: "Cancel preview" }));
     expect(await screen.findByText("Preview cancelled")).toBeTruthy();
     expect(backend.data.jobs[0]).toMatchObject({ kind: "preview", status: "cancelled" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(stepTab("Preview").textContent).toContain("Cancelled");
+    // A cancelled comparison can run again.
+    await user.click(screen.getByRole("button", { name: "Preview again" }));
+    expect(await screen.findByText("Comparing the backup with the target…")).toBeTruthy();
+    expect(requestsTo(backend, "POST", "/api/restore/preview")).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: /Next: Confirm/ }));
     expect(await screen.findByRole("heading", { name: "Confirm restore" })).toBeTruthy();
   });
 
   it("cancels the preview when going back while it runs", async () => {
     const { user, backend } = await openPreview();
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
-    await screen.findByRole("heading", { name: /^Preview: / });
-    expect(screen.getByRole("button", { name: "Skip the rest" })).toBeTruthy();
+    await startPreview(user);
+    await screen.findByText("Comparing the backup with the target…");
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(await screen.findByRole("table", { name: "Dry-run plan" })).toBeTruthy();
+    expect(requestsTo(backend, "POST", "/api/jobs/")[0]?.url).toMatch(/\/cancel$/);
+  });
+
+  it("cancels the preview when another tab is chosen while it runs", async () => {
+    const { user, backend } = await openPreview();
+    await startPreview(user);
+    await screen.findByText("Comparing the backup with the target…");
+    await openStep(user, "Confirm");
+    expect(currentStep()).toBe("Confirm");
+    // A tab click keeps focus on the tab (WAI-ARIA tabs), unlike Back / Next.
+    expect(document.activeElement).toBe(stepTab("Confirm"));
     expect(requestsTo(backend, "POST", "/api/jobs/")[0]?.url).toMatch(/\/cancel$/);
   });
 
@@ -197,8 +228,9 @@ describe("the preview step", () => {
         },
       ],
     });
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     expect(await screen.findByText("Could not start the preview")).toBeTruthy();
+    expect(stepTab("Preview").textContent).toContain("(needs attention)");
   });
 
   it("says when the preview failed, from its view", async () => {
@@ -210,7 +242,7 @@ describe("the preview step", () => {
     const { user, backend } = await openPreview({
       failures: [{ method: "GET", path: /\/api\/restore\/preview\//, status: 200, body: failed }],
     });
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     expect(await screen.findByText("The preview failed")).toBeTruthy();
     expect(screen.getByText(/The preview took too long\./)).toBeTruthy();
@@ -234,7 +266,7 @@ describe("the preview step", () => {
     const { user, backend } = await openPreview({
       failures: [{ method: "GET", path: /\/api\/restore\/preview\//, status: 200, body: hidden }],
     });
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     expect(await screen.findByText("shop.copy")).toBeTruthy();
     expect(screen.getByText("(new)", { exact: false })).toBeTruthy();
@@ -293,13 +325,15 @@ describe("the preview step", () => {
         },
       ],
     });
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     expect(await screen.findByText(/The target already matches the backup/)).toBeTruthy();
-    const row = screen.getByText("shop.users").closest("tr") as HTMLElement;
+    // Within the preview's table (the hidden Review step lists the same namespaces).
+    const summary = screen.getByRole("table", { name: "Changes per namespace" });
+    const row = within(summary).getByText("shop.users").closest("tr") as HTMLElement;
     expect(row.className).toBe("");
     expect(within(row).queryByText("(new)", { exact: false })).toBeNull();
-    const blocked = screen.getByText("shop.orders").closest("tr") as HTMLElement;
+    const blocked = within(summary).getByText("shop.orders").closest("tr") as HTMLElement;
     expect(blocked.className).toBe("row-blocking");
     expect(within(blocked).getByText("Blocked (conflict)")).toBeTruthy();
     expect(within(blocked).getByText("the target already has documents")).toBeTruthy();
@@ -329,7 +363,7 @@ describe("the preview step", () => {
         },
       ],
     });
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     await user.click(await screen.findByRole("button", { name: "Documents of shop.users" }));
     const ids = await screen.findByRole("list", { name: "Changed: ids" });
@@ -346,7 +380,7 @@ describe("the preview step", () => {
         { method: "POST", path: /\/document$/, status: 500, message: "Read down." },
       ],
     });
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     await user.click(await screen.findByRole("button", { name: "Documents of shop.users" }));
     expect(await screen.findByText("Could not list the documents")).toBeTruthy();
@@ -363,26 +397,29 @@ describe("the preview step", () => {
         { method: "GET", path: /\/api\/restore\/preview\/[\w-]+$/, status: 500, message: "Gone." },
       ],
     });
-    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await startPreview(user);
     finishJobs(backend);
     expect(await screen.findByText("Could not load the preview")).toBeTruthy();
   });
 
-  it("sends typed keys again to open a document, and skipping returns to the plan", async () => {
+  it("sends typed keys again to open a document, and Back from a skip reaches the preview", async () => {
     const hash = `#/backups/st-s3/${newestBackupId()}/restore`;
     const { user, backend } = renderApp({ signedInAs: "maya", hash });
     await screen.findByRole("heading", { name: "Restore" });
-    await user.type(screen.getByLabelText("Passphrase (optional)"), "open sesame please");
-    await user.type(screen.getByLabelText("Private key (optional)"), "AGE-SECRET-KEY-1ABC");
+    await openStep(user, "Where");
     await user.selectOptions(
       screen.getByLabelText("If a target collection already has data"),
       "upsert",
     );
+    await openStep(user, "Keys");
+    await user.type(screen.getByLabelText("Passphrase (optional)"), "open sesame please");
+    await user.type(screen.getByLabelText("Private key (optional)"), "AGE-SECRET-KEY-1ABC");
     await user.click(screen.getByRole("button", { name: "Review plan" }));
     await user.click(await screen.findByRole("button", { name: "Skip preview" }));
     await screen.findByRole("heading", { name: "Confirm restore" });
+    // Back from Confirm is the (skipped) Preview step, ready to run.
     await user.click(screen.getByRole("button", { name: "Back" }));
-    expect(await screen.findByRole("table", { name: "Dry-run plan" })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: /^Preview: / }));
 
     await user.click(screen.getByRole("button", { name: "Preview changes" }));
     finishJobs(backend);
@@ -405,9 +442,13 @@ describe("the preview step", () => {
       hash: `#/backups/st-s3/${newestBackupId()}/restore?ns=shop.users&ids=[1,2]`,
     });
     await screen.findByRole("heading", { name: "Restore" });
-    expect(screen.getByText("3. Preview changes (not for selected documents)")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
-    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    expect(stepTab("Preview").textContent).toContain("Not for selected documents");
+    await reviewPlan(user);
+    await screen.findByRole("table", { name: "Dry-run plan" });
+    // Preview stays locked after the review: "Next: Confirm" replaces Next and skips it.
+    expect(isLocked("Preview")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Skip preview" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Next: Confirm/ }));
     expect(await screen.findByRole("heading", { name: "Confirm restore" })).toBeTruthy();
     expect(requestsTo(backend, "POST", "/api/restore/preview")).toHaveLength(0);
   });

@@ -1,12 +1,13 @@
 /**
  * Page tests for the restore wizard: conflict display in the dry-run plan, the typed
- * confirmation for production targets, and starting the job. The "Preview changes"
- * step has its own tests (restore-preview.test.tsx); these skip it.
+ * confirmation for production targets, and starting the job. The "Preview" step has its
+ * own tests (restore-preview.test.tsx); these skip it.
  */
 
 import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, requestsTo } from "../testing.tsx";
+import { isLocked, openStep, reviewPlan, stepTab } from "./restore-wizard.testkit.tsx";
 
 /** Opens the wizard for the newest complete backup in the S3 fixture storage. */
 async function openWizard(signedInAs: string) {
@@ -26,7 +27,7 @@ describe("restore wizard", () => {
     expect((screen.getByLabelText("Target connection") as HTMLSelectElement).value).toBe(
       "conn-staging",
     );
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await reviewPlan(user);
 
     const table = await screen.findByRole("table", { name: "Dry-run plan" });
     const usersRow = within(table)
@@ -37,19 +38,19 @@ describe("restore wizard", () => {
     expect(within(usersRow as HTMLElement).getByText("1,200")).toBeTruthy();
     expect(screen.getByText(/conflicts? with existing data/)).toBeTruthy();
     // A plan that would fail goes no further: neither a preview nor the confirmation.
-    expect(screen.getByRole("button", { name: "Preview changes" })).toHaveProperty(
-      "disabled",
-      true,
-    );
-    expect(screen.getByRole("button", { name: "Skip preview" })).toHaveProperty("disabled", true);
+    expect(stepTab("Review").textContent).toContain("(needs attention)");
+    expect(isLocked("Preview")).toBe(true);
+    expect(isLocked("Confirm")).toBe(true);
+    expect(screen.getByRole("button", { name: /Next: Confirm/ })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: "Skip preview" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Start restore" })).toBeNull();
   });
 
-  it("restores next to the original data with a rename rule", async () => {
+  it("restores next to the original data as a copy", async () => {
     const { user, backend } = await openWizard("maya");
-    await user.click(screen.getByLabelText("Rename rules (optional)"));
-    await user.paste("shop.*=shop_restored.*");
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await openStep(user, "Where");
+    await user.click(screen.getByRole("radio", { name: /A copy next to the original/ }));
+    await reviewPlan(user);
     const table = await screen.findByRole("table", { name: "Dry-run plan" });
     expect(within(table).getByText("shop_restored.users")).toBeTruthy();
     expect(within(table).queryByText(/Conflict/)).toBeNull();
@@ -71,13 +72,14 @@ describe("restore wizard", () => {
 
   it("requires typing the connection name before restoring into production", async () => {
     const { user, backend } = await openWizard("admin");
+    await openStep(user, "Where");
     await user.selectOptions(screen.getByLabelText("Target connection"), "conn-prod");
     expect(screen.getByText("This is a production connection")).toBeTruthy();
     await user.selectOptions(
       screen.getByLabelText("If a target collection already has data"),
       "drop",
     );
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await reviewPlan(user);
 
     const table = await screen.findByRole("table", { name: "Dry-run plan" });
     // Dropping existing data is highlighted as a conflict but does not block.
@@ -87,6 +89,11 @@ describe("restore wizard", () => {
     expect(usersRow?.className).toBe("row-conflict");
 
     await user.click(screen.getByRole("button", { name: "Skip preview" }));
+    // The production heading takes focus, and the tab says what is left to do.
+    expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Confirm restore into production" }),
+    );
+    expect(stepTab("Confirm").textContent).toContain("Type the name to confirm");
     const start = screen.getByRole("button", { name: "Start restore" });
     expect(start).toHaveProperty("disabled", true);
     const confirm = screen.getByLabelText("Type Production cluster to confirm");
@@ -110,13 +117,17 @@ describe("restore wizard", () => {
 
   it("tells operators that production restores need an admin", async () => {
     const { user } = await openWizard("maya");
+    await openStep(user, "Where");
     await user.selectOptions(screen.getByLabelText("Target connection"), "conn-prod");
     await user.selectOptions(
       screen.getByLabelText("If a target collection already has data"),
       "drop",
     );
     expect(screen.getByText(/only admins can restore into production/)).toBeTruthy();
+    // The Where step needs attention right away.
+    expect(stepTab("Where").textContent).toContain("(needs attention)");
     // The server refuses even the dry run for operators, so it is not offered.
+    await openStep(user, "Keys");
     expect(screen.getByRole("button", { name: "Review plan" })).toHaveProperty("disabled", true);
   });
 });

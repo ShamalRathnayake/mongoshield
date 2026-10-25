@@ -1,13 +1,15 @@
 /**
  * More plan editor tests: editing an existing plan (notifications, encryption,
  * schedule), deleting and running it, the not-found and load-error states, the missing
- * prerequisites notice, and the schedule preview for schedules it cannot describe.
+ * prerequisites notice, and the schedule preview for schedules it cannot describe. Each
+ * test opens the step (tab) whose fields it uses.
  */
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderFailingApp } from "../failing-backend.testkit.tsx";
 import { renderApp, requestsTo } from "../testing.tsx";
+import { isClosed, isOpen, openNewPlanStep } from "./plan-editor.testkit.tsx";
 import {
   emptyPlanForm,
   lines,
@@ -15,6 +17,12 @@ import {
   SchedulePreview,
   validatePlanForm,
 } from "./plan-editor.tsx";
+
+/** Opens a step of the editor by its tab title ("Schedule", "What to back up" …). */
+async function openStep(user: ReturnType<typeof renderApp>["user"], title: string) {
+  // A tab's name starts with its title, followed by its hint and state.
+  await user.click(screen.getByRole("tab", { name: new RegExp(`^${title}`) }));
+}
 
 /** A form that passes validation, to vary one field at a time. */
 const validForm = () => ({
@@ -30,27 +38,24 @@ describe("plan form helpers", () => {
     expect(lines(" a \n\n b\n")).toEqual(["a", "b"]);
   });
 
-  it("refuses recipients that are neither age keys nor KMS keys", () => {
+  it("refuses recipients that are not age public keys", () => {
     const result = validatePlanForm({
       ...validForm(),
       encryptionKind: "recipients",
       recipients: "ssh-rsa AAA",
     });
-    expect(result.errors?.recipients).toBe(
-      '"ssh-rsa AAA" is not an age recipient (age1…) or a KMS key (kms:…).',
-    );
+    expect(result.errors?.recipients).toBe('"ssh-rsa AAA" is not an age public key (age1…).');
   });
 
-  it("accepts KMS keys as recipients", () => {
+  it("refuses KMS keys, which the console's server does not take", () => {
     const result = validatePlanForm({
       ...validForm(),
       encryptionKind: "recipients",
       recipients: "kms:aws:alias/backups",
     });
-    expect(result.input?.encryption).toEqual({
-      kind: "recipients",
-      recipients: ["kms:aws:alias/backups"],
-    });
+    expect(result.errors?.recipients).toBe(
+      '"kms:aws:alias/backups" is not an age public key (age1…).',
+    );
   });
 
   it("requires a passphrase for a new passphrase plan, and a long one", () => {
@@ -73,6 +78,7 @@ describe("plan form helpers", () => {
   it("reports bad exclude patterns and missing notification URLs", () => {
     const result = validatePlanForm({
       ...validForm(),
+      selection: "advanced",
       exclude: "nodot",
       notify: [{ type: "webhook", url: "" }],
     });
@@ -128,6 +134,7 @@ describe("editing a plan", () => {
   it("edits notifications and encryption and keeps stored secrets", async () => {
     const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/plans/plan-nightly" });
     await screen.findByRole("heading", { name: "Nightly production" });
+    await openStep(user, "Retention & alerts");
     expect(screen.getByText("Stored: https://hooks.slack.com/services/T0…/***")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Add notification" }));
@@ -140,6 +147,7 @@ describe("editing a plan", () => {
     await user.click(screen.getByRole("button", { name: "Remove notification 3" }));
     expect(rows()).toHaveLength(2);
 
+    await openStep(user, "Security");
     await user.selectOptions(screen.getByLabelText("Encryption"), "none");
     expect(
       screen.getByText("Backups will be readable by anyone with access to the storage."),
@@ -147,10 +155,13 @@ describe("editing a plan", () => {
     await user.selectOptions(screen.getByLabelText("Compression"), "gzip");
     await user.selectOptions(screen.getByLabelText("Consistency"), "snapshot");
     await user.selectOptions(screen.getByLabelText("Verify after backup"), "deep");
+    await openStep(user, "Basics");
     await user.selectOptions(screen.getByLabelText("Storage"), "st-r2");
+    await openStep(user, "Schedule");
     await user.click(screen.getByLabelText("Run on a schedule"));
-    expect(screen.queryByLabelText("Cron expression")).toBeNull();
+    expect(screen.queryByLabelText("Repeat")).toBeNull();
 
+    // An existing plan can be saved from any step, not only from Review.
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByRole("heading", { name: "Backup plans" })).toBeTruthy();
     const [update] = requestsTo(backend, "PUT", "/api/plans/plan-nightly");
@@ -168,6 +179,7 @@ describe("editing a plan", () => {
   it("switches to passphrase encryption and requires a passphrase", async () => {
     const { user } = renderApp({ signedInAs: "admin", hash: "#/plans/plan-local" });
     await screen.findByRole("heading", { name: "Local dev snapshot" });
+    await openStep(user, "Security");
     await user.selectOptions(screen.getByLabelText("Encryption"), "passphrase");
     expect(screen.getByText(/Keep a copy somewhere safe/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Save changes" }));
@@ -264,7 +276,7 @@ describe("plan editor states", () => {
   });
 
   it("asks for a connection and storage before a plan can be made", async () => {
-    renderApp({
+    const { user } = renderApp({
       signedInAs: "admin",
       hash: "#/plans/new",
       prepare: (mock) => {
@@ -272,15 +284,24 @@ describe("plan editor states", () => {
       },
     });
     expect(await screen.findByText("Add a connection and storage first")).toBeTruthy();
-    expect(screen.getByText("Choose a connection to preview.")).toBeTruthy();
+    // Without a connection the plan cannot go further than Basics, which says why.
+    expect(isClosed("What to back up")).toBe(true);
+    await user.type(screen.getByLabelText("Name"), "No source");
+    await openStep(user, "What to back up");
+    expect(isOpen("Basics")).toBe(true);
+    expect(screen.getByText("Choose the connection to back up.")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByLabelText("Connection"));
   });
 
   it("explains when the selection preview cannot list namespaces", async () => {
-    renderFailingApp({
+    const { user } = renderFailingApp({
       signedInAs: "admin",
       hash: "#/plans/new",
       failures: [{ method: "GET", path: /\/namespaces$/, status: 502, message: "Cannot connect." }],
     });
+    // The selection preview is the side column of "What to back up".
+    await screen.findByRole("heading", { name: "New backup plan" });
+    await openNewPlanStep(user, "What to back up");
     expect(await screen.findByText("Could not list namespaces")).toBeTruthy();
   });
 });

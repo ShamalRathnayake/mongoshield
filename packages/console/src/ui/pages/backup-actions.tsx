@@ -18,19 +18,13 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import type {
-  ConnectionView,
-  DatabaseNode,
-  JobSummary,
-  PlanView,
-  RecoveryKeyView,
-} from "../../shared/api.ts";
-import { describeError, isJobFinished } from "../api.ts";
+import type { ConnectionView, DatabaseNode, JobSummary, PlanView } from "../../shared/api.ts";
+import { isJobFinished } from "../api.ts";
 import { Button, LinkButton } from "../components/button.tsx";
-import { Dialog } from "../components/dialog.tsx";
 import { CheckboxField } from "../components/field.tsx";
 import { ErrorNotice, Notice, Panel, Time } from "../components/layout.tsx";
 import { ProgressBar } from "../components/progress-bar.tsx";
+import { RecoveryKeyButton, RecoveryKeyDialog } from "../components/recovery-key.tsx";
 import { StatusBadge } from "../components/status-badge.tsx";
 import { useToast } from "../components/toast.tsx";
 import { useApi, useLoad, useSession } from "../context.tsx";
@@ -38,7 +32,6 @@ import { formatDuration, formatNumber, plural } from "../format.ts";
 import {
   atlasTierLabel,
   browserTimeZone,
-  downloadTextFile,
   NIGHTLY_RETENTION,
   nightlyPlanInput,
 } from "../onboarding.ts";
@@ -269,6 +262,10 @@ function BackupActionsBar(props: {
             Restore a backup
           </Button>
         )}
+        {/* Once saved, the recovery key stays one click away (download it again any time). */}
+        {isAdmin && plan !== undefined && !keyUnsaved ? (
+          <RecoveryKeyButton plan={plan} onSaved={props.reload} />
+        ) : null}
       </div>
 
       {picking ? (
@@ -594,77 +591,5 @@ function DatabasePicker(props: {
       })}
       <p className="muted">MongoDB's own databases (admin, local, config) are never included.</p>
     </fieldset>
-  );
-}
-
-/**
- * "Save your recovery key": downloads the plan's private key as a text file. The key is
- * fetched only when the button is pressed (the request is audited on the server).
- */
-function RecoveryKeyDialog(props: { plan: PlanView; onClose: () => void; onSaved: () => void }) {
-  const client = useApi();
-  const [key, setKey] = useState<RecoveryKeyView | undefined>(undefined);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | undefined>(undefined);
-  const download = async () => {
-    setBusy(true);
-    setError(undefined);
-    try {
-      const view = await client.call("POST /api/plans/:id/recovery-key", undefined, {
-        params: { id: props.plan.id },
-      });
-      setKey(view);
-      downloadTextFile(view.filename, view.fileContent);
-      props.onSaved();
-    } catch (failure) {
-      setError(describeError(failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Dialog
-      open
-      title="Save your recovery key"
-      onClose={props.onClose}
-      description="Your backups are encrypted. The console keeps the key, so restoring needs no typing. Keep a copy elsewhere too."
-      footer={
-        key === undefined ? (
-          <>
-            <Button variant="ghost" onClick={props.onClose}>
-              Later
-            </Button>
-            <Button variant="primary" busy={busy} data-autofocus onClick={() => void download()}>
-              Download recovery key
-            </Button>
-          </>
-        ) : (
-          <Button variant="primary" data-autofocus onClick={props.onClose}>
-            Done
-          </Button>
-        )
-      }
-    >
-      {key === undefined ? (
-        <p>
-          If this console or its volume is lost, the recovery key is the only way to restore these
-          backups. Store it in a password manager or vault, not next to the backups.
-        </p>
-      ) : (
-        <div className="stack-vertical">
-          <Notice tone="success" title="Downloaded">
-            <p>
-              Saved as <code>{key.filename}</code>. If the download did not start, copy the key:
-            </p>
-          </Notice>
-          <code className="recovery-key">{key.identity}</code>
-        </div>
-      )}
-      {error === undefined ? null : (
-        <Notice tone="danger" title="The key could not be fetched">
-          {error}
-        </Notice>
-      )}
-    </Dialog>
   );
 }

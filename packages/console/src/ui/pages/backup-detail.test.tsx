@@ -155,7 +155,10 @@ describe("backup actions", () => {
     const { user, backend, id } = await openBackup("maya", newest);
     await user.click(screen.getByRole("button", { name: "Verify…" }));
     const dialog = screen.getByRole("dialog", { name: "Verify backup" });
-    await user.selectOptions(within(dialog).getByLabelText("Mode"), "deep");
+    // The modes are cards that explain themselves; fast is chosen at first.
+    expect(within(dialog).getByRole("radio", { name: "Fast" })).toHaveProperty("checked", true);
+    expect(within(dialog).getByText(/proves every document reads back/)).toBeTruthy();
+    await user.click(within(dialog).getByRole("radio", { name: "Deep" }));
     await user.click(within(dialog).getByRole("button", { name: "Start verify" }));
     await waitFor(() => expect(window.location.hash).toMatch(/^#\/jobs\/job-/));
     const [request] = requestsTo(backend, "POST", `/api/storage/st-s3/backups/${id}/verify`);
@@ -232,6 +235,21 @@ describe("backup actions", () => {
     expect(request?.body).toEqual({ reason: "Ticket SEC-9" });
     // Operators may not release it again.
     expect(screen.queryByRole("button", { name: "Release hold…" })).toBeNull();
+  });
+
+  it("offers common hold reasons to fill in with one click", async () => {
+    const { user, backend } = await openBackup("maya", newest);
+    await user.click(screen.getByRole("button", { name: "Hold…" }));
+    const dialog = screen.getByRole("dialog", { name: "Put backup on hold" });
+    const reasons = within(dialog).getByRole("group", { name: "Suggestions for Reason" });
+    await user.click(within(reasons).getByRole("button", { name: "Audit evidence" }));
+    expect((within(dialog).getByLabelText("Reason") as HTMLInputElement).value).toBe(
+      "Audit evidence",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Hold backup" }));
+    expect(await screen.findByText("Backup is on hold.")).toBeTruthy();
+    const [request] = requestsTo(backend, "POST", "/api/storage/st-s3/backups/");
+    expect(request?.body).toEqual({ reason: "Audit evidence" });
   });
 
   it("lets admins release a hold", async () => {

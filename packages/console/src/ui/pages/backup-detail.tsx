@@ -14,6 +14,7 @@ import { Button, LinkButton } from "../components/button.tsx";
 import { CodeBlock } from "../components/code-block.tsx";
 import { Dialog } from "../components/dialog.tsx";
 import { SelectField, TextField } from "../components/field.tsx";
+import { FillSuggestions } from "../components/fill-suggestions.tsx";
 import {
   EmptyState,
   ErrorNotice,
@@ -25,6 +26,7 @@ import {
   Tabs,
   Time,
 } from "../components/layout.tsx";
+import { RadioCards } from "../components/radio-cards.tsx";
 import { StatusBadge } from "../components/status-badge.tsx";
 import { Table } from "../components/table.tsx";
 import { useToast } from "../components/toast.tsx";
@@ -42,6 +44,15 @@ const TABS = [
   { id: "browse", label: "Browse documents" },
 ] as const;
 
+/** Reasons people often give for holding a backup, one click to fill in. */
+const HOLD_REASONS = [
+  "Legal hold: ticket ",
+  "Audit evidence",
+  "Before a migration",
+  "Incident investigation",
+  "Last good backup before a bad deploy",
+  "Kept for compliance",
+];
 /** Manifest topology values (FORMAT.md `source.topology`) in words. */
 const TOPOLOGY_LABELS: Readonly<Record<string, string>> = {
   standalone: "Standalone",
@@ -440,12 +451,22 @@ function VerifyDialog(props: {
         </>
       }
     >
-      <SelectField<"fast" | "deep">
-        label="Mode"
+      {/* Two choices that need explaining: cards keep each one's trade-off in view. */}
+      <RadioCards<"fast" | "deep">
+        legend="Mode"
         value={mode}
         options={[
-          { value: "fast", label: "Fast: check sizes and checksums (no key needed)" },
-          { value: "deep", label: "Deep: also decrypt and parse every document" },
+          {
+            value: "fast",
+            label: "Fast",
+            description: "Checks sizes and checksums of every file. Quick, and needs no key.",
+          },
+          {
+            value: "deep",
+            label: "Deep",
+            description:
+              "Also decrypts and parses every document. Slower; proves every document reads back.",
+          },
         ]}
         onValue={setMode}
       />
@@ -605,6 +626,15 @@ function HoldDialog(props: {
             data-autofocus
             placeholder="Legal hold: ticket SEC-1234"
             error={error}
+            // Common reasons; the ones ending in ":" are completed with a ticket number.
+            suggestions={
+              <FillSuggestions
+                field="Reason"
+                items={HOLD_REASONS}
+                current={reason}
+                onPick={setReason}
+              />
+            }
           />
         )}
       </form>

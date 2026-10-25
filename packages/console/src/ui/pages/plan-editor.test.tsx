@@ -1,20 +1,32 @@
 /**
  * Page tests for the plan editor: validation messages, the live selection and schedule
- * previews, and the request sent on save.
+ * previews, and the request sent on save. The editor is a step flow, so each test opens
+ * the step (tab) whose fields it uses, as a person would.
  */
 
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, requestsTo } from "../testing.tsx";
+import { isClosed, isOpen, openNewPlanStep, RECIPIENT } from "./plan-editor.testkit.tsx";
 import { emptyPlanForm, planToForm, validatePlanForm } from "./plan-editor.tsx";
 
-const RECIPIENT = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p";
+/** Opens a step of the editor by its tab title ("Schedule", "What to back up" …). */
+async function openStep(user: ReturnType<typeof renderApp>["user"], title: string) {
+  // A tab's name starts with its title, followed by its hint and state.
+  await user.click(screen.getByRole("tab", { name: new RegExp(`^${title}`) }));
+}
+
+/** The schedule in words and its next runs (the tab hint and summary repeat the words). */
+const schedulePreview = () => document.querySelector(".schedule-preview") as HTMLElement;
 
 describe("validatePlanForm", () => {
   it("reports every problem at once, keyed by field", () => {
     const result = validatePlanForm({
       ...emptyPlanForm(),
+      // The pattern boxes are only checked in the "Patterns (advanced)" mode.
+      selection: "advanced",
       include: "shop",
+      repeat: "custom",
       cron: "0 25 * * *",
       timezone: "Nowhere/Land",
       retention: { last: "-1", daily: "7", weekly: "", monthly: "x", yearly: "" },
@@ -93,9 +105,13 @@ describe("incremental backups in the plan form", () => {
   it("shows the interval field once the box is ticked", async () => {
     const { user } = renderApp({ signedInAs: "admin", hash: "#/plans/new" });
     await screen.findByRole("heading", { name: "New backup plan" });
-    expect(screen.queryByLabelText("Full backup every (days)")).toBeNull();
+    await openNewPlanStep(user, "Schedule");
+    expect(screen.queryByLabelText("Full backup")).toBeNull();
     await user.click(screen.getByLabelText("Incremental backups between full ones"));
-    expect((screen.getByLabelText("Full backup every (days)") as HTMLInputElement).value).toBe("7");
+    // A select of common intervals, weekly by default.
+    const interval = screen.getByLabelText("Full backup") as HTMLSelectElement;
+    expect(interval.value).toBe("7");
+    expect(interval.selectedOptions[0]?.textContent).toBe("Every week (7 days)");
   });
 });
 
@@ -104,31 +120,54 @@ describe("plan editor page", () => {
     const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/plans/new" });
     await screen.findByRole("heading", { name: "New backup plan" });
 
-    await user.click(screen.getByRole("button", { name: "Create plan" }));
+    // Nothing is said before anything was tried; Next on an incomplete step stays on it
+    // and says what is missing, with focus on the field.
+    expect(screen.queryByText("Give the plan a name.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Next: What to back up/ }));
+    expect(screen.getByRole("tab", { name: /^Basics/ }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByText("Give the plan a name.")).toBeTruthy();
-    expect(screen.getByText("Add at least one age recipient (age1…).")).toBeTruthy();
-    expect(requestsTo(backend, "POST", "/api/plans")).toHaveLength(0);
+    expect(document.activeElement).toBe(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Weekly shop");
 
+    // Patterns are the advanced way to choose what to back up.
+    await openStep(user, "What to back up");
+    await user.click(screen.getByLabelText("Patterns (advanced)"));
     await user.type(screen.getByLabelText("Include"), "shop");
+    // The message shows once the step is left with the mistake in it (here: Next).
+    expect(screen.queryByText(/add a "\." between database and collection/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Next: Security/ }));
     expect(screen.getByText(/add a "\." between database and collection/)).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByLabelText("Include"));
     await user.type(screen.getByLabelText("Include"), ".*");
+    await user.type(screen.getByLabelText("Exclude"), "*.sessions");
 
-    // With include shop.* and the default exclude *.sessions: 5 of the 8 collections.
+    // With include shop.* and exclude *.sessions: 5 of the 8 collections.
     expect(await screen.findByText(/of 8 collections selected/)).toBeTruthy();
     expect(screen.getByText("5", { selector: "strong" })).toBeTruthy();
 
+    // Security needs a public key before the later steps open.
+    await openStep(user, "Security");
+    await user.type(screen.getByLabelText("Recipients"), RECIPIENT);
+
+    // A cron expression is the "Custom" repeat choice; it starts from the preset's cron.
+    await openStep(user, "Schedule");
+    await user.selectOptions(screen.getByLabelText("Repeat"), "custom");
+    expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("0 2 * * *");
     await user.clear(screen.getByLabelText("Cron expression"));
     await user.type(screen.getByLabelText("Cron expression"), "0 25 * * *");
+    // A later tab is closed while the step has a mistake; clicking it says why.
+    expect(isClosed("Retention & alerts")).toBe(true);
+    await openStep(user, "Retention & alerts");
+    expect(isOpen("Schedule")).toBe(true);
     expect(screen.getByText(/The hour field has "25", outside 0–23/)).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByLabelText("Cron expression"));
     await user.clear(screen.getByLabelText("Cron expression"));
     await user.type(screen.getByLabelText("Cron expression"), "30 3 * * 1");
-    await user.clear(screen.getByLabelText("Time zone"));
-    await user.type(screen.getByLabelText("Time zone"), "UTC");
-    expect(screen.getByText("Every Monday at 03:30")).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText("Time zone"), "UTC");
+    expect(within(schedulePreview()).getByText("Every Monday at 03:30")).toBeTruthy();
     expect(screen.getByText("Next runs:").nextElementSibling?.children).toHaveLength(5);
 
-    await user.type(screen.getByLabelText("Name"), "Weekly shop");
-    await user.type(screen.getByLabelText("Recipients"), RECIPIENT);
+    await openStep(user, "Review");
     await user.click(screen.getByRole("button", { name: "Create plan" }));
 
     expect(await screen.findByRole("heading", { name: "Backup plans" })).toBeTruthy();
@@ -141,7 +180,8 @@ describe("plan editor page", () => {
       exclude: ["*.sessions"],
       encryption: { kind: "recipients", recipients: [RECIPIENT] },
       schedule: { cron: "30 3 * * 1", timezone: "UTC" },
-      retention: { last: 3, daily: 7, weekly: 4, monthly: 12 },
+      // The recommended retention preset is the default for new plans.
+      retention: { daily: 7, weekly: 4, monthly: 12 },
     });
   });
 
@@ -155,8 +195,12 @@ describe("plan editor page", () => {
   });
 
   it("shows that a stored passphrase is kept when left empty", async () => {
-    renderApp({ signedInAs: "admin", hash: "#/plans/plan-hourly" });
+    // The step can be linked to directly: `?step=security` opens it.
+    renderApp({ signedInAs: "admin", hash: "#/plans/plan-hourly?step=security" });
     expect(await screen.findByText("A passphrase is stored. Leave empty to keep it.")).toBeTruthy();
     expect((screen.getByLabelText("Passphrase") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("tab", { name: /^Security/ }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
   });
 });
