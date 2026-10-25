@@ -40,7 +40,7 @@ const NAMED_ROLES = [
  * One line of an ARIA snapshot: indentation, `- `, an optional YAML quote, the
  * role, and then optionally ` "name"`. Examples:
  *   - button "Sign out"
- *   - 'button "Theme: system. Change theme"': "Theme: system"
+ *   - 'button "Theme: dark. Change theme"': "Theme: dark"
  *   - textbox
  */
 const SNAPSHOT_LINE = /^\s*-\s+'?([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?/;

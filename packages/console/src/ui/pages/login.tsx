@@ -18,6 +18,7 @@ import {
   type SessionInfo,
 } from "../../shared/api.ts";
 import { describeError, RateLimitedError } from "../api.ts";
+import { BrandLogo } from "../components/brand.tsx";
 import { Button, LinkButton } from "../components/button.tsx";
 import { TextField } from "../components/field.tsx";
 import { Notice } from "../components/layout.tsx";
@@ -102,6 +103,10 @@ export function LoginPage(props: LoginPageProps) {
   return (
     <main className="centered-page">
       <form className="auth-card" onSubmit={submit} noValidate aria-labelledby="login-title">
+        <div className="auth-brand" aria-hidden="true">
+          <BrandLogo size={32} />
+          MongoShield
+        </div>
         <h1 id="login-title" className="auth-title">
           Sign in to MongoShield
         </h1>

@@ -92,13 +92,15 @@ describe("app shell", () => {
 
   it("cycles the theme and remembers it", async () => {
     const { user } = renderApp({ signedInAs: "sam" });
-    await user.click(await screen.findByRole("button", { name: "Theme: system. Change theme" }));
+    await user.click(await screen.findByRole("button", { name: "Theme: dark. Change theme" }));
     expect(document.documentElement.dataset.theme).toBe("light");
+    expect(window.localStorage.getItem("mongoshield.theme")).toBe("light");
     await user.click(screen.getByRole("button", { name: "Theme: light. Change theme" }));
+    expect(document.documentElement.dataset.theme).toBe("system");
+    await user.click(screen.getByRole("button", { name: "Theme: system. Change theme" }));
     expect(document.documentElement.dataset.theme).toBe("dark");
-    expect(window.localStorage.getItem("mongoshield.theme")).toBe("dark");
-    await user.click(screen.getByRole("button", { name: "Theme: dark. Change theme" }));
-    expect(document.documentElement.dataset.theme).toBeUndefined();
+    // Dark is the default, so nothing needs remembering.
+    expect(window.localStorage.getItem("mongoshield.theme")).toBeNull();
   });
 
   it("moves focus to the main area with the skip link and titles the page", async () => {

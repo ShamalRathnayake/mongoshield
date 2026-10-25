@@ -6,6 +6,9 @@
  * fixtures are a separate chunk that a normal session never downloads.
  */
 
+// The interface fonts, bundled with the console (the CSP allows fonts from the console only).
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiClient } from "./api.ts";

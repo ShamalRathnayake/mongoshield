@@ -6,10 +6,28 @@
 
 /* The welcome page: one readable column, centered in the main area. */
 .welcome {
-  width: min(760px, 100%);
+  width: min(780px, 100%);
+  margin: var(--space-4) auto 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+/* The hero above the title: the logo, glowing, on a ring of the brand colors. */
+.welcome-hero {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 22px;
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    var(--brand-gradient) border-box;
+  border: 1px solid transparent;
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--brand-via) 8%, transparent),
+    0 18px 50px -12px color-mix(in srgb, var(--brand-via) 55%, transparent);
 }
 
 /* Links under a connection problem ("Atlas: Network Access"). */
@@ -79,16 +97,4 @@
   cursor: pointer;
   font-size: var(--text-sm);
   color: var(--color-text-muted);
-}
-
-/* The recovery key, shown once, wrapping instead of overflowing the dialog. */
-.recovery-key {
-  display: block;
-  padding: var(--space-3);
-  background: var(--color-surface-sunken);
-  border-radius: var(--radius-small);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  overflow-wrap: anywhere;
-  user-select: all;
 }

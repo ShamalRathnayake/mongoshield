@@ -16,8 +16,9 @@
 import { type FormEvent, useState } from "react";
 import type { SessionInfo } from "../../shared/api.ts";
 import { describeError } from "../api.ts";
+import { BrandLogo } from "../components/brand.tsx";
 import { Button } from "../components/button.tsx";
-import { CheckboxField, TextField } from "../components/field.tsx";
+import { TextField } from "../components/field.tsx";
 import { Notice } from "../components/layout.tsx";
 import { useApi } from "../context.tsx";
 import { formatDateTime } from "../format.ts";
@@ -62,7 +63,6 @@ export function SetupPage(props: SetupPageProps) {
   const [showToken, setShowToken] = useState(tokenRequired || props.token !== undefined);
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
-  const [revealPassword, setRevealPassword] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -106,6 +106,10 @@ export function SetupPage(props: SetupPageProps) {
   return (
     <main className="centered-page">
       <form className="auth-card" onSubmit={submit} noValidate>
+        <div className="auth-brand" aria-hidden="true">
+          <BrandLogo size={32} />
+          MongoShield
+        </div>
         <h1 className="auth-title">Welcome to MongoShield</h1>
         <p className="muted">
           Create the administrator account. You will connect your database right after.
@@ -164,17 +168,13 @@ export function SetupPage(props: SetupPageProps) {
         />
         <TextField
           label="Password"
-          type={revealPassword ? "text" : "password"}
+          // The field's eye button shows what was typed, instead of asking for it twice.
+          type="password"
           value={password}
           onValue={setPassword}
           autoComplete="new-password"
           hint={`At least ${MIN_PASSWORD_LENGTH} characters. A few words in a row are easy to remember and hard to guess.`}
           error={submitted ? errors.password : undefined}
-        />
-        <CheckboxField
-          label="Show password"
-          checked={revealPassword}
-          onChecked={setRevealPassword}
         />
         {error === undefined ? null : (
           <Notice tone="danger" title="Setup failed">

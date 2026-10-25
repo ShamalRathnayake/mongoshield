@@ -1,11 +1,12 @@
 /*
  * MongoShield console styles.
  *
- * Plain CSS with design tokens as custom properties. Light is the default; dark applies
- * when the OS prefers it (unless the user pinned light) or when pinned via the theme
- * toggle (`<html data-theme="dark">`). The look is a calm, dense ops tool: neutral
- * surfaces, one accent, status colors used sparingly and always paired with a shape and
- * a word (see components/status-badge.tsx).
+ * Plain CSS with design tokens as custom properties. Dark is the default; light applies
+ * when pinned with the theme toggle (`<html data-theme="light">`) or when the toggle
+ * follows a light OS (`data-theme="system"`). The look is a polished, technical ops tool:
+ * blue-black surfaces lit from above, an aurora behind the page, a color per section of
+ * the console, a gradient brand, mono type for machine values, and status colors always
+ * paired with a shape and a word (see components/status-badge.tsx).
  *
  * Sections: tokens · base · layout shell · page structure · buttons · forms · panels and
  * notices · tables · status badges · tabs · dialogs · toasts · progress · data views
@@ -17,83 +18,141 @@
  * Design tokens. Every color, size and shadow of the console comes from here, so the two
  * themes and the components stay consistent:
  *
+ *   --font-*           Geist for the interface, Geist Mono for ids, numbers, code and the
+ *                      small uppercase labels (bundled with the console: no external
+ *                      requests, the CSP allows fonts from the console only)
  *   --space-*          a 4 px spacing scale (4, 8, 12, 16, 24, 32, 48)
- *   --text-*           a type scale (12, 13, 14 base, 16, 20, 24 px) with line heights
+ *   --text-*           a type scale (11.5, 13, 14 base, 15, 22, 26 px)
  *   --color-*          surfaces, text, the accent and the status colors (each status
  *                      color has a tinted `-bg` for backgrounds, and is always paired with
  *                      a word and a shape in the UI, never used alone)
+ *   --hue-*            ten vivid section colors: every area of the console has its own
+ *                      (`[data-section]` below sets `--hue` from them), used for its icon,
+ *                      the glow behind the page, the tab underline and the page rule
  *   --type-*           one color per BSON type family, for type swatches, the schema
- *                      view's type bars and charts: the validated categorical palette of
- *                      the data visualisation guidelines (blue, orange, aqua, yellow,
- *                      magenta, green, violet), stepped separately for the dark surface
- *   --radius-*, --shadow-*, --focus-ring
+ *                      view's type bars and charts (blue, orange, green, yellow, pink,
+ *                      lime, violet), stepped separately for each theme
+ *   --radius-*, --shadow-*, --focus-ring, --glow-*, --edge-*
  *
- * Colors meet WCAG AA on their surfaces: text 4.5:1, muted text 4.5:1, borders of
- * controls 3:1.
+ * Dark is the default (`:root`, and `data-theme="dark"`); light applies with
+ * `data-theme="light"`, or with `data-theme="system"` on a light OS. Colors meet WCAG
+ * AA on their surfaces: text 4.5:1, muted text 4.5:1.
  */
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   --font-sans:
-    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    "Geist Variable", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
   --font-mono:
-    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    "Geist Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 
   /* Type scale (rem of the 14 px root). */
-  --text-xs: 0.8125rem; /* ≈ 11.4 px: badges, captions */
+  --text-xs: 0.8214rem; /* 11.5 px: badges, captions, uppercase labels */
   --text-sm: 0.9286rem; /* 13 px: secondary text, tables */
   --text-md: 1rem; /* 14 px: body */
-  --text-lg: 1.1429rem; /* 16 px: panel titles */
-  --text-xl: 1.4286rem; /* 20 px: page titles */
-  --text-2xl: 1.7143rem; /* 24 px: auth titles */
+  --text-lg: 1.0714rem; /* 15 px: panel titles */
+  --text-xl: 1.5714rem; /* 22 px: page titles */
+  --text-2xl: 1.8571rem; /* 26 px: auth titles */
 
-  /* Surfaces and text. */
-  --color-bg: #f5f6f8;
-  --color-surface: #ffffff;
-  --color-surface-raised: #ffffff;
-  --color-surface-sunken: #f0f2f5;
-  --color-surface-hover: #f4f6f8;
-  --color-border: #e1e5ea;
-  --color-border-strong: #b9c0ca;
-  --color-text: #161b26;
-  --color-text-muted: #5a6373;
-  --color-accent: #12715a;
-  --color-accent-hover: #0c5c49;
-  --color-accent-contrast: #ffffff;
-  --color-accent-soft: #e4f3ee;
-  --color-focus: #2563eb;
-  --color-highlight: #fff1b8;
+  /* Surfaces and text: blue-black, a little lighter at every level of depth. */
+  --color-bg: #06070b;
+  --color-sidebar: rgb(10 12 19 / 0.78);
+  --color-surface: #0c0f16;
+  --color-surface-raised: #131722;
+  --color-surface-sunken: #080a10;
+  --color-surface-hover: #161b28;
+  --color-input: #080a10;
+  /* The arrow of select boxes, drawn in the muted text color (an image cannot use currentColor). */
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%239aa1b5' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  --color-border: #1b2030;
+  --color-border-strong: #2d3448;
+  --color-text: #eef0f6;
+  --color-text-muted: #9aa1b5;
+  --color-accent: #34d399;
+  --color-accent-hover: #6ee7b7;
+  --color-accent-contrast: #03140d;
+  --color-accent-soft: #0b2a22;
+  --color-focus: #5eead4;
+  --color-highlight: #5c4a0f;
 
   /* Status (always with a word and a shape). */
-  --color-success: #17784a;
-  --color-success-bg: #e8f5ee;
-  --color-danger: #b42318;
-  --color-danger-bg: #fdeceb;
-  --color-warning: #8a5a00;
-  --color-warning-bg: #fdf4df;
-  --color-running: #1d5fbf;
-  --color-running-bg: #e9f0fb;
-  --color-neutral: #5a6373;
-  --color-neutral-bg: #eef0f3;
+  --color-success: #4ade80;
+  --color-success-bg: #0d2318;
+  --color-danger: #fb7185;
+  --color-danger-bg: #2a0f17;
+  --color-warning: #fbbf24;
+  --color-warning-bg: #291f08;
+  --color-running: #60a5fa;
+  --color-running-bg: #0d1b33;
+  --color-neutral: #a3a9bb;
+  --color-neutral-bg: #171b26;
 
-  /* BSON type families (data visualisation palette, light steps). */
-  --type-string: #2a78d6;
-  --type-number: #eb6834;
-  --type-id: #1baf7a;
-  --type-date: #eda100;
-  --type-boolean: #e87ba4;
-  --type-array: #008300;
-  --type-nested: #6250d6;
-  --type-other: #9aa3b0;
+  /* Section colors. */
+  --hue-emerald: #34d399;
+  --hue-cyan: #22d3ee;
+  --hue-violet: #a78bfa;
+  --hue-amber: #fbbf24;
+  --hue-blue: #60a5fa;
+  --hue-teal: #2dd4bf;
+  --hue-pink: #f472b6;
+  --hue-orange: #fb923c;
+  --hue-indigo: #818cf8;
+  --hue-slate: #94a3b8;
+  /* The current section's color; [data-section] rules below change it. */
+  --hue: var(--hue-emerald);
 
-  --radius: 8px;
-  --radius-small: 6px;
+  /* BSON type families (bright steps for the dark surface). */
+  --type-string: #60a5fa;
+  --type-number: #fb923c;
+  --type-id: #34d399;
+  --type-date: #fbbf24;
+  --type-boolean: #f472b6;
+  --type-array: #a3e635;
+  --type-nested: #a78bfa;
+  --type-other: #8b93a7;
+
+  /* The brand gradient: emerald through cyan to indigo (logo, avatar, primary button). */
+  --brand-from: #34d399;
+  --brand-via: #22d3ee;
+  --brand-to: #818cf8;
+  --brand-gradient: linear-gradient(
+    135deg,
+    var(--brand-from),
+    var(--brand-via) 55%,
+    var(--brand-to)
+  );
+  --button-gradient: linear-gradient(135deg, #34d399, #22d3ee);
+  /* The aurora behind every page: three soft lights (decoration only). */
+  --glow-page:
+    radial-gradient(900px 520px at 8% -12%, rgb(52 211 153 / 0.12), transparent 62%),
+    radial-gradient(820px 520px at 92% -10%, rgb(129 140 248 / 0.14), transparent 62%),
+    radial-gradient(760px 520px at 55% 115%, rgb(34 211 238 / 0.07), transparent 62%);
+  /* How strongly the current section's color lights the top of the page. */
+  --glow-section-strength: 20%;
+  /* The edge of a panel: brighter on top, as if lit from above. */
+  --edge-gradient: linear-gradient(
+    180deg,
+    rgb(255 255 255 / 0.12),
+    rgb(255 255 255 / 0.045) 38%,
+    rgb(255 255 255 / 0.03)
+  );
+  /* Status dots glow a little on the dark surface. */
+  --badge-glow: drop-shadow(0 0 4px currentcolor);
+
+  --radius: 10px;
+  --radius-small: 7px;
+  --radius-large: 14px;
   --radius-pill: 999px;
-  --shadow-1: 0 1px 2px rgb(16 24 40 / 0.05);
-  --shadow-2: 0 1px 3px rgb(16 24 40 / 0.08), 0 1px 2px rgb(16 24 40 / 0.04);
-  --shadow-popover: 0 8px 24px rgb(16 24 40 / 0.14), 0 2px 6px rgb(16 24 40 / 0.06);
-  --shadow-dialog: 0 16px 48px rgb(15 23 42 / 0.22);
-  --focus-ring: 0 0 0 3px rgb(37 99 235 / 0.25);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.45);
+  --shadow-2: 0 2px 6px rgb(0 0 0 / 0.5);
+  --shadow-panel: 0 1px 0 rgb(255 255 255 / 0.02), 0 12px 32px -18px rgb(0 0 0 / 0.9);
+  --shadow-popover: 0 18px 44px -10px rgb(0 0 0 / 0.75), 0 0 0 1px rgb(255 255 255 / 0.05);
+  --shadow-dialog: 0 36px 90px -16px rgb(0 0 0 / 0.85), 0 0 0 1px rgb(255 255 255 / 0.05);
+  /* A one-pixel highlight on the top edge of raised controls. */
+  --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 0.05);
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--hue) 30%, transparent);
 
   --space-1: 4px;
   --space-2: 8px;
@@ -102,97 +161,204 @@
   --space-5: 24px;
   --space-6: 32px;
   --space-7: 48px;
-  --sidebar-width: 212px;
-  --topbar-height: 52px;
+  /* Inside padding of cards (panels, tiles) and dialogs: generous, so content breathes. */
+  --panel-pad: 24px;
+  --sidebar-width: 244px;
+  /*
+   * Height of a sticky bar above the main area, which sticky panels keep clear of.
+   * The console has none since the navigation moved into the left rail.
+   */
+  --topbar-height: 0px;
   --tree-indent: 16px;
   --grid-row-height: 36px;
 }
 
-/* Dark tokens: once for "follow the OS" and once for the pinned choice. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --color-bg: #0e1218;
-    --color-surface: #151a22;
-    --color-surface-raised: #1b212b;
-    --color-surface-sunken: #11161d;
-    --color-surface-hover: #1c232d;
-    --color-border: #283039;
-    --color-border-strong: #46505e;
-    --color-text: #e5e9ef;
-    --color-text-muted: #9ba5b4;
-    --color-accent: #4cc39f;
-    --color-accent-hover: #6fd3b4;
-    --color-accent-contrast: #07140f;
-    --color-accent-soft: #15302a;
-    --color-focus: #7aa7ff;
-    --color-highlight: #5c4a0f;
-    --color-success: #5cc98f;
-    --color-success-bg: #12291e;
-    --color-danger: #ff8a7e;
-    --color-danger-bg: #351815;
-    --color-warning: #f2c063;
-    --color-warning-bg: #33280f;
-    --color-running: #7fb0ff;
-    --color-running-bg: #142338;
-    --color-neutral: #9ba5b4;
-    --color-neutral-bg: #1f2530;
-    --type-string: #3987e5;
-    --type-number: #d95926;
-    --type-id: #199e70;
-    --type-date: #c98500;
-    --type-boolean: #d55181;
+/*
+ * Light tokens: once for the pinned choice and once for "follow the OS" on a light OS.
+ * Section colors step darker so they keep their contrast on white.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-bg: #dce1e9;
+  --color-sidebar: rgb(208 214 225 / 0.8);
+  --color-surface: #edf0f4;
+  --color-surface-raised: #f3f5f8;
+  --color-surface-sunken: #e1e5ec;
+  --color-surface-hover: #e4e8ee;
+  --color-input: #f5f7fa;
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%234c5466' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  --color-border: #c7cedb;
+  --color-border-strong: #a9b1c1;
+  --color-text: #0b0d14;
+  --color-text-muted: #4c5466;
+  --color-accent: #047857;
+  --color-accent-hover: #065f46;
+  --color-accent-contrast: #ffffff;
+  --color-accent-soft: #d5eee4;
+  --color-focus: #0d9488;
+  --color-highlight: #f6e39a;
+  --color-success: #15803d;
+  --color-success-bg: #dcf1e4;
+  --color-danger: #be123c;
+  --color-danger-bg: #f9e1e6;
+  --color-warning: #9a5800;
+  --color-warning-bg: #f7ead0;
+  --color-running: #1d4ed8;
+  --color-running-bg: #dfe7f8;
+  --color-neutral: #545a6b;
+  --color-neutral-bg: #e1e5ec;
+  --hue-emerald: #059669;
+  --hue-cyan: #0891b2;
+  --hue-violet: #7c3aed;
+  --hue-amber: #d97706;
+  --hue-blue: #2563eb;
+  --hue-teal: #0d9488;
+  --hue-pink: #db2777;
+  --hue-orange: #ea580c;
+  --hue-indigo: #4f46e5;
+  --hue-slate: #64748b;
+  --type-string: #2a78d6;
+  --type-number: #eb6834;
+  --type-id: #1baf7a;
+  --type-date: #eda100;
+  --type-boolean: #e87ba4;
+  --type-array: #008300;
+  --type-nested: #6250d6;
+  --type-other: #9aa3b0;
+  --button-gradient: linear-gradient(135deg, #047857, #0e7490);
+  --glow-page:
+    radial-gradient(900px 520px at 8% -12%, rgb(16 185 129 / 0.16), transparent 62%),
+    radial-gradient(820px 520px at 92% -10%, rgb(99 102 241 / 0.16), transparent 62%),
+    radial-gradient(760px 520px at 55% 115%, rgb(14 165 233 / 0.08), transparent 62%);
+  --glow-section-strength: 16%;
+  --edge-gradient: linear-gradient(
+    180deg,
+    rgb(255 255 255 / 0.85),
+    var(--color-border) 30%,
+    var(--color-border)
+  );
+  --badge-glow: none;
+  --shadow-1: 0 1px 2px rgb(15 23 42 / 0.05);
+  --shadow-2: 0 1px 3px rgb(15 23 42 / 0.08), 0 1px 2px rgb(15 23 42 / 0.04);
+  --shadow-panel: 0 1px 2px rgb(15 23 42 / 0.06), 0 10px 28px -16px rgb(15 23 42 / 0.28);
+  --shadow-popover: 0 12px 32px -6px rgb(15 23 42 / 0.16), 0 2px 6px rgb(15 23 42 / 0.05);
+  --shadow-dialog: 0 28px 72px -16px rgb(15 23 42 / 0.34);
+  --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 0);
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    color-scheme: light;
+    --color-bg: #dce1e9;
+    --color-sidebar: rgb(208 214 225 / 0.8);
+    --color-surface: #edf0f4;
+    --color-surface-raised: #f3f5f8;
+    --color-surface-sunken: #e1e5ec;
+    --color-surface-hover: #e4e8ee;
+    --color-input: #f5f7fa;
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%234c5466' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    --color-border: #c7cedb;
+    --color-border-strong: #a9b1c1;
+    --color-text: #0b0d14;
+    --color-text-muted: #4c5466;
+    --color-accent: #047857;
+    --color-accent-hover: #065f46;
+    --color-accent-contrast: #ffffff;
+    --color-accent-soft: #d5eee4;
+    --color-focus: #0d9488;
+    --color-highlight: #f6e39a;
+    --color-success: #15803d;
+    --color-success-bg: #dcf1e4;
+    --color-danger: #be123c;
+    --color-danger-bg: #f9e1e6;
+    --color-warning: #9a5800;
+    --color-warning-bg: #f7ead0;
+    --color-running: #1d4ed8;
+    --color-running-bg: #dfe7f8;
+    --color-neutral: #545a6b;
+    --color-neutral-bg: #e1e5ec;
+    --hue-emerald: #059669;
+    --hue-cyan: #0891b2;
+    --hue-violet: #7c3aed;
+    --hue-amber: #d97706;
+    --hue-blue: #2563eb;
+    --hue-teal: #0d9488;
+    --hue-pink: #db2777;
+    --hue-orange: #ea580c;
+    --hue-indigo: #4f46e5;
+    --hue-slate: #64748b;
+    --type-string: #2a78d6;
+    --type-number: #eb6834;
+    --type-id: #1baf7a;
+    --type-date: #eda100;
+    --type-boolean: #e87ba4;
     --type-array: #008300;
-    --type-nested: #9085e9;
-    --type-other: #6b7584;
-    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.3);
-    --shadow-2: 0 1px 3px rgb(0 0 0 / 0.4);
-    --shadow-popover: 0 8px 24px rgb(0 0 0 / 0.5);
-    --shadow-dialog: 0 16px 48px rgb(0 0 0 / 0.6);
-    --focus-ring: 0 0 0 3px rgb(122 167 255 / 0.3);
+    --type-nested: #6250d6;
+    --type-other: #9aa3b0;
+    --button-gradient: linear-gradient(135deg, #047857, #0e7490);
+    --glow-page:
+      radial-gradient(900px 520px at 8% -12%, rgb(16 185 129 / 0.16), transparent 62%),
+      radial-gradient(820px 520px at 92% -10%, rgb(99 102 241 / 0.16), transparent 62%),
+      radial-gradient(760px 520px at 55% 115%, rgb(14 165 233 / 0.08), transparent 62%);
+    --glow-section-strength: 16%;
+    --edge-gradient: linear-gradient(
+      180deg,
+      rgb(255 255 255 / 0.85),
+      var(--color-border) 30%,
+      var(--color-border)
+    );
+    --badge-glow: none;
+    --shadow-1: 0 1px 2px rgb(15 23 42 / 0.05);
+    --shadow-2: 0 1px 3px rgb(15 23 42 / 0.08), 0 1px 2px rgb(15 23 42 / 0.04);
+    --shadow-panel: 0 1px 2px rgb(15 23 42 / 0.06), 0 10px 28px -16px rgb(15 23 42 / 0.28);
+    --shadow-popover: 0 12px 32px -6px rgb(15 23 42 / 0.16), 0 2px 6px rgb(15 23 42 / 0.05);
+    --shadow-dialog: 0 28px 72px -16px rgb(15 23 42 / 0.34);
+    --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 0);
   }
 }
 
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --color-bg: #0e1218;
-  --color-surface: #151a22;
-  --color-surface-raised: #1b212b;
-  --color-surface-sunken: #11161d;
-  --color-surface-hover: #1c232d;
-  --color-border: #283039;
-  --color-border-strong: #46505e;
-  --color-text: #e5e9ef;
-  --color-text-muted: #9ba5b4;
-  --color-accent: #4cc39f;
-  --color-accent-hover: #6fd3b4;
-  --color-accent-contrast: #07140f;
-  --color-accent-soft: #15302a;
-  --color-focus: #7aa7ff;
-  --color-highlight: #5c4a0f;
-  --color-success: #5cc98f;
-  --color-success-bg: #12291e;
-  --color-danger: #ff8a7e;
-  --color-danger-bg: #351815;
-  --color-warning: #f2c063;
-  --color-warning-bg: #33280f;
-  --color-running: #7fb0ff;
-  --color-running-bg: #142338;
-  --color-neutral: #9ba5b4;
-  --color-neutral-bg: #1f2530;
-  --type-string: #3987e5;
-  --type-number: #d95926;
-  --type-id: #199e70;
-  --type-date: #c98500;
-  --type-boolean: #d55181;
-  --type-array: #008300;
-  --type-nested: #9085e9;
-  --type-other: #6b7584;
-  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.3);
-  --shadow-2: 0 1px 3px rgb(0 0 0 / 0.4);
-  --shadow-popover: 0 8px 24px rgb(0 0 0 / 0.5);
-  --shadow-dialog: 0 16px 48px rgb(0 0 0 / 0.6);
-  --focus-ring: 0 0 0 3px rgb(122 167 255 / 0.3);
+/*
+ * Each section's color. The shell carries the current section (for the page glow, tabs
+ * and the rule under the page title) and every sidebar link carries its own.
+ */
+[data-section="overview"] {
+  --hue: var(--hue-emerald);
+}
+
+[data-section="plans"] {
+  --hue: var(--hue-violet);
+}
+
+[data-section="backups"] {
+  --hue: var(--hue-cyan);
+}
+
+[data-section="jobs"] {
+  --hue: var(--hue-amber);
+}
+
+[data-section="connections"] {
+  --hue: var(--hue-blue);
+}
+
+[data-section="storage"] {
+  --hue: var(--hue-teal);
+}
+
+[data-section="edit-history"] {
+  --hue: var(--hue-pink);
+}
+
+[data-section="audit"] {
+  --hue: var(--hue-orange);
+}
+
+[data-section="users"] {
+  --hue: var(--hue-indigo);
+}
+
+[data-section="settings"] {
+  --hue: var(--hue-slate);
 }
 
 /* ---------------------------------------------------------------- base */
@@ -209,35 +375,68 @@ html {
 
 body {
   margin: 0;
-  background: var(--color-bg);
+  background-color: var(--color-bg);
+  background-image: var(--glow-page);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
   color: var(--color-text);
   font-family: var(--font-sans);
   font-size: var(--text-md);
   line-height: 1.5;
+  font-feature-settings: "ss01", "cv11";
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
 
+/* Thin scrollbars in the border color, so long tables and trees stay calm. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+::selection {
+  background: rgb(16 185 129 / 0.25);
+}
+
+/*
+ * Links: the accent color. In running text (paragraphs, notices, hints, lists of
+ * values) they are also underlined, so they never differ by color alone; in tables,
+ * lists and navigation they are styled by their own components.
+ */
 a {
   color: var(--color-accent);
-  text-underline-offset: 2px;
+  text-decoration: none;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
 }
 
 a:hover {
   color: var(--color-accent-hover);
+  text-decoration: underline;
+}
+
+:where(p, .notice, .field-hint, .empty-state, dd) a {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentcolor 40%, transparent);
+}
+
+:where(p, .notice, .field-hint, .empty-state, dd) a:hover {
+  text-decoration-color: currentcolor;
 }
 
 code,
 pre,
 .mono {
   font-family: var(--font-mono);
-  font-size: 0.92em;
+  font-size: 0.9em;
 }
 
 code {
   background: var(--color-surface-sunken);
-  border-radius: var(--radius-small);
-  padding: 0 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  padding: 0 5px;
   overflow-wrap: anywhere;
 }
 
@@ -246,6 +445,7 @@ h2,
 h3 {
   margin: 0;
   line-height: 1.25;
+  font-weight: 600;
 }
 
 p {
@@ -280,6 +480,11 @@ main:focus {
   color: var(--color-text-muted);
 }
 
+/* Icons never shrink in a flex row. */
+.icon {
+  flex: none;
+}
+
 .text-warning {
   color: var(--color-warning);
 }
@@ -297,10 +502,7 @@ main:focus {
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
-  grid-template-rows: var(--topbar-height) 1fr;
-  grid-template-areas:
-    "top top"
-    "nav main";
+  grid-template-areas: "nav main";
   min-height: 100vh;
 }
 
@@ -310,153 +512,446 @@ main:focus {
   top: -100px;
   z-index: 100;
   background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius);
+  font: inherit;
 }
 
 .skip-link:focus {
   top: var(--space-2);
 }
 
-.topbar {
-  grid-area: top;
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: 0 var(--space-5);
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
-  box-shadow: var(--shadow-1);
+/*
+ * The left rail: logo, navigation and the signed-in user. Frosted glass over the
+ * aurora; it stays in view while the page scrolls (sticky, full height), and its
+ * middle scrolls on short windows. The right edge is a faint gradient line.
+ */
+.sidebar {
+  grid-area: nav;
   position: sticky;
   top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-sidebar);
+  backdrop-filter: blur(18px) saturate(140%);
+  border-right: 1px solid var(--color-border);
   z-index: 10;
+}
+
+.sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -1px;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--brand-from) 55%, transparent),
+    transparent 30%,
+    transparent 70%,
+    color-mix(in srgb, var(--brand-to) 45%, transparent)
+  );
+  pointer-events: none;
+}
+
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 18px var(--space-4) var(--space-3);
 }
 
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
-  font-weight: 700;
-  font-size: var(--text-lg);
-  letter-spacing: -0.01em;
+  gap: 10px;
+  color: var(--color-text);
+  text-decoration: none;
+  border-radius: var(--radius-small);
+}
+
+.brand:hover {
   color: var(--color-text);
   text-decoration: none;
 }
 
-.brand-mark {
-  fill: var(--color-accent);
+/* The name in the brand gradient (the color is a fallback where clipping fails). */
+.brand-name {
+  font-weight: 700;
+  font-size: 1.07rem;
+  letter-spacing: -0.025em;
+  color: var(--color-text);
+  background: linear-gradient(
+    90deg,
+    var(--color-text),
+    color-mix(in srgb, var(--brand-via) 70%, var(--color-text))
+  );
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* The logo tile: the brand gradient, a soft colored glow, and the shield drawn in white. */
+.brand-logo {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  border-radius: 9px;
+  background: var(--brand-gradient);
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.4),
+    0 6px 20px -6px rgb(34 211 238 / 0.65),
+    0 0 0 1px rgb(255 255 255 / 0.08);
 }
 
 .mock-badge {
-  border: 1px dashed var(--color-warning);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);
+  background: var(--color-warning-bg);
   color: var(--color-warning);
-  border-radius: var(--radius-small);
-  padding: 0 var(--space-2);
-  font-size: 0.85rem;
+  border-radius: var(--radius-pill);
+  padding: 1px 7px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.topbar-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+.sidebar-nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-1) var(--space-3) var(--space-3);
 }
 
-.topbar-user {
-  font-size: 0.93rem;
+.nav-group + .nav-group {
+  margin-top: var(--space-3);
 }
 
-.sidebar {
-  grid-area: nav;
-  border-right: 1px solid var(--color-border);
-  background: var(--color-surface);
-  padding: var(--space-4) var(--space-3);
+/* "Protect", "Data", "Admin": small uppercase mono labels above each group. */
+.nav-group-label {
+  margin: 0;
+  padding: var(--space-2) 10px 6px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
 }
 
-.sidebar ul {
+.sidebar-nav ul {
   list-style: none;
   margin: 0;
   padding: 0;
-  position: sticky;
-  top: calc(var(--topbar-height) + var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
+/* Each entry: its icon on a small tile tinted with the section's own color. */
 .nav-link {
-  display: block;
-  padding: 7px var(--space-3);
-  margin-bottom: 2px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 8px 0 5px;
   border-radius: var(--radius-small);
   color: var(--color-text-muted);
+  font-size: 0.96rem;
   font-weight: 500;
   text-decoration: none;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.nav-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  color: var(--hue);
+  background: color-mix(in srgb, var(--hue) 12%, transparent);
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .nav-link:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
+  text-decoration: none;
 }
 
-/* The current page: a bar on the left as well as the tint, not color alone. */
+.nav-link:hover .nav-icon {
+  background: color-mix(in srgb, var(--hue) 20%, transparent);
+}
+
+/*
+ * The current page: a band of the section's color fading to the right, the icon tile
+ * filled and glowing, and a short bar on the left, so it is not marked by color alone.
+ */
 .nav-link[aria-current="page"] {
-  background: var(--color-accent-soft);
-  box-shadow: inset 3px 0 0 var(--color-accent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--hue) 18%, transparent),
+    color-mix(in srgb, var(--hue) 4%, transparent) 70%,
+    transparent
+  );
   color: var(--color-text);
-  font-weight: 650;
+  font-weight: 600;
 }
 
+.nav-link[aria-current="page"] .nav-icon {
+  background: var(--hue);
+  color: var(--color-bg);
+  box-shadow: 0 0 16px -2px color-mix(in srgb, var(--hue) 70%, transparent);
+}
+
+.nav-link[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--hue);
+  box-shadow: 0 0 10px var(--hue);
+}
+
+.sidebar-footer {
+  border-top: 1px solid var(--color-border);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--color-surface-raised) 70%, transparent);
+  border: 1px solid var(--color-border);
+  min-width: 0;
+}
+
+.avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--brand-gradient);
+  color: #04130d;
+  font-weight: 700;
+  font-size: 0.9rem;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.35),
+    0 4px 14px -6px rgb(34 211 238 / 0.6);
+}
+
+.user-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.user-chip-name {
+  font-weight: 600;
+  font-size: 0.93rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-chip-role {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.sidebar-footer-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+/* The theme toggle and "Sign out": small outlined buttons with an icon. */
+.sidebar-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.sidebar-action:hover {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+
+/* "system", "light", "dark" read as names on the toggle. */
+.sidebar-action-theme .sidebar-action-label {
+  text-transform: capitalize;
+}
+
+/*
+ * The main area. Behind it, a soft light in the current section's color shines down
+ * from the top (decoration only, under the content).
+ */
 .main {
   grid-area: main;
-  padding: var(--space-5) var(--space-6);
+  position: relative;
+  isolation: isolate;
+  padding: 40px var(--space-7) var(--space-7);
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  /* Between the page's big blocks (header, tiles, cards). */
+  gap: var(--space-6);
 }
 
+.main::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 420px;
+  z-index: -1;
+  background: radial-gradient(
+    60% 100% at 50% 0%,
+    color-mix(in srgb, var(--hue) var(--glow-section-strength), transparent),
+    transparent 72%
+  );
+  pointer-events: none;
+  transition: background 300ms ease;
+}
+
+/* Sign-in and setup: one glass card on the aurora, over a faint dotted grid. */
 .centered-page {
+  position: relative;
+  isolation: isolate;
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: var(--space-4);
+  overflow: hidden;
+  background-image:
+    radial-gradient(640px 380px at 30% 8%, rgb(52 211 153 / 0.2), transparent 70%),
+    radial-gradient(640px 380px at 72% 14%, rgb(129 140 248 / 0.22), transparent 70%),
+    radial-gradient(560px 360px at 50% 100%, rgb(34 211 238 / 0.12), transparent 70%),
+    radial-gradient(
+      circle at 1px 1px,
+      color-mix(in srgb, var(--color-text) 10%, transparent) 1px,
+      transparent 0
+    );
+  background-size:
+    auto,
+    auto,
+    auto,
+    22px 22px;
 }
 
 .auth-card {
   width: min(420px, 100%);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-2);
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    var(--edge-gradient) border-box var(--color-surface);
+  border: 1px solid transparent;
+  border-radius: 18px;
+  box-shadow: var(--shadow-dialog);
   padding: var(--space-6);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: var(--space-2);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
 .auth-title {
   font-size: var(--text-2xl);
-  letter-spacing: -0.015em;
+  font-weight: 650;
+  letter-spacing: -0.035em;
 }
 
 /* ---------------------------------------------------------------- page structure */
 
+/* The title row, with a rule under it that starts in the section's color. */
 .page-header {
+  position: relative;
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
   gap: var(--space-4);
   flex-wrap: wrap;
+  padding-bottom: var(--space-5);
 }
 
+.page-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--hue) 70%, transparent),
+    var(--color-border) 35%,
+    transparent
+  );
+}
+
+/* Level 1: the page title, clearly the biggest thing on the page. */
 .page-title {
-  font-size: var(--text-xl);
-  font-weight: 700;
-  letter-spacing: -0.015em;
+  font-size: 1.9rem;
+  font-weight: 680;
+  letter-spacing: -0.035em;
   overflow-wrap: anywhere;
 }
 
 .page-description {
-  margin: var(--space-1) 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--color-text-muted);
+  font-size: 1.04rem;
+  line-height: 1.55;
+  max-width: 72ch;
 }
 
 .page-actions {
@@ -465,14 +960,16 @@ main:focus {
   flex-wrap: wrap;
 }
 
+/* Breadcrumbs: mono, slash-separated, like a path. */
 .breadcrumbs ol {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
+  gap: 6px;
   list-style: none;
-  margin: 0 0 var(--space-1);
+  margin: 0 0 var(--space-2);
   padding: 0;
-  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
   color: var(--color-text-muted);
 }
 
@@ -487,21 +984,21 @@ main:focus {
 }
 
 .breadcrumbs li:not(:last-child)::after {
-  content: "›";
-  margin-left: var(--space-1);
+  content: "/";
+  margin-left: 6px;
   color: var(--color-border-strong);
 }
 
 .breadcrumbs [aria-current] {
   color: var(--color-text);
-  font-weight: 550;
+  font-weight: 500;
 }
 
 .grid-2,
 .grid-3,
 .grid-5 {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
 
 .grid-2 {
@@ -527,7 +1024,7 @@ main:focus {
 .stack-vertical {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 .toolbar {
@@ -565,12 +1062,22 @@ main:focus {
   justify-content: space-between;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-2) 0;
+  padding: 14px 0;
   border-bottom: 1px solid var(--color-border);
 }
 
 .list-row:last-child {
   border-bottom: none;
+}
+
+/* Links in list rows read as the row's title: text color, accent on hover. */
+.list-row a {
+  color: var(--color-text);
+  font-weight: 550;
+}
+
+.list-row a:hover {
+  color: var(--color-accent);
 }
 
 /* ---------------------------------------------------------------- buttons */
@@ -581,27 +1088,33 @@ main:focus {
   justify-content: center;
   gap: 6px;
   min-height: 32px;
-  padding: 0 var(--space-3);
+  padding: 0 12px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-small);
   background: var(--color-surface-raised);
-  box-shadow: var(--shadow-1);
+  box-shadow: var(--shadow-1), var(--edge-highlight);
   color: var(--color-text);
   font: inherit;
+  font-family: var(--font-sans);
+  font-size: 0.96rem;
   font-weight: 550;
+  letter-spacing: normal;
   line-height: 1;
   text-decoration: none;
   cursor: pointer;
   white-space: nowrap;
   transition:
     background-color 120ms ease,
-    border-color 120ms ease;
+    border-color 120ms ease,
+    box-shadow 160ms ease,
+    color 120ms ease;
 }
 
 .button:hover:not(:disabled) {
   background: var(--color-surface-hover);
   border-color: var(--color-text-muted);
   color: var(--color-text);
+  text-decoration: none;
 }
 
 .button:active:not(:disabled) {
@@ -609,28 +1122,40 @@ main:focus {
 }
 
 .button:disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
+/* The primary action: the brand gradient, a light top edge and a colored glow on hover. */
 .button-primary {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
+  background: var(--button-gradient);
+  border-color: transparent;
   color: var(--color-accent-contrast);
+  font-weight: 600;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.28),
+    0 1px 2px rgb(0 0 0 / 0.2),
+    0 4px 14px -6px color-mix(in srgb, var(--brand-via) 60%, transparent);
 }
 
 .button-primary:hover:not(:disabled) {
-  background: var(--color-accent-hover);
+  background: var(--button-gradient);
+  border-color: transparent;
   color: var(--color-accent-contrast);
+  filter: brightness(1.08) saturate(1.1);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.3),
+    0 8px 26px -8px color-mix(in srgb, var(--brand-via) 80%, transparent);
 }
 
 .button-danger {
   color: var(--color-danger);
-  border-color: var(--color-danger);
+  border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
 }
 
 .button-danger:hover:not(:disabled) {
   background: var(--color-danger-bg);
+  border-color: var(--color-danger);
   color: var(--color-danger);
 }
 
@@ -652,7 +1177,7 @@ main:focus {
 
 /* An icon-only button (the label is its accessible name and tooltip). */
 .button-icon {
-  padding: 0 6px;
+  padding: 0 7px;
 }
 
 /* The tiny icon buttons of tree rows and table rows (copy, open, filter). */
@@ -663,7 +1188,7 @@ main:focus {
   height: 22px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--radius-small);
+  border-radius: 5px;
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
@@ -680,10 +1205,6 @@ main:focus {
   cursor: default;
 }
 
-.icon {
-  flex: none;
-}
-
 .icon-button {
   border: none;
   background: transparent;
@@ -692,7 +1213,7 @@ main:focus {
   line-height: 1;
   width: 28px;
   height: 28px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-small);
   cursor: pointer;
   flex: none;
 }
@@ -724,7 +1245,9 @@ main:focus {
     animation-duration: 3s;
   }
 
-  .button {
+  .button,
+  .nav-link,
+  .sidebar-action {
     transition: none;
   }
 }
@@ -734,13 +1257,13 @@ main:focus {
 .form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-5);
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -748,14 +1271,18 @@ main:focus {
   min-width: 200px;
 }
 
+/* Level 4 of the page: a field's label, clearly above its help text. */
 .field-label {
   font-weight: 600;
-  font-size: var(--text-sm);
+  font-size: 0.96rem;
+  color: var(--color-text);
 }
 
+/* Level 5: help text, quieter and smaller than the label. */
 .field-hint {
   margin: 0;
   font-size: 0.88rem;
+  line-height: 1.55;
   color: var(--color-text-muted);
 }
 
@@ -768,13 +1295,14 @@ main:focus {
 
 .input {
   width: 100%;
-  min-height: 34px;
-  padding: 6px 10px;
+  min-height: 36px;
+  padding: 7px 11px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-small);
-  background: var(--color-surface);
+  background: var(--color-input);
   color: var(--color-text);
   font: inherit;
+  box-shadow: var(--shadow-1);
   transition:
     border-color 120ms ease,
     box-shadow 120ms ease;
@@ -782,7 +1310,7 @@ main:focus {
 
 .input::placeholder {
   color: var(--color-text-muted);
-  opacity: 0.8;
+  opacity: 0.75;
 }
 
 .input:hover:not(:disabled) {
@@ -794,6 +1322,25 @@ main:focus {
   outline: none;
   border-color: var(--color-focus);
   box-shadow: var(--focus-ring);
+}
+
+/*
+ * Select boxes: our own arrow instead of the browser's, so it sits well inside the
+ * box (14 px from the right edge) in every browser, with room for it in the padding.
+ */
+.select {
+  appearance: none;
+  padding-right: 40px;
+  background-image: var(--select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 14px 14px;
+  cursor: pointer;
+}
+
+.select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 /* Code-like inputs (Extended JSON boxes). */
@@ -835,19 +1382,29 @@ main:focus {
 
 .field-group {
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: var(--space-4);
+  border-radius: var(--radius-large);
+  padding: var(--panel-pad);
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-5);
   background: var(--color-surface);
   min-width: 0;
 }
 
-.field-group legend {
-  font-weight: 650;
-  padding: 0 var(--space-1);
+/*
+ * A group's legend reads as a section title inside the box, not on its border:
+ * floating it takes it out of the border (the fieldset then lays it out like content).
+ */
+.field-group legend:not(.visually-hidden) {
+  float: left;
+  width: 100%;
+  padding: 0 0 var(--space-4);
+  margin: 0 0 var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+  font-weight: 600;
+  font-size: 1.14rem;
+  letter-spacing: -0.015em;
 }
 
 .plain-fieldset {
@@ -880,11 +1437,14 @@ main:focus {
 
 /* ---------------------------------------------------------------- panels and notices */
 
+/* A card: the surface, with an edge that is brighter on top (lit from above). */
 .panel {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-1);
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    var(--edge-gradient) border-box var(--color-surface);
+  border: 1px solid transparent;
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow-panel);
   min-width: 0;
 }
 
@@ -893,25 +1453,59 @@ main:focus {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  min-height: 60px;
+  padding: var(--space-4) var(--panel-pad);
   border-bottom: 1px solid var(--color-border);
 }
 
 .panel-title {
-  font-size: var(--text-lg);
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* Level 2 of the page, under the page title: a card's heading. */
+  font-size: 1.14rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+/* Panels about problems (or their absence) take the status color for their dot and edge. */
+.panel-alert {
+  --hue: var(--color-warning);
+}
+
+.panel-ok {
+  --hue: var(--color-success);
+}
+
+/* A small dot in the section's color before each panel title. */
+.panel-title::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--hue);
+  box-shadow: 0 0 8px var(--hue);
+}
+
+.panel-actions a {
+  font-size: var(--text-sm);
+  font-weight: 500;
 }
 
 .panel-body {
-  padding: var(--space-4);
+  padding: var(--panel-pad);
 }
 
+/*
+ * Notices: a tinted box with a hairline border in the tone's color and the tone's
+ * symbol in a small round badge before the title.
+ */
 .notice {
-  border: 1px solid var(--color-border);
-  border-left-width: 4px;
+  border: 1px solid
+    color-mix(in srgb, var(--notice-color, var(--color-border-strong)) 32%, transparent);
   border-radius: var(--radius);
-  padding: var(--space-3) var(--space-4);
+  padding: 14px 18px;
   background: var(--color-surface);
 }
 
@@ -920,27 +1514,44 @@ main:focus {
 }
 
 .notice-title {
-  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 600;
   margin-bottom: var(--space-1);
 }
 
+.notice-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--notice-color, var(--color-neutral));
+  color: var(--color-surface);
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .notice-info {
-  border-left-color: var(--color-running);
+  --notice-color: var(--color-running);
   background: var(--color-running-bg);
 }
 
 .notice-success {
-  border-left-color: var(--color-success);
+  --notice-color: var(--color-success);
   background: var(--color-success-bg);
 }
 
 .notice-warning {
-  border-left-color: var(--color-warning);
+  --notice-color: var(--color-warning);
   background: var(--color-warning-bg);
 }
 
 .notice-danger {
-  border-left-color: var(--color-danger);
+  --notice-color: var(--color-danger);
   background: var(--color-danger-bg);
 }
 
@@ -950,14 +1561,29 @@ main:focus {
   color: var(--color-text-muted);
 }
 
+/* A small dashed tile above the title: a quiet "nothing here yet" mark. */
+.empty-state::before {
+  content: "";
+  display: block;
+  width: 40px;
+  height: 40px;
+  margin: 0 auto var(--space-3);
+  border: 1.5px dashed var(--color-border-strong);
+  border-radius: var(--radius);
+  background:
+    radial-gradient(circle, var(--color-border-strong) 1.5px, transparent 2px) center / 100% 100%
+    no-repeat;
+}
+
 .empty-state-title {
-  font-weight: 650;
+  font-weight: 600;
   font-size: var(--text-lg);
   color: var(--color-text);
+  margin-bottom: var(--space-1);
 }
 
 .empty-state-action {
-  margin-top: var(--space-3);
+  margin-top: var(--space-4);
 }
 
 .loading {
@@ -970,7 +1596,7 @@ main:focus {
 .key-value-list {
   margin: 0;
   display: grid;
-  gap: var(--space-2);
+  gap: 14px;
 }
 
 .key-value-row {
@@ -994,13 +1620,31 @@ main:focus {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 2px;
 }
 
+/* Each warning is a row: its badge, then the message, which links to the cause. */
 .warning-list li {
   display: flex;
-  gap: var(--space-2);
-  align-items: baseline;
+  gap: var(--space-3);
+  align-items: center;
+  padding: 8px 10px;
+  margin: 0 -10px;
+  border-radius: var(--radius-small);
+}
+
+.warning-list li:hover {
+  background: var(--color-surface-hover);
+}
+
+.warning-list a {
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.warning-list a:hover {
+  color: var(--color-accent);
+  text-decoration: underline;
 }
 
 .all-good {
@@ -1010,9 +1654,219 @@ main:focus {
   margin: 0;
 }
 
+/*
+ * The overview's summary: four tiles, each in its own color, with a mono label, a big
+ * value, a detail line, a small chart, and a glow of the tile's color in the corner.
+ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-5);
+  margin: 0;
+}
+
+.stat {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 156px;
+  padding: 20px 22px;
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    linear-gradient(180deg, color-mix(in srgb, var(--stat-color) 50%, transparent), transparent 65%)
+    border-box,
+    var(--edge-gradient) border-box var(--color-surface);
+  border: 1px solid transparent;
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+
+/* The glow in the top right corner. */
+.stat::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: -70px;
+  right: -70px;
+  width: 220px;
+  height: 220px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--stat-color) 24%, transparent),
+    transparent 68%
+  );
+  pointer-events: none;
+}
+
+.stat-emerald {
+  --stat-color: var(--hue-emerald);
+}
+
+.stat-cyan {
+  --stat-color: var(--hue-cyan);
+}
+
+.stat-violet {
+  --stat-color: var(--hue-violet);
+}
+
+.stat-amber {
+  --stat-color: var(--hue-amber);
+}
+
+/* A tile reporting a problem takes the problem's color. */
+.stat-warning {
+  --stat-color: var(--color-warning);
+}
+
+.stat-danger {
+  --stat-color: var(--color-danger);
+}
+
+.stat-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.stat-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--stat-color) 16%, transparent);
+  color: var(--stat-color);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--stat-color) 32%, transparent);
+}
+
+.stat-value {
+  margin: 6px 0 0;
+  font-size: 2rem;
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A time in the big value: no muted color. */
+.stat-value .time {
+  color: inherit;
+}
+
+.stat-detail {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* The tile's chart, at the bottom of the tile. Decoration: the numbers say it all. */
+.stat-chart {
+  margin: auto 0 0;
+  padding-top: var(--space-2);
+}
+
+/* Bars: complete backups per day, oldest on the left. The page sets each height. */
+.spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 28px;
+}
+
+.spark span {
+  flex: 1;
+  min-height: 3px;
+  border-radius: 2px 2px 1px 1px;
+  background: linear-gradient(
+    180deg,
+    var(--stat-color),
+    color-mix(in srgb, var(--stat-color) 30%, transparent)
+  );
+}
+
+/* A day without backups: a stub in the border color. */
+.spark span.spark-empty {
+  background: var(--color-border-strong);
+}
+
+/* A ring in the top right: the share of verified backups (the page sets the gradient). */
+.ring {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  mask: radial-gradient(circle, transparent 57%, #000 59%);
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--stat-color) 50%, transparent));
+}
+
+/* A split bar: the last day's jobs, succeeded and failed side by side. */
+.split-bar {
+  display: flex;
+  gap: 3px;
+  height: 8px;
+}
+
+.split-bar span {
+  border-radius: var(--radius-pill);
+  min-width: 6px;
+}
+
+.split-ok {
+  background: var(--color-success);
+  box-shadow: 0 0 10px -2px var(--color-success);
+}
+
+.split-failed {
+  background: var(--color-danger);
+  box-shadow: 0 0 10px -2px var(--color-danger);
+}
+
+.split-other {
+  background: var(--color-border-strong);
+}
+
+/* "Freshness": how much of the 26 h window since the last backup has passed. */
+.fresh-bar {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  overflow: hidden;
+}
+
+.fresh-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    var(--stat-color),
+    color-mix(in srgb, var(--stat-color) 55%, #ffffff)
+  );
+  box-shadow: 0 0 10px -2px var(--stat-color);
+}
+
 /* ---------------------------------------------------------------- tables */
 
+/*
+ * position: relative makes the wrapper the containing block of absolutely positioned
+ * bits inside the table (the visually hidden "Actions" header, for one), so they are
+ * clipped by its scrolling instead of widening the page on phones.
+ */
 .table-wrapper {
+  position: relative;
   overflow-x: auto;
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
@@ -1022,8 +1876,8 @@ main:focus {
 /* Inside a panel the table goes edge to edge. */
 .panel-body > .table-wrapper {
   border: none;
-  border-radius: 0;
-  margin: calc(-1 * var(--space-4));
+  border-radius: 0 0 var(--radius-large) var(--radius-large);
+  margin: calc(-1 * var(--panel-pad));
 }
 
 .table {
@@ -1034,23 +1888,43 @@ main:focus {
 .table caption.table-caption {
   text-align: left;
   padding: var(--space-2) var(--space-3);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .table th,
 .table td {
   text-align: left;
-  padding: 7px var(--space-3);
+  padding: 12px 16px;
   border-bottom: 1px solid var(--color-border);
   vertical-align: middle;
 }
 
+/* Column headers: small uppercase mono labels on a sunken strip. */
 .table th {
-  font-weight: 600;
-  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--color-text-muted);
   background: var(--color-surface-sunken);
   white-space: nowrap;
+  padding-top: 10px;
+  padding-bottom: 8px;
+}
+
+.table td {
+  font-size: 0.96rem;
+}
+
+/* Links in table cells are the row's name: text color, accent and underline on hover. */
+.table td a {
+  color: var(--color-text);
+  font-weight: 550;
+}
+
+.table td a:hover {
+  color: var(--color-accent);
 }
 
 .table .align-end {
@@ -1059,14 +1933,20 @@ main:focus {
 
 .table td.numeric {
   white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.table tbody tr {
+  transition: background-color 80ms ease;
+}
+
+.table tbody tr:hover {
+  background: color-mix(in srgb, var(--hue) 5%, var(--color-surface-hover));
 }
 
 .table-interactive tbody tr {
   cursor: pointer;
-}
-
-.table-interactive tbody tr:hover {
-  background: var(--color-surface-hover);
 }
 
 .table-interactive tbody tr:focus-visible {
@@ -1080,7 +1960,7 @@ main:focus {
 
 .table.table-compact th,
 .table.table-compact td {
-  padding: 4px var(--space-2);
+  padding: 5px var(--space-2);
 }
 
 .sort-button {
@@ -1088,11 +1968,17 @@ main:focus {
   background: none;
   font: inherit;
   color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
   padding: 0;
   cursor: pointer;
   display: inline-flex;
   gap: var(--space-1);
   align-items: center;
+}
+
+.sort-button:hover {
+  color: var(--color-text);
 }
 
 .sort-indicator {
@@ -1106,7 +1992,7 @@ main:focus {
 }
 
 .row-conflict td:first-child {
-  box-shadow: inset 4px 0 0 var(--color-warning);
+  box-shadow: inset 3px 0 0 var(--color-warning);
 }
 
 .row-blocking {
@@ -1114,7 +2000,7 @@ main:focus {
 }
 
 .row-blocking td:first-child {
-  box-shadow: inset 4px 0 0 var(--color-danger);
+  box-shadow: inset 3px 0 0 var(--color-danger);
 }
 
 .table .row-dimmed td {
@@ -1132,16 +2018,18 @@ main:focus {
 
 /* ---------------------------------------------------------------- status badges */
 
+/* A tinted pill: the status shape, then the word. The border is the color, faint. */
 .status-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 1px 8px 1px 6px;
-  border-radius: 999px;
-  font-size: 0.86rem;
-  font-weight: 600;
+  padding: 2px 9px 2px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 0.84rem;
+  font-weight: 550;
+  line-height: 1.35;
   white-space: nowrap;
-  border: 1px solid currentcolor;
+  border: 1px solid color-mix(in srgb, currentcolor 28%, transparent);
 }
 
 .status-shape {
@@ -1150,6 +2038,7 @@ main:focus {
   fill: currentcolor;
   stroke-linecap: round;
   stroke-linejoin: round;
+  filter: var(--badge-glow);
 }
 
 .status-success {
@@ -1198,6 +2087,7 @@ main:focus {
   color: var(--color-neutral);
   background: var(--color-neutral-bg);
   border-style: dashed;
+  border-color: color-mix(in srgb, currentcolor 45%, transparent);
 }
 
 .marker {
@@ -1219,7 +2109,7 @@ main:focus {
   white-space: nowrap;
 }
 
-/* ---------------------------------------------------------------- tabs and stepper */
+/* ---------------------------------------------------------------- tabs */
 
 .tab-list {
   display: flex;
@@ -1229,16 +2119,19 @@ main:focus {
 }
 
 .tab {
+  position: relative;
   border: none;
   background: none;
   font: inherit;
-  font-weight: 550;
+  font-weight: 500;
   color: var(--color-text-muted);
-  padding: var(--space-2) var(--space-3);
+  padding: 10px var(--space-3);
   margin-bottom: -1px;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   white-space: nowrap;
+  border-radius: var(--radius-small) var(--radius-small) 0 0;
+  transition: color 120ms ease;
 }
 
 .tab:hover {
@@ -1247,37 +2140,31 @@ main:focus {
 
 .tab[aria-selected="true"] {
   color: var(--color-text);
-  font-weight: 650;
-  border-bottom-color: var(--color-accent);
+  font-weight: 600;
+  border-bottom-color: var(--hue);
+}
+
+/* A soft glow of the section's color under the selected tab. */
+.tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  left: 15%;
+  right: 15%;
+  bottom: -2px;
+  height: 10px;
+  background: radial-gradient(
+    50% 100% at 50% 100%,
+    color-mix(in srgb, var(--hue) 50%, transparent),
+    transparent
+  );
+  pointer-events: none;
 }
 
 .tab-panel {
-  padding-top: var(--space-4);
+  padding-top: var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
-}
-
-.stepper {
-  display: flex;
-  gap: var(--space-2);
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  flex-wrap: wrap;
-}
-
-.stepper li {
-  padding: var(--space-1) var(--space-3);
-  border-radius: 999px;
-  border: 1px solid var(--color-border);
-  color: var(--color-text-muted);
-}
-
-.stepper li[aria-current="step"] {
-  border: 2px solid var(--color-accent);
-  color: var(--color-text);
-  font-weight: 650;
+  gap: var(--space-5);
 }
 
 /* ---------------------------------------------------------------- dialogs */
@@ -1285,7 +2172,8 @@ main:focus {
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgb(15 23 42 / 0.45);
+  background: rgb(5 7 12 / 0.55);
+  backdrop-filter: blur(3px);
   display: grid;
   place-items: center;
   padding: var(--space-4);
@@ -1297,10 +2185,20 @@ main:focus {
   max-height: calc(100vh - 2 * var(--space-4));
   display: flex;
   flex-direction: column;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  background:
+    linear-gradient(var(--color-surface-raised), var(--color-surface-raised)) padding-box,
+    var(--edge-gradient) border-box var(--color-surface-raised);
+  border: 1px solid transparent;
+  border-radius: var(--radius-large);
   box-shadow: var(--shadow-dialog);
+  animation: dialog-in 160ms ease-out;
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
 }
 
 /* The document detail panel: full height on the right. */
@@ -1315,6 +2213,21 @@ main:focus {
   height: 100vh;
   border-radius: 0;
   border-width: 0 0 0 1px;
+  animation-name: drawer-in;
+}
+
+@keyframes drawer-in {
+  from {
+    opacity: 0.6;
+    transform: translateX(24px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog,
+  .dialog-drawer {
+    animation: none;
+  }
 }
 
 .dialog-wide {
@@ -1326,22 +2239,24 @@ main:focus {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  padding: 20px var(--panel-pad) var(--space-4);
   border-bottom: 1px solid var(--color-border);
 }
 
 .dialog-title {
   font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
 }
 
 .dialog-description {
   margin: 0;
-  padding: var(--space-3) var(--space-4) 0;
+  padding: var(--space-4) var(--panel-pad) 0;
   color: var(--color-text-muted);
 }
 
 .dialog-body {
-  padding: var(--space-4);
+  padding: var(--panel-pad);
   overflow-y: auto;
 }
 
@@ -1349,8 +2264,10 @@ main:focus {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-4) var(--panel-pad);
   border-top: 1px solid var(--color-border);
+  background: var(--color-surface-sunken);
+  border-radius: 0 0 var(--radius-large) var(--radius-large);
 }
 
 /* ---------------------------------------------------------------- toasts */
@@ -1373,18 +2290,18 @@ main:focus {
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
-  border-left-width: 4px;
+  border-left-width: 3px;
   border-radius: var(--radius);
   background: var(--color-surface-raised);
-  box-shadow: var(--shadow-popover);
+  box-shadow: var(--shadow-popover), var(--edge-highlight);
   pointer-events: auto;
-  animation: toast-in 160ms ease-out;
+  animation: toast-in 180ms ease-out;
 }
 
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(8px);
   }
 }
 
@@ -1415,7 +2332,7 @@ main:focus {
 .progress {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 6px;
   margin-bottom: var(--space-3);
 }
 
@@ -1430,13 +2347,21 @@ main:focus {
   font-weight: 600;
 }
 
+.progress-detail {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* A slim bar filled with the brand gradient. */
 .progress-bar {
   width: 100%;
-  height: 10px;
+  height: 6px;
   appearance: none;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border: none;
+  border-radius: var(--radius-pill);
   background: var(--color-surface-sunken);
+  box-shadow: inset 0 0 0 1px var(--color-border);
   overflow: hidden;
   accent-color: var(--color-accent);
 }
@@ -1446,11 +2371,13 @@ main:focus {
 }
 
 .progress-bar::-webkit-progress-value {
-  background: var(--color-accent);
+  background: var(--brand-gradient);
+  border-radius: var(--radius-pill);
 }
 
 .progress-bar::-moz-progress-bar {
-  background: var(--color-accent);
+  background: var(--brand-gradient);
+  border-radius: var(--radius-pill);
 }
 
 .namespace-progress {
@@ -1569,16 +2496,19 @@ main:focus {
   color: var(--color-accent);
 }
 
+/* min-width 0: a wide table scrolls inside its database box instead of widening the page. */
 .namespace-tree {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .namespace-database {
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   overflow-x: auto;
+  min-width: 0;
 }
 
 .namespace-database > summary {
@@ -1716,40 +2646,95 @@ main:focus {
 
 /* ---------------------------------------------------------------- responsive */
 
-/* Tablet: the sidebar becomes a horizontal strip and multi-column grids stack. */
+/*
+ * Tablet: the left rail becomes a bar on top (logo and user on one row, the
+ * navigation as a scrolling strip below), and multi-column grids stack.
+ */
 @media (max-width: 960px) {
   .shell {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: var(--topbar-height) auto 1fr;
+    grid-template-rows: auto 1fr;
     grid-template-areas:
-      "top"
       "nav"
       "main";
   }
 
   .sidebar {
+    position: relative;
+    height: auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "top footer"
+      "links links";
     border-right: none;
     border-bottom: 1px solid var(--color-border);
-    padding: var(--space-1) var(--space-2);
-    overflow-x: auto;
   }
 
-  .sidebar ul {
+  .sidebar-top {
+    grid-area: top;
+    padding: var(--space-3) var(--space-4);
+    justify-content: flex-start;
+  }
+
+  .sidebar-footer {
+    grid-area: footer;
+    flex-direction: row;
+    align-items: center;
+    border-top: none;
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .sidebar-nav {
+    grid-area: links;
     display: flex;
     gap: var(--space-1);
-    position: static;
+    overflow-x: auto;
+    padding: 0 var(--space-3) var(--space-2);
+  }
+
+  .sidebar-nav ul {
+    flex-direction: row;
+  }
+
+  .nav-group + .nav-group {
+    margin-top: 0;
+  }
+
+  .nav-group-label {
+    display: none;
   }
 
   .nav-link {
     white-space: nowrap;
   }
 
-  .nav-link[aria-current="page"] {
-    box-shadow: inset 0 -3px 0 var(--color-accent);
+  /* The accent bar moves under the current entry. */
+  .nav-link[aria-current="page"]::before {
+    left: 10px;
+    right: 10px;
+    top: auto;
+    bottom: -8px;
+    width: auto;
+    height: 2px;
+    border-radius: 2px;
+  }
+
+  .user-chip-text {
+    display: none;
+  }
+
+  /* The gradient edge line belongs to the side rail only. */
+  .sidebar::after {
+    display: none;
+  }
+
+  .sidebar-footer-actions {
+    display: flex;
   }
 
   .main {
-    padding: var(--space-4);
+    padding: var(--space-5) var(--space-4) var(--space-6);
   }
 
   .grid-2,
@@ -1760,6 +2745,10 @@ main:focus {
 
   .grid-5 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .plan-preview {
@@ -1773,18 +2762,18 @@ main:focus {
 }
 
 @media (max-width: 600px) {
-  .topbar-user {
+  .user-chip {
     display: none;
   }
 
-  /* The top bar fits a phone: less padding, and no room for the demo's "Mock data" badge. */
-  .topbar {
-    padding: 0 var(--space-3);
-    gap: var(--space-2);
-  }
-
-  .topbar-actions {
-    gap: 0;
+  /* The bar fits a phone: icons only for the theme and sign-out buttons, no demo badge. */
+  .sidebar-action-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .mock-badge {
@@ -1794,6 +2783,19 @@ main:focus {
   .grid-5,
   .notify-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Two small tiles per row on a phone. */
+  .stat-grid {
+    gap: var(--space-2);
+  }
+
+  .stat {
+    padding: var(--space-3);
+  }
+
+  .stat-value {
+    font-size: 1.4rem;
   }
 
   .key-value-row {
@@ -2053,6 +3055,7 @@ main:focus {
 .tree-item:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
+  text-decoration: none;
 }
 
 .tree-item:focus-visible {
@@ -2068,14 +3071,23 @@ main:focus {
 }
 
 /* The open collection: a bar, bold text and a tint, not color alone. */
+/* The open collection: a bar, bold text and a band of the section's color, not color alone. */
 .tree-item-selected {
-  background: var(--color-accent-soft);
-  box-shadow: inset 3px 0 0 var(--color-accent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--hue) 20%, transparent),
+    color-mix(in srgb, var(--hue) 5%, transparent)
+  );
+  box-shadow: inset 3px 0 0 var(--hue);
   font-weight: 650;
 }
 
 .tree-item-selected:hover {
-  background: var(--color-accent-soft);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--hue) 24%, transparent),
+    color-mix(in srgb, var(--hue) 8%, transparent)
+  );
 }
 
 .tree-caret {
@@ -2091,7 +3103,7 @@ main:focus {
 }
 
 .tree-item-selected .tree-icon {
-  color: var(--color-accent);
+  color: var(--hue);
 }
 
 .tree-label {

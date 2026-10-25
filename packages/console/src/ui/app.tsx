@@ -13,7 +13,8 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { Role, SessionInfo } from "../shared/api.ts";
 import type { ApiClient } from "./api.ts";
-import { Button } from "./components/button.tsx";
+import { BrandLogo } from "./components/brand.tsx";
+import { Icon, type IconName } from "./components/icons.tsx";
 import { ErrorNotice, Loading, Notice, PageHeader } from "./components/layout.tsx";
 import { ToastProvider, useToast } from "./components/toast.tsx";
 import { ApiProvider, SessionProvider, useApi, useSession } from "./context.tsx";
@@ -253,19 +254,59 @@ const ROUTES: readonly RouteDefinition[] = [
   { pattern: "/settings", title: "Settings", section: "settings", render: () => <SettingsPage /> },
 ];
 
-/** Navigation entries, in display order. */
-const NAV_ITEMS: readonly { section: string; label: string; href: string; role?: Role }[] = [
-  { section: "overview", label: "Overview", href: "#/" },
-  { section: "plans", label: "Backup plans", href: "#/plans" },
-  { section: "backups", label: "Backups", href: "#/backups" },
-  { section: "jobs", label: "Jobs", href: "#/jobs" },
-  { section: "edit-history", label: "Edit history", href: "#/edit-history", role: "operator" },
-  { section: "connections", label: "Connections", href: "#/connections" },
-  { section: "storage", label: "Storage", href: "#/storage" },
-  { section: "audit", label: "Audit log", href: "#/audit" },
-  { section: "users", label: "Users", href: "#/users", role: "admin" },
-  { section: "settings", label: "Settings", href: "#/settings" },
+/** One entry of the sidebar. */
+interface NavItem {
+  readonly section: string;
+  readonly label: string;
+  readonly href: string;
+  readonly icon: IconName;
+  readonly role?: Role;
+}
+
+/**
+ * The sidebar, in display order: groups of entries, each group with an optional
+ * label ("Protect", "Data", "Admin") so the list reads as a few short sections.
+ */
+const NAV_GROUPS: readonly { readonly label?: string; readonly items: readonly NavItem[] }[] = [
+  { items: [{ section: "overview", label: "Overview", href: "#/", icon: "dashboard" }] },
+  {
+    label: "Protect",
+    items: [
+      { section: "plans", label: "Backup plans", href: "#/plans", icon: "calendar" },
+      { section: "backups", label: "Backups", href: "#/backups", icon: "archive" },
+      { section: "jobs", label: "Jobs", href: "#/jobs", icon: "activity" },
+    ],
+  },
+  {
+    label: "Data",
+    items: [
+      { section: "connections", label: "Connections", href: "#/connections", icon: "server" },
+      { section: "storage", label: "Storage", href: "#/storage", icon: "drive" },
+      {
+        section: "edit-history",
+        label: "Edit history",
+        href: "#/edit-history",
+        icon: "history",
+        role: "operator",
+      },
+    ],
+  },
+  {
+    label: "Admin",
+    items: [
+      { section: "audit", label: "Audit log", href: "#/audit", icon: "audit" },
+      { section: "users", label: "Users", href: "#/users", icon: "users", role: "admin" },
+      { section: "settings", label: "Settings", href: "#/settings", icon: "sliders" },
+    ],
+  },
 ];
+
+/** The icon of each theme choice on the toggle. */
+const THEME_ICONS: Readonly<Record<ThemeChoice, IconName>> = {
+  system: "monitor",
+  light: "sun",
+  dark: "moon",
+};
 
 /** Finds the route for a path. */
 export function resolveRoute(
@@ -362,7 +403,8 @@ function Shell(props: { mock: boolean }) {
   }
 
   return (
-    <div className="shell">
+    // data-section gives each area of the console its own color (styles.css, --hue).
+    <div className="shell" data-section={resolved?.route.section}>
       {/* A button, not a link: the URL hash belongs to the router, so "#main" would navigate. */}
       <button
         type="button"
@@ -371,57 +413,96 @@ function Shell(props: { mock: boolean }) {
       >
         Skip to content
       </button>
-      <header className="topbar">
-        <a href="#/" className="brand">
-          <svg
-            viewBox="0 0 24 24"
-            width="20"
-            height="20"
-            aria-hidden="true"
-            focusable="false"
-            className="brand-mark"
-          >
-            <path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5z" />
-          </svg>
-          MongoShield
-        </a>
-        {props.mock ? (
-          <span className="mock-badge" title="Data is generated in the browser; nothing is saved.">
-            Mock data
-          </span>
-        ) : null}
-        <div className="topbar-actions">
-          <Button
-            variant="ghost"
-            size="small"
-            onClick={toggleTheme}
-            aria-label={`Theme: ${theme}. Change theme`}
-          >
-            Theme: {theme}
-          </Button>
-          <span className="topbar-user">
-            {user?.username} <span className="muted">({user?.role})</span>
-          </span>
-          <Button variant="ghost" size="small" onClick={() => void logout()}>
-            Sign out
-          </Button>
+      {/*
+        The left rail is the page's banner: the logo on top, the navigation, and the
+        signed-in user with the theme toggle and "Sign out" at the bottom.
+      */}
+      <header className="sidebar">
+        <div className="sidebar-top">
+          <a href="#/" className="brand">
+            <BrandLogo />
+            <span className="brand-name">MongoShield</span>
+          </a>
+          {props.mock ? (
+            <span
+              className="mock-badge"
+              title="Data is generated in the browser; nothing is saved."
+            >
+              Mock data
+            </span>
+          ) : null}
+        </div>
+        <nav className="sidebar-nav" aria-label="Main">
+          {NAV_GROUPS.map((group, groupIndex) => {
+            const items = group.items.filter(
+              (item) => item.role === undefined || hasRole(item.role),
+            );
+            if (items.length === 0) return null;
+            const labelId = `nav-group-${groupIndex}`;
+            return (
+              <div key={group.label ?? groupIndex} className="nav-group">
+                {group.label === undefined ? null : (
+                  <p className="nav-group-label" id={labelId}>
+                    {group.label}
+                  </p>
+                )}
+                <ul aria-labelledby={group.label === undefined ? undefined : labelId}>
+                  {items.map((item) => (
+                    <li key={item.section}>
+                      <a
+                        href={item.href}
+                        className="nav-link"
+                        data-section={item.section}
+                        aria-current={resolved?.route.section === item.section ? "page" : undefined}
+                      >
+                        <span className="nav-icon">
+                          <Icon name={item.icon} />
+                        </span>
+                        {item.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+        </nav>
+        <div className="sidebar-footer">
+          <div className="user-chip" title={`Signed in as ${user?.username} (${user?.role})`}>
+            <span className="avatar" aria-hidden="true">
+              {(user?.username ?? "?").slice(0, 1).toUpperCase()}
+            </span>
+            <span className="user-chip-text">
+              <span className="visually-hidden">Signed in as </span>
+              <span className="user-chip-name">{user?.username}</span>
+              <span className="user-chip-role">{user?.role}</span>
+            </span>
+          </div>
+          <div className="sidebar-footer-actions">
+            <button
+              type="button"
+              className="sidebar-action sidebar-action-theme"
+              onClick={toggleTheme}
+              aria-label={`Theme: ${theme}. Change theme`}
+              title="Change theme"
+            >
+              <Icon name={THEME_ICONS[theme]} />
+              {/* The full text stays "Theme: <choice>"; only the choice is shown. */}
+              <span className="visually-hidden">Theme: </span>
+              <span className="sidebar-action-label">{theme}</span>
+            </button>
+            <button
+              type="button"
+              className="sidebar-action"
+              onClick={() => void logout()}
+              title="Sign out"
+            >
+              <Icon name="logout" />
+              <span className="sidebar-action-label">Sign out</span>
+            </button>
+          </div>
         </div>
       </header>
-      <nav className="sidebar" aria-label="Main">
-        <ul>
-          {NAV_ITEMS.filter((item) => item.role === undefined || hasRole(item.role)).map((item) => (
-            <li key={item.section}>
-              <a
-                href={item.href}
-                className="nav-link"
-                aria-current={resolved?.route.section === item.section ? "page" : undefined}
-              >
-                {item.label}
-              </a>
-            </li>
-          ))}
-        </ul>
-      </nav>
       <main id="main" className="main" tabIndex={-1}>
         {page}
       </main>

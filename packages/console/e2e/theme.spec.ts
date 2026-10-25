@@ -30,42 +30,46 @@ async function dataTheme(page: Page): Promise<string | undefined> {
   return await page.evaluate(() => document.documentElement.dataset.theme);
 }
 
-test("the theme toggle cycles system, light and dark, and remembers the choice", async ({
+test("the console is dark by default; the toggle cycles light and system and remembers the choice", async ({
   page,
 }) => {
-  await page.emulateMedia({ colorScheme: "dark" });
+  // A light OS: the default is still dark.
+  await page.emulateMedia({ colorScheme: "light" });
   await signIn(page, ADMIN);
   const toggle = page.getByRole("button", { name: /^Theme: / });
 
-  await expect(toggle).toHaveText("Theme: system");
-  expect(await dataTheme(page)).toBeUndefined();
-  expect(await backgroundIsDark(page), "system theme follows a dark OS").toBe(true);
+  await expect(toggle).toHaveText("Theme: dark");
+  expect(await dataTheme(page)).toBe("dark");
+  expect(await backgroundIsDark(page), "dark by default, even with a light OS").toBe(true);
 
   await toggle.click();
   await expect(toggle).toHaveText("Theme: light");
   await expect(toggle).toHaveAccessibleName("Theme: light. Change theme");
   expect(await dataTheme(page)).toBe("light");
-  expect(await backgroundIsDark(page), "light wins over a dark OS").toBe(false);
+  expect(await backgroundIsDark(page)).toBe(false);
 
-  await toggle.click();
-  await expect(toggle).toHaveText("Theme: dark");
-  expect(await backgroundIsDark(page)).toBe(true);
-
-  // Pinned: still dark after a reload with a light OS, and on the login page.
-  await page.emulateMedia({ colorScheme: "light" });
+  // Pinned: still light after a reload with a dark OS, and on the login page.
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.reload();
-  await expect(toggle).toHaveText("Theme: dark");
-  expect(await backgroundIsDark(page)).toBe(true);
+  await expect(toggle).toHaveText("Theme: light");
+  expect(await backgroundIsDark(page), "light wins over a dark OS").toBe(false);
   await signOut(page);
-  expect(await dataTheme(page)).toBe("dark");
-  expect(await backgroundIsDark(page)).toBe(true);
+  expect(await dataTheme(page)).toBe("light");
+  expect(await backgroundIsDark(page)).toBe(false);
 
-  // Back to following the system, which is light now.
+  // Following the system: dark now, light once the OS is light.
   await signIn(page, ADMIN);
   await toggle.click();
   await expect(toggle).toHaveText("Theme: system");
-  expect(await dataTheme(page)).toBeUndefined();
-  expect(await backgroundIsDark(page)).toBe(false);
+  expect(await dataTheme(page)).toBe("system");
+  expect(await backgroundIsDark(page), "system follows a dark OS").toBe(true);
+  await page.emulateMedia({ colorScheme: "light" });
+  expect(await backgroundIsDark(page), "system follows a light OS").toBe(false);
+
+  // Back to the default for the other specs.
+  await toggle.click();
+  await expect(toggle).toHaveText("Theme: dark");
+  expect(await backgroundIsDark(page)).toBe(true);
 });
 
 test("the data browser's tree, query bar, table and panels follow the theme", async ({ page }) => {
@@ -89,8 +93,8 @@ test("the data browser's tree, query bar, table and panels follow the theme", as
   ]) {
     expect(await surfaceIsDark(page, selector), selector).toBe(false);
   }
-  // Back to following the system for the other specs.
+  // Back to the dark default for the other specs.
   await toggle.click();
   await toggle.click();
-  await expect(toggle).toHaveText("Theme: system");
+  await expect(toggle).toHaveText("Theme: dark");
 });

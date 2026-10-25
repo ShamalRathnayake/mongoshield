@@ -116,7 +116,9 @@ export function ErrorNotice(props: { error: unknown; onRetry?: () => void; title
   return (
     <div className="notice notice-danger" role="alert">
       <p className="notice-title">
-        <span aria-hidden="true">✕ </span>
+        <span className="notice-icon" aria-hidden="true">
+          ✕{" "}
+        </span>
         {props.title ?? "Something went wrong"}
       </p>
       <p>{describeError(props.error)}</p>
@@ -147,7 +149,9 @@ export function Notice(props: {
     >
       {props.title === undefined ? null : (
         <p className="notice-title">
-          <span aria-hidden="true">{symbol} </span>
+          <span className="notice-icon" aria-hidden="true">
+            {symbol}{" "}
+          </span>
           {props.title}
         </p>
       )}
