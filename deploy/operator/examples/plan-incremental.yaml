@@ -1,0 +1,22 @@
+# Full weekly, incremental hourly, on a PersistentVolumeClaim.
+# Incrementals need a replica set or sharded cluster (MongoDB 6.0+).
+apiVersion: mongoshield.io/v1alpha1
+kind: MongoShieldBackupPlan
+metadata:
+  name: hourly
+spec:
+  source:
+    uriSecretRef:
+      name: prod-mongodb
+  storage:
+    url: /backups
+    persistentVolumeClaim:
+      claimName: mongodb-backups
+  schedule:
+    cron: "0 * * * *"
+  incremental:
+    fullEveryDays: 7
+  retention:
+    daily: 14
+  history:
+    successfulLimit: 24

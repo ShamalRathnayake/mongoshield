@@ -1,0 +1,121 @@
+# A complete local setup: an app writing to MongoDB, MinIO as S3-compatible storage,
+# and the MongoShield scheduler backing up every 10 minutes.
+#
+#   cp .env.example .env        # optional: add your age public key to encrypt backups
+#   docker compose up -d
+#   docker compose logs -f mongoshield
+#   docker compose run --rm mongoshield list         # any CLI command works the same way
+#
+# Browse the backups in the MinIO console at http://localhost:9001 (minioadmin / minioadmin).
+name: mongoshield-demo
+
+services:
+  # MongoDB as a single-node replica set. A replica set (even of one) enables
+  # consistent snapshot backups and change streams, like any production deployment.
+  mongo:
+    image: mongo:8.0
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    # Doubles as the replica set initialiser: the first check that finds no replica
+    # set configured creates it. Later checks just confirm it is up.
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status().ok } catch (error) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }).ok }"
+      interval: 5s
+      timeout: 10s
+      start_period: 10s
+      retries: 10
+
+  # Stand-in for your application: inserts an order every 5 seconds so there is
+  # something to back up.
+  app:
+    image: mongo:8.0
+    depends_on:
+      mongo:
+        condition: service_healthy
+    entrypoint:
+      - mongosh
+      - mongodb://mongo:27017/shop?replicaSet=rs0
+      - --quiet
+      - --eval
+      - "while (true) { db.orders.insertOne({ createdAt: new Date(), total: Math.round(Math.random() * 10000) / 100 }); sleep(5000); }"
+    restart: unless-stopped
+
+  # S3-compatible object storage. Pin a release tag for anything beyond a demo.
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - minio-data:/data
+
+  # One-off job: create the "backups" bucket, then exit. Retries until MinIO is up.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    # $$ escapes $ for Compose, so the shell (not Compose) expands these variables.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do sleep 1; done
+        mc mb --ignore-existing local/backups
+
+  # The MongoShield scheduler: runs a backup on config.schedule.cron, verifies it,
+  # prunes old backups and sends notifications, until stopped.
+  mongoshield:
+    image: ghcr.io/shamalrathnayake/mongoshield:next
+    # To test local changes instead, build the image from this repository:
+    # build:
+    #   context: ../..
+    #   dockerfile: docker/Dockerfile
+    command: ["schedule"]
+    # A tiny init as PID 1 that forwards signals. `schedule` handles SIGTERM itself,
+    # but one-off commands (`docker compose run --rm mongoshield backup`) need it to
+    # stop promptly on Ctrl-C / `docker compose stop`.
+    init: true
+    # `schedule` lets a running backup finish on shutdown before exiting; give it time.
+    stop_grace_period: 2m
+    depends_on:
+      mongo:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/?replicaSet=rs0
+      # MinIO credentials, read by the AWS SDK. Use a dedicated MinIO user in real setups.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # Encrypt for this public key (from `mongoshield keygen`). Empty = unencrypted.
+      MONGOSHIELD_RECIPIENTS: ${BACKUP_PUBLIC_KEY:-}
+      # Set to /backups in .env to use the local volume below instead of MinIO.
+      # Environment variables override the config file; empty means "not set".
+      MONGOSHIELD_STORAGE: ${MONGOSHIELD_STORAGE:-}
+    volumes:
+      # The image's working directory is /app, where the CLI looks for its config.
+      - ./mongoshield.config.json:/app/mongoshield.config.json:ro
+      # Local backups (used when MONGOSHIELD_STORAGE=/backups). The image prepares
+      # /backups for its non-root user, so the volume is writable as-is.
+      - backups:/backups
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  minio-data:
+  backups:

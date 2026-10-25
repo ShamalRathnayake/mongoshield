@@ -1,0 +1,15 @@
+/*
+ * The recovery key (recovery-key.tsx), shown after a download: wrapping instead of
+ * overflowing the dialog, selectable in one click. Design tokens only, so both themes
+ * apply.
+ */
+.recovery-key {
+  display: block;
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-small);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

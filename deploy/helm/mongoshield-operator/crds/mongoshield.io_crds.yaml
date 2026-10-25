@@ -1,0 +1,1529 @@
+# MongoShield CustomResourceDefinitions (mongoshield.io/v1alpha1).
+# GENERATED from packages/operator/src/api/crds.ts: do not edit by hand.
+# Regenerate with: pnpm --filter @mongoshield/operator crds
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mongoshieldbackupplans.mongoshield.io
+  labels:
+    app.kubernetes.io/part-of: mongoshield
+spec:
+  group: mongoshield.io
+  names:
+    kind: MongoShieldBackupPlan
+    listKind: MongoShieldBackupPlanList
+    plural: mongoshieldbackupplans
+    singular: mongoshieldbackupplan
+    shortNames:
+      - msplan
+    categories:
+      - mongoshield
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Schedule
+          type: string
+          jsonPath: .spec.schedule.cron
+        - name: Suspended
+          type: boolean
+          jsonPath: .spec.schedule.suspend
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Last Success
+          type: date
+          jsonPath: .status.lastSuccessfulBackup.completionTime
+        - name: Last Backup
+          type: string
+          jsonPath: .status.lastSuccessfulBackup.backupId
+          priority: 1
+        - name: Next
+          type: date
+          jsonPath: .status.nextScheduleTime
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: 'A MongoShield backup plan: source, storage, encryption, schedule and retention.'
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: What to back up, where to, how, and when.
+              properties:
+                source:
+                  type: object
+                  description: The deployment to back up.
+                  properties:
+                    uriSecretRef:
+                      type: object
+                      description: Secret key holding the MongoDB connection string. Use a user with the backup role.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Name of the Secret (same namespace).
+                          minLength: 1
+                        key:
+                          type: string
+                          maxLength: 253
+                          description: Key in the Secret. Defaults to MONGODB_URI.
+                      required:
+                        - name
+                  required:
+                    - uriSecretRef
+                storage:
+                  type: object
+                  description: Where backups are stored.
+                  properties:
+                    url:
+                      type: string
+                      maxLength: 1024
+                      description: Storage URL (s3://bucket/prefix?region=…, gs://…, az://…, sftp://…) or an absolute path on a mounted volume.
+                      minLength: 1
+                      pattern: ^([a-z][a-z0-9+.-]*://.+|/.*)$
+                    credentialsSecretRef:
+                      type: object
+                      description: Secret whose keys become environment variables (AWS_ACCESS_KEY_ID, …). Not needed with workload identity.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Object name (same namespace).
+                          minLength: 1
+                      required:
+                        - name
+                    persistentVolumeClaim:
+                      type: object
+                      description: A PersistentVolumeClaim to mount for path storage.
+                      properties:
+                        claimName:
+                          type: string
+                          maxLength: 253
+                          description: Name of the claim (same namespace).
+                          minLength: 1
+                        mountPath:
+                          type: string
+                          maxLength: 1024
+                          description: Where to mount it. Defaults to /backups.
+                          pattern: ^/.*
+                      required:
+                        - claimName
+                  required:
+                    - url
+                encryption:
+                  type: object
+                  description: Encryption of new backups (age format). Omit to store backups unencrypted.
+                  properties:
+                    recipients:
+                      type: array
+                      description: Public age keys (age1…) to encrypt for. Not secret.
+                      maxItems: 32
+                      items:
+                        type: string
+                        maxLength: 1024
+                    kms:
+                      type: array
+                      description: Cloud KMS keys that wrap each backup's data key.
+                      maxItems: 8
+                      items:
+                        type: object
+                        description: One KMS key.
+                        properties:
+                          provider:
+                            type: string
+                            enum:
+                              - aws
+                              - gcp
+                              - azure
+                            description: Key provider.
+                          key:
+                            type: string
+                            maxLength: 1024
+                            description: Key ARN/alias, GCP key resource name or Azure Key Vault key URL.
+                            minLength: 1
+                        required:
+                          - provider
+                          - key
+                    passphraseSecretRef:
+                      type: object
+                      description: Secret key holding a passphrase, instead of recipients.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Name of the Secret (same namespace).
+                          minLength: 1
+                        key:
+                          type: string
+                          maxLength: 253
+                          description: Key in the Secret. Defaults to MONGOSHIELD_PASSPHRASE.
+                      required:
+                        - name
+                    identitySecretRef:
+                      type: object
+                      description: Secret key holding an age identity, for deep verification and restores. Leave it out of the cluster when you can.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Name of the Secret (same namespace).
+                          minLength: 1
+                        key:
+                          type: string
+                          maxLength: 253
+                          description: Key in the Secret. Defaults to identity.txt.
+                      required:
+                        - name
+                  x-kubernetes-validations:
+                    - rule: '!(has(self.passphraseSecretRef) && (has(self.recipients) || has(self.kms)))'
+                      message: a passphrase cannot be combined with recipients or kms (age format rule)
+                schedule:
+                  type: object
+                  description: When to run. Without a schedule the plan only runs manual MongoShieldBackups.
+                  properties:
+                    cron:
+                      type: string
+                      maxLength: 256
+                      description: Standard 5-field cron expression, e.g. '15 3 * * *'.
+                      minLength: 1
+                    timeZone:
+                      type: string
+                      maxLength: 64
+                      description: IANA time zone for cron. Defaults to Etc/UTC.
+                    suspend:
+                      type: boolean
+                      description: Pause scheduled runs without deleting the plan.
+                    startingDeadlineSeconds:
+                      type: integer
+                      format: int64
+                      description: Still start a missed run up to this many seconds late. Defaults to 3600.
+                      minimum: 0
+                  required:
+                    - cron
+                backup:
+                  type: object
+                  description: What each backup contains and how it is read.
+                  properties:
+                    include:
+                      type: array
+                      description: 'Namespace patterns to back up, e.g. app.* (default: everything).'
+                      maxItems: 100
+                      items:
+                        type: string
+                        maxLength: 1024
+                    exclude:
+                      type: array
+                      description: Namespace patterns to leave out, e.g. *.sessions.
+                      maxItems: 100
+                      items:
+                        type: string
+                        maxLength: 1024
+                    consistency:
+                      type: string
+                      enum:
+                        - auto
+                        - none
+                        - snapshot
+                        - converge
+                      description: Point-in-time consistency across collections. Defaults to auto.
+                    compression:
+                      type: string
+                      enum:
+                        - zstd
+                        - gzip
+                        - none
+                      description: Compression. Defaults to zstd.
+                    parallelism:
+                      type: integer
+                      format: int64
+                      description: Collections (and parts) backed up at the same time.
+                      minimum: 1
+                      maximum: 64
+                    readPreference:
+                      type: string
+                      enum:
+                        - primary
+                        - primaryPreferred
+                        - secondary
+                        - secondaryPreferred
+                        - nearest
+                      description: Which members to read from. Defaults to secondaryPreferred.
+                    labels:
+                      type: object
+                      description: Labels stored in each backup's manifest.
+                      maxProperties: 64
+                      additionalProperties:
+                        type: string
+                        maxLength: 1024
+                    retainDays:
+                      type: integer
+                      format: int64
+                      description: Make backups write-once for this many days (object lock).
+                      minimum: 1
+                      maximum: 36500
+                    usersAndRoles:
+                      type: boolean
+                      description: Also back up users and custom roles (encrypt such backups).
+                incremental:
+                  type: object
+                  description: 'Incremental backups: each run stores only the changes since the previous backup; a full backup starts a new chain when due. Full weekly, incremental hourly = an hourly cron with fullEveryDays 7. Needs a replica set or sharded cluster (MongoDB 6.0+).'
+                  properties:
+                    fullEveryDays:
+                      type: number
+                      description: Start a new chain once its full backup is this many days old. Defaults to 7.
+                      minimum: 0.001
+                      maximum: 366
+                    maxChainLength:
+                      type: integer
+                      format: int64
+                      description: Start a new chain once it holds this many incrementals.
+                      minimum: 1
+                      maximum: 100000
+                retention:
+                  type: object
+                  description: Which backups to keep in storage; applied after each successful scheduled run.
+                  properties:
+                    last:
+                      type: integer
+                      format: int64
+                      description: Keep the N newest backups.
+                      minimum: 1
+                    hourly:
+                      type: integer
+                      format: int64
+                      description: Keep the newest backup of each of the last N hours.
+                      minimum: 1
+                    daily:
+                      type: integer
+                      format: int64
+                      description: …of each of the last N days.
+                      minimum: 1
+                    weekly:
+                      type: integer
+                      format: int64
+                      description: …of each of the last N weeks.
+                      minimum: 1
+                    monthly:
+                      type: integer
+                      format: int64
+                      description: …of each of the last N months.
+                      minimum: 1
+                    yearly:
+                      type: integer
+                      format: int64
+                      description: …of each of the last N years.
+                      minimum: 1
+                    minVerified:
+                      type: integer
+                      format: int64
+                      description: Never prune below this many verified backups.
+                      minimum: 0
+                verify:
+                  type: string
+                  enum:
+                    - none
+                    - fast
+                    - deep
+                    - drill
+                  description: How each new backup is checked. Defaults to fast. drill restores it into spec.drill's scratch deployment and checks it.
+                drill:
+                  type: object
+                  description: 'The scratch deployment for verify: drill. Its connection string stays in the Secret (MONGOSHIELD_DRILL_URI in the pod), never in the ConfigMap.'
+                  properties:
+                    targetUriSecretRef:
+                      type: object
+                      description: Secret key holding the scratch deployment's connection string. Never the source.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Name of the Secret (same namespace).
+                          minLength: 1
+                        key:
+                          type: string
+                          maxLength: 253
+                          description: Key in the Secret. Defaults to MONGODB_URI.
+                      required:
+                        - name
+                    sample:
+                      type: integer
+                      format: int64
+                      description: Documents per collection compared byte for byte. Defaults to 0.
+                      minimum: 0
+                      maximum: 10000
+                    prefix:
+                      type: string
+                      maxLength: 32
+                      description: Prefix of the temporary database names. Defaults to msdrill_.
+                      minLength: 1
+                  required:
+                    - targetUriSecretRef
+                retries:
+                  type: integer
+                  format: int64
+                  description: Retries inside a run, with backoff. Defaults to 2.
+                  minimum: 0
+                  maximum: 10
+                lock:
+                  type: string
+                  enum:
+                    - storage
+                    - mongo
+                    - none
+                  description: Lock that keeps runs from overlapping. Defaults to storage.
+                extraConfig:
+                  type: object
+                  description: 'More mongoshield.config.json settings (notify, heartbeat, guard, replicate…), merged under the generated config. Stored in a ConfigMap: no secrets.'
+                  x-kubernetes-preserve-unknown-fields: true
+                history:
+                  type: object
+                  description: How many finished MongoShieldBackup objects of scheduled runs to keep.
+                  properties:
+                    successfulLimit:
+                      type: integer
+                      format: int64
+                      description: Defaults to 10.
+                      minimum: 0
+                      maximum: 1000
+                    failedLimit:
+                      type: integer
+                      format: int64
+                      description: Defaults to 5.
+                      minimum: 0
+                      maximum: 1000
+                job:
+                  type: object
+                  description: Settings for the pods that run mongoshield.
+                  properties:
+                    image:
+                      type: string
+                      maxLength: 1024
+                      description: MongoShield image. Defaults to the image configured on the operator.
+                    imagePullPolicy:
+                      type: string
+                      enum:
+                        - Always
+                        - IfNotPresent
+                        - Never
+                      description: Image pull policy.
+                    imagePullSecrets:
+                      type: array
+                      description: Secrets for pulling the image from a private registry.
+                      maxItems: 16
+                      items:
+                        type: object
+                        description: A docker-registry Secret.
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                            description: Object name (same namespace).
+                            minLength: 1
+                        required:
+                          - name
+                    serviceAccountName:
+                      type: string
+                      maxLength: 253
+                      description: ServiceAccount of the pods, e.g. one annotated for IRSA or Workload Identity.
+                    resources:
+                      type: object
+                      description: CPU and memory requests and limits.
+                      properties:
+                        limits:
+                          type: object
+                          additionalProperties:
+                            x-kubernetes-int-or-string: true
+                        requests:
+                          type: object
+                          additionalProperties:
+                            x-kubernetes-int-or-string: true
+                    nodeSelector:
+                      type: object
+                      description: Node labels the pods must run on.
+                      maxProperties: 64
+                      additionalProperties:
+                        type: string
+                        maxLength: 1024
+                    tolerations:
+                      type: array
+                      description: Pod tolerations (core/v1 Toleration).
+                      maxItems: 100
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    affinity:
+                      type: object
+                      description: Pod affinity (core/v1 Affinity).
+                      x-kubernetes-preserve-unknown-fields: true
+                    podLabels:
+                      type: object
+                      description: Extra labels on the pods.
+                      maxProperties: 64
+                      additionalProperties:
+                        type: string
+                        maxLength: 1024
+                    podAnnotations:
+                      type: object
+                      description: Extra annotations on the pods.
+                      maxProperties: 64
+                      additionalProperties:
+                        type: string
+                        maxLength: 1024
+                    activeDeadlineSeconds:
+                      type: integer
+                      format: int64
+                      description: Kill a run after this many seconds. Defaults to 21600 (6h).
+                      minimum: 1
+                    backoffLimit:
+                      type: integer
+                      format: int64
+                      description: 'Pod retries at the Kubernetes level. Defaults to 0: MongoShield retries inside a run.'
+                      minimum: 0
+                      maximum: 10
+                    ttlSecondsAfterFinished:
+                      type: integer
+                      format: int64
+                      description: Delete finished Jobs after this many seconds. Defaults to 86400 (1 day).
+                      minimum: 0
+                    env:
+                      type: array
+                      description: Extra environment variables (core/v1 EnvVar).
+                      maxItems: 100
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    envFrom:
+                      type: array
+                      description: Extra environment from Secrets/ConfigMaps (core/v1 EnvFromSource).
+                      maxItems: 100
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+              required:
+                - source
+                - storage
+              x-kubernetes-validations:
+                - rule: '!has(self.verify) || self.verify != ''drill'' || has(self.drill)'
+                  message: 'verify: drill needs spec.drill.targetUriSecretRef (a scratch deployment)'
+            status:
+              type: object
+              description: Observed state of the plan.
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: The metadata.generation this status describes.
+                conditions:
+                  type: array
+                  description: Conditions per the Kubernetes API conventions; the authoritative state.
+                  maxItems: 16
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - type
+                  items:
+                    type: object
+                    description: One aspect of the object's state.
+                    properties:
+                      type:
+                        type: string
+                        maxLength: 316
+                        description: Condition type, e.g. Ready or Complete.
+                      status:
+                        type: string
+                        enum:
+                          - 'True'
+                          - 'False'
+                          - Unknown
+                        description: True, False or Unknown.
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        description: The metadata.generation this condition was computed for.
+                      lastTransitionTime:
+                        type: string
+                        maxLength: 1024
+                        description: When status last changed.
+                        format: date-time
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        description: Machine-readable CamelCase reason.
+                      message:
+                        type: string
+                        maxLength: 32768
+                        description: Human-readable details.
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                      - reason
+                      - message
+                cronJobName:
+                  type: string
+                  maxLength: 253
+                  description: The CronJob running the schedule.
+                configMapName:
+                  type: string
+                  maxLength: 253
+                  description: The ConfigMap with the generated config.
+                lastScheduleTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the CronJob last started a run.
+                  format: date-time
+                nextScheduleTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the next run is due.
+                  format: date-time
+                lastBackup:
+                  type: object
+                  description: The newest finished run.
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      description: The MongoShieldBackup object.
+                    backupId:
+                      type: string
+                      maxLength: 1024
+                      description: Backup id in storage.
+                    phase:
+                      type: string
+                      maxLength: 1024
+                      description: Phase of that run.
+                    completionTime:
+                      type: string
+                      maxLength: 1024
+                      description: When it finished.
+                      format: date-time
+                    bytesStored:
+                      type: integer
+                      format: int64
+                      description: Bytes stored.
+                lastSuccessfulBackup:
+                  type: object
+                  description: The newest successful run.
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      description: The MongoShieldBackup object.
+                    backupId:
+                      type: string
+                      maxLength: 1024
+                      description: Backup id in storage.
+                    phase:
+                      type: string
+                      maxLength: 1024
+                      description: Phase of that run.
+                    completionTime:
+                      type: string
+                      maxLength: 1024
+                      description: When it finished.
+                      format: date-time
+                    bytesStored:
+                      type: integer
+                      format: int64
+                      description: Bytes stored.
+                activeBackups:
+                  type: integer
+                  format: int64
+                  description: Runs in progress.
+          required:
+            - spec
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mongoshieldbackups.mongoshield.io
+  labels:
+    app.kubernetes.io/part-of: mongoshield
+spec:
+  group: mongoshield.io
+  names:
+    kind: MongoShieldBackup
+    listKind: MongoShieldBackupList
+    plural: mongoshieldbackups
+    singular: mongoshieldbackup
+    shortNames:
+      - msbackup
+    categories:
+      - mongoshield
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Plan
+          type: string
+          jsonPath: .spec.planRef.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Backup ID
+          type: string
+          jsonPath: .status.backupId
+        - name: Stored
+          type: integer
+          jsonPath: .status.bytesStored
+          format: int64
+        - name: Verified
+          type: boolean
+          jsonPath: .status.verification.ok
+        - name: Kind
+          type: string
+          jsonPath: .status.kind
+          priority: 1
+        - name: Deletion
+          type: string
+          jsonPath: .spec.deletionPolicy
+          priority: 1
+        - name: Duration (ms)
+          type: integer
+          jsonPath: .status.durationMs
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: One MongoShield backup run; its status mirrors the backup's manifest.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: One backup run. Create one for an on-demand backup; the operator creates one per scheduled run.
+              properties:
+                planRef:
+                  type: object
+                  description: The MongoShieldBackupPlan whose settings this run uses.
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      description: Object name (same namespace).
+                      minLength: 1
+                  required:
+                    - name
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: 'planRef is immutable: create a new MongoShieldBackup'
+                verify:
+                  type: string
+                  enum:
+                    - none
+                    - fast
+                    - deep
+                    - drill
+                  description: Overrides the plan's verify for this run (drill needs the plan's spec.drill).
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: verify is immutable
+                prune:
+                  type: boolean
+                  description: Apply the plan's retention after this run. Defaults to false.
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: prune is immutable
+                deletionPolicy:
+                  type: string
+                  enum:
+                    - Retain
+                    - Delete
+                  description: 'Retain (default): deleting this object leaves the backup in storage. Delete: the operator deletes the backup from storage first (mongoshield delete; held, write-once and depended-on backups are refused). May be changed later.'
+                  default: Retain
+              required:
+                - planRef
+            status:
+              type: object
+              description: Result of the run, mirrored from MongoShield's run report.
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: The metadata.generation this status describes.
+                conditions:
+                  type: array
+                  description: Conditions per the Kubernetes API conventions; the authoritative state.
+                  maxItems: 16
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - type
+                  items:
+                    type: object
+                    description: One aspect of the object's state.
+                    properties:
+                      type:
+                        type: string
+                        maxLength: 316
+                        description: Condition type, e.g. Ready or Complete.
+                      status:
+                        type: string
+                        enum:
+                          - 'True'
+                          - 'False'
+                          - Unknown
+                        description: True, False or Unknown.
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        description: The metadata.generation this condition was computed for.
+                      lastTransitionTime:
+                        type: string
+                        maxLength: 1024
+                        description: When status last changed.
+                        format: date-time
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        description: Machine-readable CamelCase reason.
+                      message:
+                        type: string
+                        maxLength: 32768
+                        description: Human-readable details.
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                      - reason
+                      - message
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Checkpointed
+                    - Skipped
+                    - Failed
+                  description: Pending, Running, Succeeded, Checkpointed, Skipped or Failed.
+                jobName:
+                  type: string
+                  maxLength: 253
+                  description: The Job running this backup.
+                startTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the run started.
+                  format: date-time
+                completionTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the run finished.
+                  format: date-time
+                backupId:
+                  type: string
+                  maxLength: 1024
+                  description: Backup id in storage; use it to restore.
+                runId:
+                  type: string
+                  maxLength: 1024
+                  description: MongoShield run id, for matching logs and notifications.
+                storage:
+                  type: string
+                  maxLength: 1024
+                  description: Where the backup was stored (without secrets).
+                durationMs:
+                  type: integer
+                  format: int64
+                  description: How long the backup took, in milliseconds.
+                namespaces:
+                  type: integer
+                  format: int64
+                  description: Collections backed up.
+                documents:
+                  type: integer
+                  format: int64
+                  description: Documents backed up.
+                bytesRaw:
+                  type: integer
+                  format: int64
+                  description: Uncompressed BSON bytes.
+                bytesStored:
+                  type: integer
+                  format: int64
+                  description: Bytes written to storage.
+                kind:
+                  type: string
+                  enum:
+                    - full
+                    - incremental
+                  description: full or incremental.
+                parentBackupId:
+                  type: string
+                  maxLength: 1024
+                  description: 'Incremental backups: the backup this one continues.'
+                changes:
+                  type: integer
+                  format: int64
+                  description: 'Incremental backups: change events recorded.'
+                fullBackupReason:
+                  type: string
+                  maxLength: 1024
+                  description: Why a plan with incrementals took a full backup this time.
+                verification:
+                  type: object
+                  description: How the backup was verified.
+                  properties:
+                    mode:
+                      type: string
+                      maxLength: 1024
+                      description: none, fast or deep.
+                    ok:
+                      type: boolean
+                      description: True when no problems were found.
+                    problemCount:
+                      type: integer
+                      format: int64
+                      description: Problems found.
+                    problems:
+                      type: array
+                      description: The first few problems.
+                      maxItems: 20
+                      items:
+                        type: string
+                        maxLength: 1024
+                    rtoMs:
+                      type: integer
+                      format: int64
+                      description: 'Drills (verify: drill): the measured restore time in milliseconds.'
+                prune:
+                  type: object
+                  description: Retention applied after the run.
+                  properties:
+                    deletedBackups:
+                      type: integer
+                      format: int64
+                      description: Backups deleted.
+                    kept:
+                      type: integer
+                      format: int64
+                      description: Backups kept.
+                error:
+                  type: object
+                  description: 'Why the run failed (no secrets: MongoShield scrubs them).'
+                  properties:
+                    code:
+                      type: string
+                      maxLength: 1024
+                      description: MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md).
+                    message:
+                      type: string
+                      maxLength: 32768
+                      description: What went wrong.
+                    hint:
+                      type: string
+                      maxLength: 32768
+                      description: How to fix it, when known.
+                    step:
+                      type: string
+                      maxLength: 1024
+                      description: 'The step that failed: setup, lock, backup, verify, replicate or prune.'
+                    exitCode:
+                      type: integer
+                      format: int64
+                      description: The container's exit code.
+          required:
+            - spec
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mongoshieldrestores.mongoshield.io
+  labels:
+    app.kubernetes.io/part-of: mongoshield
+spec:
+  group: mongoshield.io
+  names:
+    kind: MongoShieldRestore
+    listKind: MongoShieldRestoreList
+    plural: mongoshieldrestores
+    singular: mongoshieldrestore
+    shortNames:
+      - msrestore
+    categories:
+      - mongoshield
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Plan
+          type: string
+          jsonPath: .spec.planRef.name
+        - name: Backup ID
+          type: string
+          jsonPath: .status.backupId
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Dry Run
+          type: boolean
+          jsonPath: .spec.dryRun
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Documents
+          type: integer
+          jsonPath: .status.documentsRestored
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: One MongoShield restore of a backup into a deployment.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: One restore of a backup into a deployment.
+              properties:
+                planRef:
+                  type: object
+                  description: The MongoShieldBackupPlan whose storage (and key) holds the backup.
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      description: Object name (same namespace).
+                      minLength: 1
+                  required:
+                    - name
+                backup:
+                  type: object
+                  description: Which backup. Defaults to the latest one in the plan's storage.
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      description: A MongoShieldBackup object; its backupId is restored.
+                    id:
+                      type: string
+                      maxLength: 256
+                      description: A backup id, or 'latest'.
+                  x-kubernetes-validations:
+                    - rule: '!(has(self.name) && has(self.id))'
+                      message: set backup.name or backup.id
+                target:
+                  type: object
+                  description: 'Where to restore to. Required on purpose: there is no default target.'
+                  properties:
+                    uriSecretRef:
+                      type: object
+                      description: Secret key holding the target's connection string.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Name of the Secret (same namespace).
+                          minLength: 1
+                        key:
+                          type: string
+                          maxLength: 253
+                          description: Key in the Secret. Defaults to MONGODB_URI.
+                      required:
+                        - name
+                  required:
+                    - uriSecretRef
+                include:
+                  type: array
+                  description: 'Namespace patterns to restore (default: everything in the backup).'
+                  maxItems: 100
+                  items:
+                    type: string
+                    maxLength: 1024
+                exclude:
+                  type: array
+                  description: Namespace patterns to leave out.
+                  maxItems: 100
+                  items:
+                    type: string
+                    maxLength: 1024
+                rename:
+                  type: array
+                  description: Restore under other names, e.g. from app.* to app_restored.*.
+                  maxItems: 100
+                  items:
+                    type: object
+                    description: One rename rule.
+                    properties:
+                      from:
+                        type: string
+                        maxLength: 256
+                        description: Source namespace pattern.
+                        minLength: 1
+                      to:
+                        type: string
+                        maxLength: 256
+                        description: Target namespace pattern.
+                        minLength: 1
+                    required:
+                      - from
+                      - to
+                mode:
+                  type: string
+                  enum:
+                    - fail-if-exists
+                    - drop
+                    - insert
+                    - upsert
+                  description: What to do with existing target collections. Defaults to fail-if-exists.
+                dryRun:
+                  type: boolean
+                  description: Only plan the restore; write nothing.
+                confirm:
+                  type: string
+                  maxLength: 253
+                  description: 'For drop, insert and upsert: must equal target.uriSecretRef.name, to confirm the overwrite.'
+                at:
+                  type: string
+                  maxLength: 64
+                  description: 'Point-in-time recovery: ISO date or cluster time (t:i). Needs the change journal.'
+                skipIndexes:
+                  type: boolean
+                  description: Do not create indexes (faster, for throwaway targets).
+                usersAndRoles:
+                  type: string
+                  enum:
+                    - skip
+                    - create
+                    - replace
+                  description: Restore the backup's users and roles.
+              required:
+                - planRef
+                - target
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: 'spec is immutable: create a new MongoShieldRestore'
+                - rule: '!has(self.mode) || self.mode == ''fail-if-exists'' || (has(self.dryRun) && self.dryRun) || (has(self.confirm) && self.confirm == self.target.uriSecretRef.name)'
+                  message: 'mode drop, insert and upsert can overwrite data: set confirm to the target Secret''s name (target.uriSecretRef.name)'
+            status:
+              type: object
+              description: Result of the restore.
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: The metadata.generation this status describes.
+                conditions:
+                  type: array
+                  description: Conditions per the Kubernetes API conventions; the authoritative state.
+                  maxItems: 16
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - type
+                  items:
+                    type: object
+                    description: One aspect of the object's state.
+                    properties:
+                      type:
+                        type: string
+                        maxLength: 316
+                        description: Condition type, e.g. Ready or Complete.
+                      status:
+                        type: string
+                        enum:
+                          - 'True'
+                          - 'False'
+                          - Unknown
+                        description: True, False or Unknown.
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        description: The metadata.generation this condition was computed for.
+                      lastTransitionTime:
+                        type: string
+                        maxLength: 1024
+                        description: When status last changed.
+                        format: date-time
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        description: Machine-readable CamelCase reason.
+                      message:
+                        type: string
+                        maxLength: 32768
+                        description: Human-readable details.
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                      - reason
+                      - message
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                  description: Pending, Running, Succeeded or Failed.
+                jobName:
+                  type: string
+                  maxLength: 253
+                  description: The Job running this restore.
+                backupId:
+                  type: string
+                  maxLength: 1024
+                  description: The backup id restored.
+                startTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the restore started.
+                  format: date-time
+                completionTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the restore finished.
+                  format: date-time
+                durationMs:
+                  type: integer
+                  format: int64
+                  description: How long the restore took, in milliseconds.
+                dryRun:
+                  type: boolean
+                  description: True when nothing was written.
+                documentsRestored:
+                  type: integer
+                  format: int64
+                  description: Documents written.
+                namespaces:
+                  type: integer
+                  format: int64
+                  description: Namespaces in the restore plan.
+                error:
+                  type: object
+                  description: 'Why the run failed (no secrets: MongoShield scrubs them).'
+                  properties:
+                    code:
+                      type: string
+                      maxLength: 1024
+                      description: MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md).
+                    message:
+                      type: string
+                      maxLength: 32768
+                      description: What went wrong.
+                    hint:
+                      type: string
+                      maxLength: 32768
+                      description: How to fix it, when known.
+                    step:
+                      type: string
+                      maxLength: 1024
+                      description: 'The step that failed: setup, lock, backup, verify, replicate or prune.'
+                    exitCode:
+                      type: integer
+                      format: int64
+                      description: The container's exit code.
+          required:
+            - spec
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mongoshielddrills.mongoshield.io
+  labels:
+    app.kubernetes.io/part-of: mongoshield
+spec:
+  group: mongoshield.io
+  names:
+    kind: MongoShieldDrill
+    listKind: MongoShieldDrillList
+    plural: mongoshielddrills
+    singular: mongoshielddrill
+    shortNames:
+      - msdrill
+    categories:
+      - mongoshield
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Plan
+          type: string
+          jsonPath: .spec.planRef.name
+        - name: Backup ID
+          type: string
+          jsonPath: .status.backupId
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: OK
+          type: boolean
+          jsonPath: .status.ok
+        - name: RTO (ms)
+          type: integer
+          jsonPath: .status.rtoMs
+        - name: Problems
+          type: integer
+          jsonPath: .status.problemCount
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: 'One MongoShield restore drill: restore a backup into a scratch deployment, check it, clean up, measure the RTO.'
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: 'One restore drill: restore a backup into temporary databases on a scratch deployment, check counts, indexes and a sample of documents, drop them, and measure the restore time.'
+              properties:
+                planRef:
+                  type: object
+                  description: The MongoShieldBackupPlan whose storage (and key) holds the backup.
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      description: Object name (same namespace).
+                      minLength: 1
+                  required:
+                    - name
+                backup:
+                  type: object
+                  description: Which backup. Defaults to the latest one in the plan's storage.
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      description: A MongoShieldBackup object; its backupId is drilled.
+                    id:
+                      type: string
+                      maxLength: 256
+                      description: A backup id, or 'latest'.
+                  x-kubernetes-validations:
+                    - rule: '!(has(self.name) && has(self.id))'
+                      message: set backup.name or backup.id
+                target:
+                  type: object
+                  description: 'The scratch deployment. Never the backup''s source: MongoShield refuses that.'
+                  properties:
+                    uriSecretRef:
+                      type: object
+                      description: Secret key holding the scratch deployment's connection string.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Name of the Secret (same namespace).
+                          minLength: 1
+                        key:
+                          type: string
+                          maxLength: 253
+                          description: Key in the Secret. Defaults to MONGODB_URI.
+                      required:
+                        - name
+                  required:
+                    - uriSecretRef
+                sample:
+                  type: integer
+                  format: int64
+                  description: Documents per collection compared byte for byte with the backup.
+                  minimum: 0
+                  maximum: 10000
+                prefix:
+                  type: string
+                  maxLength: 32
+                  description: Prefix of the temporary database names. Defaults to msdrill_.
+                  minLength: 1
+                include:
+                  type: array
+                  description: 'Namespace patterns to drill (default: everything in the backup).'
+                  maxItems: 100
+                  items:
+                    type: string
+                    maxLength: 1024
+                exclude:
+                  type: array
+                  description: Namespace patterns to leave out.
+                  maxItems: 100
+                  items:
+                    type: string
+                    maxLength: 1024
+              required:
+                - planRef
+                - target
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: 'spec is immutable: create a new MongoShieldDrill'
+            status:
+              type: object
+              description: Result of the drill, from MongoShield's drill report.
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: The metadata.generation this status describes.
+                conditions:
+                  type: array
+                  description: Conditions per the Kubernetes API conventions; the authoritative state.
+                  maxItems: 16
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - type
+                  items:
+                    type: object
+                    description: One aspect of the object's state.
+                    properties:
+                      type:
+                        type: string
+                        maxLength: 316
+                        description: Condition type, e.g. Ready or Complete.
+                      status:
+                        type: string
+                        enum:
+                          - 'True'
+                          - 'False'
+                          - Unknown
+                        description: True, False or Unknown.
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        description: The metadata.generation this condition was computed for.
+                      lastTransitionTime:
+                        type: string
+                        maxLength: 1024
+                        description: When status last changed.
+                        format: date-time
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        description: Machine-readable CamelCase reason.
+                      message:
+                        type: string
+                        maxLength: 32768
+                        description: Human-readable details.
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                      - reason
+                      - message
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                  description: Pending, Running, Succeeded or Failed.
+                jobName:
+                  type: string
+                  maxLength: 253
+                  description: The Job running this drill.
+                backupId:
+                  type: string
+                  maxLength: 1024
+                  description: The backup id drilled.
+                startTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the drill started.
+                  format: date-time
+                completionTime:
+                  type: string
+                  maxLength: 1024
+                  description: When the drill finished.
+                  format: date-time
+                ok:
+                  type: boolean
+                  description: True when the backup restored and every check passed.
+                rtoMs:
+                  type: integer
+                  format: int64
+                  description: The measured restore time (RTO), in milliseconds.
+                durationMs:
+                  type: integer
+                  format: int64
+                  description: The whole drill, checks and cleanup included.
+                documentsRestored:
+                  type: integer
+                  format: int64
+                  description: Documents restored into the scratch deployment.
+                namespaces:
+                  type: integer
+                  format: int64
+                  description: Namespaces drilled.
+                problemCount:
+                  type: integer
+                  format: int64
+                  description: Problems found.
+                problems:
+                  type: array
+                  description: The first few problems.
+                  maxItems: 20
+                  items:
+                    type: string
+                    maxLength: 1024
+                error:
+                  type: object
+                  description: 'Why the run failed (no secrets: MongoShield scrubs them).'
+                  properties:
+                    code:
+                      type: string
+                      maxLength: 1024
+                      description: MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md).
+                    message:
+                      type: string
+                      maxLength: 32768
+                      description: What went wrong.
+                    hint:
+                      type: string
+                      maxLength: 32768
+                      description: How to fix it, when known.
+                    step:
+                      type: string
+                      maxLength: 1024
+                      description: 'The step that failed: setup, lock, backup, verify, replicate or prune.'
+                    exitCode:
+                      type: integer
+                      format: int64
+                      description: The container's exit code.
+          required:
+            - spec

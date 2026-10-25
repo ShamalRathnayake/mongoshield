@@ -1,0 +1,110 @@
+/*
+ * RadioCards (radio-cards.tsx): a choice drawn as a grid of cards. Colors, radii and
+ * spacing come from the design tokens in ../styles.css, so both themes apply as is.
+ *
+ * This file loads BEFORE styles.css, so rules that must beat a styles.css rule (the
+ * section-title look `.field-group legend` gives every legend inside a field group) use
+ * a more specific selector rather than relying on order.
+ */
+
+/* The group itself has no box of its own: it sits inside a field group or a form. */
+.radio-cards {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/*
+ * The legend reads like a field label, not like the field group's section title.
+ * `.radio-cards > legend.field-label` (0,2,1) outranks `.field-group legend` (0,1,1)
+ * from styles.css, wherever the group sits.
+ */
+.radio-cards > legend.field-label {
+  float: none;
+  width: auto;
+  padding: 0;
+  margin: 0 0 2px;
+  border: none;
+  font-size: var(--text-sm);
+  font-weight: 550;
+  letter-spacing: normal;
+}
+
+/* Cards flow in columns that are at least 220px wide, one per row on a phone. */
+.radio-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+
+/* One option: the radio on the left, the label and explanation next to it. */
+.radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-small);
+  background: var(--color-surface-sunken);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.radio-card:hover {
+  border-color: var(--color-text-muted);
+}
+
+/*
+ * The chosen card: a border and a bar in the section's color (`--hue`), a tint of it on
+ * the raised surface, plus the filled dot, so the choice never depends on color alone.
+ */
+.radio-card:has(.radio-card-input:checked) {
+  border-color: var(--hue);
+  background: color-mix(in srgb, var(--hue) 8%, var(--color-surface-raised));
+  box-shadow:
+    inset 3px 0 0 var(--hue),
+    0 0 0 3px color-mix(in srgb, var(--hue) 16%, transparent);
+}
+
+/* Keyboard focus shows on the whole card, not only on the small radio. */
+.radio-card:has(.radio-card-input:focus-visible) {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* A card that cannot be chosen right now: dimmed, with its reason in the description. */
+.radio-card[data-disabled] {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.radio-card-input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--hue);
+  flex: none;
+}
+
+.radio-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.radio-card-label {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.radio-card-description {
+  font-size: 0.88rem;
+  color: var(--color-text-muted);
+}

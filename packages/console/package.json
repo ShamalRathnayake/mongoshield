@@ -1,0 +1,77 @@
+{
+  "name": "@mongoshield/console",
+  "version": "0.0.0",
+  "description": "Self-hosted web console for MongoShield: connections, scheduled backups, verification, browsing and restoring backups.",
+  "keywords": [
+    "mongodb",
+    "backup",
+    "restore",
+    "console",
+    "dashboard",
+    "self-hosted"
+  ],
+  "license": "MIT",
+  "author": "Shamal Rathnayake",
+  "homepage": "https://github.com/ShamalRathnayake/mongoshield#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShamalRathnayake/mongoshield.git",
+    "directory": "packages/console"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "mongoshield-console": "./dist/server/main.mjs"
+  },
+  "files": [
+    "dist",
+    "!dist/ui/**/*.map"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "pnpm build:ui && pnpm build:server",
+    "build:ui": "vite build",
+    "build:server": "tsdown",
+    "dev": "vite",
+    "dev:server": "node --watch src/server/main.ts",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "check:package": "publint --strict"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "hono": "^4.13.13",
+    "mongodb": "^7.7.0",
+    "mongoshield": "workspace:*"
+  },
+  "devDependencies": {
+    "@fontsource-variable/geist": "5.3.0",
+    "@fontsource-variable/geist-mono": "5.3.0",
+    "@playwright/test": "^1.64.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "@vitest/coverage-v8": "^5.0.5",
+    "jsdom": "^27.4.0",
+    "mongodb-memory-server": "^11.3.0",
+    "publint": "^0.3.25",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsdown": "^0.23.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,0 +1,101 @@
+# MongoShield GitHub Action: run a MongoShield command (backup, run, verify, restore)
+# in a workflow, with no Docker image and nothing installed on the runner beforehand.
+#
+#   - uses: ShamalRathnayake/mongoshield/action@main
+#     id: backup
+#     with:
+#       uri: ${{ secrets.MONGODB_URI }}
+#       storage: s3://acme-backups/prod
+#       recipients: ${{ vars.BACKUP_PUBLIC_KEY }}
+#   - run: echo "Backed up ${{ steps.backup.outputs.backup-id }}"
+#
+# It is a composite action: a few shell steps that run `npx mongoshield@<version>`.
+# The logic lives in run.sh next to this file; see README.md for every input.
+
+name: MongoShield
+description: Back up, verify and restore MongoDB with MongoShield. No mongodump required.
+author: Shamal Rathnayake
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  command:
+    description: "What to run: backup, run (backup + verify + prune + notify, per the config file), verify or restore."
+    required: false
+    default: backup
+  uri:
+    description: MongoDB connection string. Pass a secret; it is masked in the logs. Falls back to MONGODB_URI from the environment or the config file.
+    required: false
+    default: ""
+  storage:
+    description: "Where backups live: s3://bucket/prefix?region=..., or a directory path. Falls back to the config file."
+    required: false
+    default: ""
+  recipients:
+    description: Comma-separated age public keys (age1...) to encrypt new backups for. Public keys are not secret.
+    required: false
+    default: ""
+  identity:
+    description: An age secret key (AGE-SECRET-KEY-1...) for restore and `verify --deep`. Pass a secret; it is masked.
+    required: false
+    default: ""
+  config:
+    description: Path to a mongoshield.config.{ts,js,json} file. Defaults to one in the working directory, if present.
+    required: false
+    default: ""
+  args:
+    description: "Extra arguments, split on whitespace, e.g. `--exclude *.sessions --label trigger=ci`. Values cannot contain spaces."
+    required: false
+    default: ""
+  packages:
+    description: Extra npm packages to install next to mongoshield, space-separated. Cloud SDKs for s3://, gs://, az:// and sftp:// storage are added automatically.
+    required: false
+    default: ""
+  version:
+    description: The mongoshield npm version or dist-tag to run.
+    required: false
+    default: next
+  node-version:
+    description: Node.js version to set up (MongoShield needs 22.12 or newer). Set to "" to use the runner's Node.js.
+    required: false
+    default: "24"
+  working-directory:
+    description: Directory to run in (where the config file and relative storage paths are resolved).
+    required: false
+    default: "."
+
+outputs:
+  backup-id:
+    description: Id of the backup that was created (backup, run), checked (verify) or restored (restore), when the command reports one.
+    value: ${{ steps.mongoshield.outputs.backup-id }}
+  json:
+    description: The command's full `--json` output.
+    value: ${{ steps.mongoshield.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      if: inputs.node-version != ''
+      uses: actions/setup-node@v5 # v5: current major
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # Inputs are passed as environment variables, never pasted into the script text:
+    # `${{ inputs.x }}` inside `run:` would let a crafted value inject shell commands.
+    - name: Run mongoshield ${{ inputs.command }}
+      id: mongoshield
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_URI: ${{ inputs.uri }}
+        INPUT_STORAGE: ${{ inputs.storage }}
+        INPUT_RECIPIENTS: ${{ inputs.recipients }}
+        INPUT_IDENTITY: ${{ inputs.identity }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_PACKAGES: ${{ inputs.packages }}
+        INPUT_VERSION: ${{ inputs.version }}
+      run: bash "${GITHUB_ACTION_PATH}/run.sh"

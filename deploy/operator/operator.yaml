@@ -1,0 +1,318 @@
+# MongoShield operator: plain Kubernetes manifests (namespace mongoshield-system).
+#
+#   kubectl apply --server-side -f deploy/operator/crds.yaml
+#   kubectl apply -f deploy/operator/operator.yaml
+#
+# GENERATED from the Helm chart (deploy/helm/mongoshield-operator) with its default
+# values: do not edit by hand. Regenerate with:
+#   pnpm --filter @mongoshield/operator manifests
+#
+# Before applying, pin the images: replace the operator image tag "next" and the
+# MONGOSHIELD_IMAGE tag "latest" with released versions.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongoshield-system
+  labels:
+    app.kubernetes.io/part-of: mongoshield
+    # The operator pod satisfies the "restricted" Pod Security Standard (so do the
+    # backup and restore Jobs it creates in your namespaces).
+    pod-security.kubernetes.io/enforce: restricted
+---
+# Source: mongoshield-operator/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongoshield-operator
+  namespace: mongoshield-system
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+
+---
+# Source: mongoshield-operator/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mongoshield-operator
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+rules:
+  # Watch the MongoShield kinds; patch adds and removes finalizers.
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackupplans", "mongoshieldrestores", "mongoshielddrills"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Backups also: create one record per scheduled run, delete old records (spec.history).
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackups"]
+    verbs: ["get", "list", "watch", "patch", "create", "delete"]
+  # Results and conditions are written through the status subresource only.
+  - apiGroups: ["mongoshield.io"]
+    resources:
+      - "mongoshieldbackupplans/status"
+      - "mongoshieldbackups/status"
+      - "mongoshieldrestores/status"
+      - "mongoshielddrills/status"
+    verbs: ["get", "patch", "update"]
+  # Owner references with blockOwnerDeletion need this where the
+  # OwnerReferencesPermissionEnforcement admission plugin is enabled (e.g. OpenShift).
+  - apiGroups: ["mongoshield.io"]
+    resources:
+      - "mongoshieldbackupplans/finalizers"
+      - "mongoshieldbackups/finalizers"
+      - "mongoshieldrestores/finalizers"
+      - "mongoshielddrills/finalizers"
+    verbs: ["update"]
+  # A plan's schedule is a CronJob, created, kept in sync (update) and removed.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # Runs, restores, drills and data deletions are Jobs. patch marks a CronJob's Job as
+  # recorded; delete stops a run whose object was deleted, or clears a refused deletion.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # The generated mongoshield.config.json of each plan (no secrets in it).
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+  # A finished Job's result is MongoShield's --json output in its pod's log; listing
+  # pods also shows why a pod is stuck (missing Secret, image pull errors).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Events shown by `kubectl describe` (patch: repeats increase a count).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+---
+# Source: mongoshield-operator/templates/rbac.yaml
+# Read access for the built-in `view` role (and so `edit` and `admin`).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mongoshield-operator-view
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackupplans", "mongoshieldbackups", "mongoshieldrestores", "mongoshielddrills"]
+    verbs: ["get", "list", "watch"]
+
+---
+# Source: mongoshield-operator/templates/rbac.yaml
+# Full access for the built-in `edit` and `admin` roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mongoshield-operator-edit
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackupplans", "mongoshieldbackups", "mongoshieldrestores", "mongoshielddrills"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+
+---
+# Source: mongoshield-operator/templates/rbac.yaml
+# Bound cluster-wide: the operator manages every namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mongoshield-operator
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mongoshield-operator
+subjects:
+  - kind: ServiceAccount
+    name: mongoshield-operator
+    namespace: mongoshield-system
+
+---
+# Source: mongoshield-operator/templates/rbac.yaml
+# Leader election: one Lease, in the operator's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongoshield-operator-leader-election
+  namespace: mongoshield-system
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+
+---
+# Source: mongoshield-operator/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongoshield-operator-leader-election
+  namespace: mongoshield-system
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongoshield-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: mongoshield-operator
+    namespace: mongoshield-system
+
+---
+# Source: mongoshield-operator/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongoshield-operator
+  namespace: mongoshield-system
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+  ports:
+    - name: http-metrics
+      port: 8080
+      targetPort: http
+      protocol: TCP
+
+---
+# Source: mongoshield-operator/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongoshield-operator
+  namespace: mongoshield-system
+  labels:
+    app.kubernetes.io/name: mongoshield-operator
+    app.kubernetes.io/instance: mongoshield-operator
+    app.kubernetes.io/version: "next"
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: mongoshield
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mongoshield-operator
+      app.kubernetes.io/instance: mongoshield-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mongoshield-operator
+        app.kubernetes.io/instance: mongoshield-operator
+    spec:
+      serviceAccountName: mongoshield-operator
+      # The operator talks to the Kubernetes API, so it needs its token.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Graceful shutdown finishes running reconciles (up to 20 s) and releases the Lease.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: operator
+          image: "ghcr.io/shamalrathnayake/mongoshield-operator:next"
+          imagePullPolicy: IfNotPresent
+          env:
+            # Identity for leader election and events, and where the Lease lives.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: WATCH_NAMESPACES
+              value: ""
+            - name: MONGOSHIELD_IMAGE
+              value: "ghcr.io/shamalrathnayake/mongoshield:latest"
+            - name: LEADER_ELECTION
+              value: "true"
+            - name: LEADER_ELECTION_LEASE
+              value: "mongoshield-operator"
+            - name: WORKERS
+              value: "2"
+            - name: RESYNC_SECONDS
+              value: "600"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: HTTP_PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 96Mi

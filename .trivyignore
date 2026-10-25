@@ -1,0 +1,9 @@
+# Vulnerabilities the image scan deliberately ignores. Every entry needs a reason and
+# an expiry date (`exp:`), after which Trivy reports it again so it is re-checked.
+
+# @azure/msal-node 6.x (via @azure/identity 4.x, console image and CLOUD_SDKS=azure):
+# the advisory concerns MSAL's interactive authorization-code login flow. MongoShield
+# never uses it: it authenticates to Azure with connection strings, managed identity or
+# DefaultAzureCredential. The fix (msal-node 7.1) is outside @azure/identity 4.x's
+# dependency range; drop this entry once @azure/identity allows it.
+CVE-2026-109461 exp:2027-01-31

@@ -1,0 +1,94 @@
+/*
+ * Plan editor (plan-editor.tsx) additions. The two-column layout of each step (.plan-layout,
+ * .plan-main, and the sticky side column .plan-preview, which drops below the fields on
+ * narrow screens) lives in styles.css; the step tabs come from components/step-flow.css.
+ * This file adds the schedule row and the Review step's cards. Design tokens only, so
+ * the dark and light themes both work.
+ */
+
+/*
+ * The schedule controls: "Repeat" and the selects it needs side by side, as many per
+ * row as fit at 170 px or more (one per row on phones).
+ */
+.plan-schedule-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--space-3);
+  align-items: start;
+}
+
+/* A cron expression needs room to be read: it takes the rest of the row. */
+.plan-schedule-cron {
+  grid-column: span 2;
+}
+
+/* The time zone select is wide (long names and offsets) but need not fill the page. */
+.plan-time-zone {
+  max-width: 480px;
+}
+
+@media (max-width: 600px) {
+  .plan-schedule-cron {
+    grid-column: auto;
+  }
+}
+
+/* ------------------------------------------------------------------ Review step */
+
+/* The intro line above the cards. */
+.plan-review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* One card per step, as many side by side as fit at 300 px (one on phones). */
+.plan-review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.plan-review-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+/* A step with problems after a save attempt: the danger colour, as on its tab. */
+.plan-review-section[data-state="error"] {
+  border-color: color-mix(in srgb, var(--color-danger) 55%, transparent);
+}
+
+/* The step's title on the left; "Needs attention" and "Change" on the right. */
+.plan-review-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.plan-review-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.plan-review-alert {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}

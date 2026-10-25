@@ -1,0 +1,134 @@
+/*
+ * AgeKeyGenerator (age-key-generator.tsx): the "Generate a key pair" panel under the
+ * Recipients field. Colors, radii, spacing and fonts come from the design tokens in
+ * ../styles.css, so the dark default and the light theme both apply as is.
+ *
+ * This file loads BEFORE styles.css, so a rule that must beat a styles.css rule (the
+ * private key box restyles `.input.textarea`) uses a more specific selector rather than
+ * relying on order.
+ */
+
+/* The panel: a quiet sunken box that reads as help for the field above it. */
+.age-key-generator {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius);
+  background: var(--color-surface-sunken);
+}
+
+/* "Which key goes here?": a small heading, not a full section title. */
+.age-key-generator-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+/* Explanations in the panel: secondary text size, comfortable line length. */
+.age-key-generator-text {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  max-width: 72ch;
+}
+
+/* The bold words inside explanations stay in the main text color, so they stand out. */
+.age-key-generator-text strong {
+  color: var(--color-text);
+}
+
+/* A row of buttons (and the "made in this browser" note), wrapping on a phone. */
+.age-key-generator-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.age-key-generator-note {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+/*
+ * The private key box: highlighted in the warning tone, because what is inside must be
+ * saved before leaving. Same tint recipe as the notices in styles.css.
+ */
+.age-key-generator-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 45%, transparent);
+  border-radius: var(--radius-small);
+  background: var(--color-warning-bg);
+}
+
+/* "Save your private key now", with the warning badge before it. */
+.age-key-generator-result-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-weight: 600;
+}
+
+/* The round "!" badge, drawn like `.notice-icon` in styles.css. */
+.age-key-generator-badge {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  color: var(--color-surface);
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+/* The full public key may be long: let it break anywhere instead of overflowing. */
+.age-key-generator-public {
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The private key itself: monospace, never resized, every character visible.
+ * `.age-key-generator-result .age-key-generator-key` (0,2,0) outranks `.textarea` and
+ * `.input` (0,1,0) from styles.css, which loads later.
+ */
+.age-key-generator-result .age-key-generator-key {
+  font-family: var(--font-mono);
+  resize: none;
+  word-break: break-all;
+  background: var(--color-surface);
+  border-color: color-mix(in srgb, var(--color-warning) 45%, transparent);
+}
+
+/* "Copied …" and "Downloaded …": empty until there is something to say. */
+.age-key-generator-status {
+  margin: 0;
+  min-height: 1lh;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* The two fallback commands, one per line, scrolling sideways on a narrow screen. */
+.age-key-generator-commands {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-small);
+  background: var(--color-surface-sunken);
+  overflow-x: auto;
+}
+
+/* The commands' <code> is a plain block, without the inline-code chip of styles.css. */
+.age-key-generator-commands code {
+  padding: 0;
+  border: none;
+  background: none;
+  white-space: pre;
+}

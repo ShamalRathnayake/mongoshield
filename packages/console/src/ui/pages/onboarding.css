@@ -1,0 +1,100 @@
+/*
+ * Layout for the welcome flow (welcome.tsx) and the backup actions bar
+ * (backup-actions.tsx). Only arrangement lives here: colors, type sizes, radii and
+ * spacing come from the design tokens in ../styles.css, so both themes apply as is.
+ */
+
+/* The welcome page: one readable column, centered in the main area. */
+.welcome {
+  width: min(780px, 100%);
+  margin: var(--space-4) auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* The hero above the title: the logo, glowing, on a ring of the brand colors. */
+.welcome-hero {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 22px;
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    var(--brand-gradient) border-box;
+  border: 1px solid transparent;
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--brand-via) 8%, transparent),
+    0 18px 50px -12px color-mix(in srgb, var(--brand-via) 55%, transparent);
+}
+
+/* Links under a connection problem ("Atlas: Network Access"). */
+.welcome-links {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-5);
+}
+
+/* "Technical details": the driver's own message, wrapped, in the mono font. */
+.welcome-details summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.welcome-details code {
+  display: block;
+  margin-top: var(--space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* The public IP address stands out: it is what the user copies into Atlas. */
+.welcome-ip {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  user-select: all;
+}
+
+/* The backup actions bar above the live data browser. */
+.backup-actions {
+  border-left: 3px solid var(--color-accent);
+}
+
+.backup-actions-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.backup-actions-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+/* The database picker of "Back up now": databases with their collections below. */
+.backup-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.backup-picker-collections {
+  padding-left: var(--space-5);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+}
+
+.backup-picker summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}

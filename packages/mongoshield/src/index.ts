@@ -1,14 +1,314 @@
+// biome-ignore-all assist/source/organizeImports: exports are grouped by topic so the public API reads like a table of contents.
+
 /**
- * MongoShield — The main entry point.
+ * MongoShield: backup, restore and copy MongoDB from Node.js.
  *
- * This package re-exports the high-level MongoShield wrapper class
- * and all public APIs from @mongoshield/core for convenience.
+ * Public entry point. Everything exported here is covered by semver.
+ * Storage adapters and cloud KMS support live in their own entry points, so
+ * their dependencies load only when used:
+ *   mongoshield/storage/file   mongoshield/storage/s3     mongoshield/storage/gcs
+ *   mongoshield/storage/azure  mongoshield/storage/sftp   mongoshield/storage/memory
+ *   mongoshield/kms            mongoshield/testing
  */
 
-// Re-export everything from @mongoshield/core so users only need one import
-export * from "@mongoshield/core";
-// Logger
-export { logger } from "./logger";
-export type { MongoShieldOptions } from "./MongoShield";
-// High-level wrapper
-export { MongoShield } from "./MongoShield";
+// The main class.
+export { MongoShield, type ShieldPruneOptions } from "./shield.ts";
+
+// Options and results of the high-level API.
+export type {
+  BackupOptions,
+  BackupResult,
+  BackupSelector,
+  CheckpointedBackupResult,
+  CompletedBackupResult,
+  CompletingBackupOptions,
+  DecryptionOptions,
+  EncryptionOptions,
+  IncrementalOptions,
+  KmsKeyRef,
+  PointInTimeResult,
+  MongoShieldOptions,
+  NamespacePattern,
+  ProgressEvent,
+  ReadPreferenceModeName,
+  RestoreMode,
+  RestoreOptions,
+  RestorePlan,
+  RestorePlanEntry,
+  RestoreResult,
+  SearchIndexRef,
+  SearchIndexReport,
+  SourceOptions,
+  UsersAndRolesMode,
+  UsersAndRolesReport,
+  VerifyMode,
+  VerifyOptions,
+  VerifyProblem,
+  VerifyReport,
+} from "./types.ts";
+
+// Restore drills (shield.drill) and OpenTelemetry settings.
+export type {
+  DrillAssertion,
+  DrillAssertionInfo,
+  DrillAssertions,
+  DrillDatabase,
+  DrillNamespaceReport,
+  DrillOptions,
+  DrillProblem,
+  DrillReport,
+  ShieldDrillOptions,
+} from "./engine/drill.ts";
+export { type DrillRecord, readDrills } from "./catalog/annotations.ts";
+export type { TelemetryOptions } from "./types.ts";
+
+// Upgrade rehearsals (shield.rehearseUpgrade, shield.checkUpgradeCompatibility).
+export type {
+  ShieldUpgradeRehearsalOptions,
+  UpgradeCompatibilityOptions,
+  UpgradeCompatibilityResult,
+  UpgradeRehearsalOptions,
+  UpgradeRehearsalReport,
+} from "./engine/upgrade-rehearsal.ts";
+export {
+  analyzeUpgradeCompatibility,
+  type BackedUpCollection,
+  COMPATIBILITY_RULES,
+  type CompatibilityFinding,
+  type CompatibilityInput,
+  type CompatibilityReport,
+  type CompatibilityRule,
+  type CompatibilitySeverity,
+  type StoredJavaScript,
+} from "./engine/upgrade-compat.ts";
+export type { UpgradeCheck, UpgradeCheckKind } from "./engine/upgrade-live.ts";
+
+// The backup catalog and retention.
+export type { HoldRecord, VerificationRecord } from "./catalog/annotations.ts";
+export { type CatalogEntry, type CatalogStatus, listBackups } from "./catalog/catalog.ts";
+export { selectBackup } from "./catalog/select.ts";
+// Incremental backup chains: full → incremental → … (docs/guides/incremental-backups.md).
+export {
+  backupKindOf,
+  type ChainInspection,
+  type ChainProblem,
+  type ChainRange,
+  chainRanges,
+  inspectChain,
+  type ResolvedChain,
+  resolveChain,
+} from "./catalog/chain.ts";
+export type { OutOfScopeBackup, OutOfScopeReason, PruneResult } from "./catalog/prune.ts";
+export { type PruneScope, PLAN_LABEL } from "./catalog/scope.ts";
+// Deleting one backup by id (shield.deleteBackup, `mongoshield delete`).
+export type { DeleteBackupOptions, DeleteBackupResult } from "./catalog/delete.ts";
+export {
+  type KeptBackup,
+  planRetention,
+  type RemovedBackup,
+  type RetentionPlan,
+  type RetentionPolicy,
+} from "./catalog/retention.ts";
+
+// Running backups unattended: scheduled jobs, the cron scheduler and job locks.
+export {
+  BackupScheduler,
+  mongoLock,
+  noLock,
+  type RunReport,
+  type RunStatus,
+  runScheduledJob,
+  type ScheduledJobOptions,
+  type ScheduledVerifyMode,
+  type SchedulerOptions,
+  storageLock,
+  summarizeReport,
+} from "./schedule/index.ts";
+
+// Point-in-time recovery: the change journal.
+export * from "./journal/index.ts";
+
+// Notifications (webhooks, Slack, Discord, heartbeats).
+export { type NotifyTarget, notifyRun, pingHeartbeat, sendWebhook } from "./notify/index.ts";
+
+// The backup guard: refuse backups that look like data was lost.
+export {
+  type BackupGuardPolicy,
+  type BeforeCommitHook,
+  backupShapeLabel,
+  checkBackupSanity,
+  GUARD_SHAPE_LABEL,
+  type GuardFinding,
+  type GuardResult,
+} from "./engine/backup-guard.ts";
+
+// Finding documents inside a backup, and restoring just those.
+export type { FindInBackupOptions } from "./engine/find.ts";
+export type {
+  RestoreDocumentsMode,
+  RestoreDocumentsOptions,
+  RestoreDocumentsResult,
+  ShieldRestoreDocumentsOptions,
+} from "./engine/find-restore.ts";
+
+// Recovery recipes: one tenant, a document's history, diffs, text exports.
+export type {
+  RestoreTenantOptions,
+  RestoreTenantResult,
+  ShieldRestoreTenantOptions,
+  TenantRestoreMode,
+} from "./extras/tenant-restore.ts";
+export type { DocumentHistory, DocumentHistoryOptions, HistoryVersion } from "./extras/history.ts";
+export type { DiffOptions, DiffResult, NamespaceDiff } from "./extras/diff.ts";
+export type {
+  ExportDocumentsOptions,
+  ExportDocumentsResult,
+  TextExportFormat,
+} from "./extras/export-text.ts";
+
+// Before/after migrations, GDPR erasure, off-site copies and key rotation.
+export {
+  rollback,
+  type RollbackOptions,
+  type RollbackResult,
+  snapshot,
+  type SnapshotOptions,
+} from "./extras/snapshot.ts";
+export {
+  type ApplyErasuresResult,
+  applyErasures,
+  type ErasureRecord,
+  eraseLiveDocuments,
+  listErasures,
+  recordErasure,
+  type RecordErasureOptions,
+} from "./extras/erasure.ts";
+export {
+  type ReplicateOptions,
+  type ReplicateResult,
+  replicateBackups,
+  replicateToTargets,
+} from "./extras/replicate.ts";
+export {
+  type RekeyBackupResult,
+  rekeyBackups,
+  type RekeyOptions,
+  type RekeyResult,
+} from "./extras/rekey.ts";
+export type { BackupSelection } from "./extras/stored-files.ts";
+export type { RekeyRecord } from "./catalog/rekey-records.ts";
+
+// Copying between deployments, with masking and subsetting (staging and local data).
+export type {
+  CopyOptions,
+  CopyPlan,
+  CopyPlanEntry,
+  CopyResult,
+  CopyResumeState,
+} from "./types.ts";
+export {
+  defineMask,
+  type FakeKind,
+  type MaskConfig,
+  type MaskFunction,
+  type MaskFunctionContext,
+  type MaskReport,
+  type MaskRule,
+} from "./mask/index.ts";
+// Finding personal data and suggesting mask rules for it (`mongoshield mask suggest`).
+export {
+  type CollectionSuggestions,
+  type CoveringRule,
+  type DetectOptions,
+  detectPii,
+  type MaskSuggestion,
+  type MaskSuggestionReport,
+  type PiiFinding,
+  type PiiKind,
+  PII_KINDS,
+  type SkippedNamespace,
+  type SuggestedMaskRule,
+  type SuggestionStatus,
+  type SuggestMasksOptions,
+  suggestMasks,
+} from "./mask/suggest/index.ts";
+export { defineSubset, type FollowRule, type SubsetConfig } from "./subset/index.ts";
+
+// Moving data in and out of mongodump's formats.
+export {
+  type ExportSummary,
+  exportBackup,
+  type ImportResult,
+  importMongodump,
+} from "./interop/index.ts";
+
+// Config files.
+export { defineConfig } from "./config/define.ts";
+export { validateConfig } from "./config/load.ts";
+export {
+  ConfigSchema,
+  type MongoShieldConfig,
+  type MongoShieldConfigInput,
+} from "./config/schema.ts";
+export {
+  CONFIG_PRESET_NAMES,
+  CONFIG_PRESETS,
+  type ConfigPresetDefaults,
+  type ConfigPresetName,
+} from "./config/presets.ts";
+
+// MongoDB Atlas: recognising Atlas hosts and Free/Flex tier refusals.
+export { type AtlasInfo, type AtlasTier, isAtlasHost, isAtlasRefusal } from "./mongo/atlas.ts";
+
+// Encryption keys (age format).
+export {
+  type GeneratedIdentity,
+  generateIdentity,
+  identityToRecipient,
+  parseIdentityFile,
+} from "./crypto/keys.ts";
+
+// Errors.
+export {
+  ERROR_CODES,
+  type ErrorCode,
+  isMongoShieldError,
+  MongoShieldError,
+  type MongoShieldErrorOptions,
+} from "./errors.ts";
+
+// The on-disk format.
+export {
+  type Compression,
+  type ConsistencyMode,
+  type ChainInfo,
+  type IncrementalManifest,
+  isIncrementalManifest,
+  MANIFEST_FORMAT_VERSION,
+  type Manifest,
+  ManifestSchema,
+  type NamespaceEntry,
+  type StoredFile,
+} from "./format/manifest.ts";
+
+// Logging.
+export { fromPino, type LogFields, type Logger, type PinoLike, silentLogger } from "./logger.ts";
+
+// Opening storage from a URL (`s3://…`, `gs://…`, `az://…`, `sftp://…`, paths).
+export { resolveStorage, SUPPORTED_STORAGE_SCHEMES } from "./storage/resolve.ts";
+
+// Keeping secrets out of logs and messages.
+export { redactMongoUri, redactSecrets } from "./redact.ts";
+
+// Writing your own storage adapter.
+export type {
+  GetOptions,
+  ObjectInfo,
+  PutOptions,
+  RetentionMode,
+  RetentionOptions,
+  StorageAdapter,
+  StorageCapabilities,
+} from "./storage/types.ts";
+
+export { version } from "./version.ts";

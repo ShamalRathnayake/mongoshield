@@ -1,0 +1,157 @@
+# Runs on every pull request and push to main.
+# Jobs: lint/typecheck, tests against a MongoDB × Node matrix, topology tests
+# (multi-member replica set, access control, sharded cluster) and package checks.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome ci .
+      - run: pnpm typecheck
+
+  test:
+    name: Test (Node ${{ matrix.node }}, MongoDB ${{ matrix.mongodb }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+        mongodb: ["7.0.24", "8.0.13"]
+    env:
+      # mongodb-memory-server downloads this server version for the integration tests.
+      MONGOMS_VERSION: ${{ matrix.mongodb }}
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - run: pnpm install --frozen-lockfile
+      # The official age CLI and zstd let the integration tests prove that backups can be
+      # decrypted and decompressed with standard tools, without MongoShield.
+      - name: Install age and zstd
+        run: sudo apt-get update && sudo apt-get install -y age zstd
+      # The official mongodump/mongorestore, for the round-trip compatibility tests.
+      - name: Fetch MongoDB Database Tools
+        working-directory: packages/mongoshield
+        run: echo "MONGO_TOOLS_BIN=$(node scripts/fetch-mongo-tools.ts | tail -1)" >> "$GITHUB_ENV"
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-${{ matrix.mongodb }}
+      - run: pnpm coverage
+      # Smoke test of the benchmark harness (bench/compare.ts) on a tiny dataset: it
+      # only proves the harness still runs end to end; the numbers mean nothing here.
+      # Once per workflow run is enough, so only one cell of the matrix runs it.
+      - name: Benchmark harness smoke test
+        if: matrix.node == 24 && matrix.mongodb == '8.0.13'
+        run: pnpm --filter mongoshield bench --scale tiny --runs 1 --require-tools --output "$RUNNER_TEMP/bench-tiny.json"
+
+  # Multi-member replica set, access control and a sharded cluster (Docker): the
+  # deployments real users run. Slower than the main suite, so it has its own job.
+  topology:
+    name: Topology (replica set, auth, sharded)
+    runs-on: ubuntu-latest
+    env:
+      # mongodb-memory-server downloads this server version for the replica sets; the
+      # sharded cluster uses the official mongo:8.0 image (Docker is on ubuntu runners).
+      MONGOMS_VERSION: "8.0.13"
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      - run: pnpm --filter mongoshield test:topology
+
+  e2e:
+    name: Console end-to-end (Chromium)
+    runs-on: ubuntu-latest
+    env:
+      # mongodb-memory-server downloads this server version for the console under test.
+      MONGOMS_VERSION: "8.0.13"
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      # The tests run the built console (dist/server/main.mjs + dist/ui), which
+      # bundles against the built library.
+      - run: pnpm --filter mongoshield build
+      - run: pnpm --filter @mongoshield/console build
+      - name: Install Chromium for Playwright
+        working-directory: packages/console
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      - run: pnpm --filter @mongoshield/console test:e2e
+      # Screenshots and traces of failed tests are in the HTML report.
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: packages/console/playwright-report/
+          retention-days: 14
+
+  package:
+    name: Package checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # publint checks package.json against the files; attw checks the type entry points.
+      - run: pnpm check:package
+      # Import the built package exactly as a user would, to catch ESM/runtime packaging bugs.
+      - name: Smoke-test the published entry points
+        run: |
+          cd packages/mongoshield
+          node --input-type=module -e "const m = await import('mongoshield'); if (!m.version) process.exit(1)"
+          node -e "const m = require('mongoshield'); if (!m.version) process.exit(1)"

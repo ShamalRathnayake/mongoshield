@@ -1,0 +1,17 @@
+{{- /* /metrics (and the probes) for Prometheus; ClusterIP only. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mongoshield-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mongoshield-operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http-metrics
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

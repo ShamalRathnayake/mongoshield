@@ -1,0 +1,129 @@
+# Nightly backup of a MongoDB Atlas Free (M0) or Flex cluster to S3 or Cloudflare R2.
+# Copy to .github/workflows/atlas-backup.yml in your repository.
+#
+# Atlas Free clusters have no Atlas backups at all, and Flex clusters keep only a few
+# daily snapshots inside Atlas. This keeps encrypted copies in your own bucket.
+# MongoShield detects the shared tier when it connects and adapts by itself (lower
+# parallelism, a read rate limit, no commands the tier refuses), so no extra flags.
+#
+# Needs (Settings > Secrets and variables > Actions):
+#   secret   MONGODB_URI            mongodb+srv://… of a database user with the
+#                                   "Only read any database" role (readAnyDatabase)
+#   variable BACKUP_PUBLIC_KEY      age public key (age1…) from `npx mongoshield@next keygen`
+#   variable BACKUP_BUCKET          bucket name, e.g. acme-backups
+#   variable S3_ENDPOINT            R2 only: https://<account-id>.r2.cloudflarestorage.com
+#                                   (leave unset for AWS S3)
+#   secret   S3_ACCESS_KEY_ID       access key with read/write/delete on the bucket
+#   secret   S3_SECRET_ACCESS_KEY   its secret
+#
+# Network access: GitHub-hosted runners have no fixed IP address. Either allow
+# 0.0.0.0/0 in the Atlas IP Access List (then the password is the only protection: use
+# a long random one and the read-only user above), or set these and the job adds the
+# runner's IP for one hour and removes it again when it is done:
+#   variable ATLAS_PROJECT_ID       the project (group) id from the Atlas project settings
+#   secret   ATLAS_PUBLIC_KEY       an Atlas project API key with the role
+#   secret   ATLAS_PRIVATE_KEY      "Project Network Access Manager" (enough to edit the list)
+#
+# The secret age key never comes near CI, so a leaked runner can't read backups.
+name: Atlas backup
+
+on:
+  schedule:
+    # 03:15 UTC daily. GitHub may start scheduled runs some minutes late under load,
+    # and disables schedules in repositories with no activity for 60 days.
+    - cron: "15 3 * * *"
+  # A "Run workflow" button for manual backups (before a migration, say).
+  workflow_dispatch:
+
+# Never run two backups at once; a manual run waits for the nightly one.
+concurrency:
+  group: atlas-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # One place for the storage URL. `region=auto` is what R2 expects; AWS S3 users put
+  # their bucket's region here instead (and leave S3_ENDPOINT unset).
+  STORAGE: s3://${{ vars.BACKUP_BUCKET }}/atlas?region=auto${{ vars.S3_ENDPOINT != '' && format('&endpoint={0}', vars.S3_ENDPOINT) || '' }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    # A Free cluster holds at most 512 MB and a Flex cluster 5 GB: minutes, not hours.
+    timeout-minutes: 60
+    steps:
+      # Optional: let this runner through the Atlas IP Access List for one hour.
+      # `deleteAfterDate` makes Atlas remove the entry by itself even if this job is
+      # cancelled before the clean-up step below runs.
+      - name: Allow this runner in the Atlas IP Access List
+        if: vars.ATLAS_PROJECT_ID != ''
+        env:
+          ATLAS_PROJECT_ID: ${{ vars.ATLAS_PROJECT_ID }}
+          ATLAS_PUBLIC_KEY: ${{ secrets.ATLAS_PUBLIC_KEY }}
+          ATLAS_PRIVATE_KEY: ${{ secrets.ATLAS_PRIVATE_KEY }}
+        run: |
+          ip="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')"
+          echo "RUNNER_IP=$ip" >> "$GITHUB_ENV"
+          expires="$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
+          curl --fail --silent --show-error --digest \
+            --user "$ATLAS_PUBLIC_KEY:$ATLAS_PRIVATE_KEY" \
+            --header "Accept: application/vnd.atlas.2023-01-01+json" \
+            --header "Content-Type: application/json" \
+            --request POST \
+            --data "[{\"ipAddress\":\"$ip\",\"comment\":\"GitHub Actions backup run $GITHUB_RUN_ID\",\"deleteAfterDate\":\"$expires\"}]" \
+            "https://cloud.mongodb.com/api/atlas/v2/groups/$ATLAS_PROJECT_ID/accessList" > /dev/null
+          # Atlas applies access list changes within a minute or so.
+          sleep 60
+
+      - name: Back up the Atlas cluster
+        id: backup
+        uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or commit SHA
+        with:
+          command: backup
+          uri: ${{ secrets.MONGODB_URI }}
+          storage: ${{ env.STORAGE }}
+          recipients: ${{ vars.BACKUP_PUBLIC_KEY }}
+          args: --label trigger=github-actions --label run=${{ github.run_id }}
+
+      # Checks every file's checksum against the manifest. No key needed.
+      - name: Verify the new backup
+        uses: ShamalRathnayake/mongoshield/action@main
+        with:
+          command: verify
+          storage: ${{ env.STORAGE }}
+          args: ${{ steps.backup.outputs.backup-id }}
+
+      # Keep the 7 newest backups plus 4 weekly and 6 monthly ones (17 at most).
+      # The action has no `prune` command, so call the CLI directly (same npx install).
+      # --yes: deleting needs confirmation and nobody can answer a prompt in CI.
+      - name: Prune old backups
+        env:
+          MONGOSHIELD_STORAGE: ${{ env.STORAGE }}
+        run: >-
+          npx --yes
+          --package=mongoshield@next
+          --package=@aws-sdk/client-s3@^3
+          --package=@aws-sdk/lib-storage@^3
+          -- mongoshield prune --last 7 --weekly 4 --monthly 6 --yes
+
+      - name: Remove this runner from the Atlas IP Access List
+        if: always() && vars.ATLAS_PROJECT_ID != '' && env.RUNNER_IP != ''
+        env:
+          ATLAS_PROJECT_ID: ${{ vars.ATLAS_PROJECT_ID }}
+          ATLAS_PUBLIC_KEY: ${{ secrets.ATLAS_PUBLIC_KEY }}
+          ATLAS_PRIVATE_KEY: ${{ secrets.ATLAS_PRIVATE_KEY }}
+        run: |
+          curl --fail --silent --show-error --digest \
+            --user "$ATLAS_PUBLIC_KEY:$ATLAS_PRIVATE_KEY" \
+            --header "Accept: application/vnd.atlas.2023-01-01+json" \
+            --request DELETE \
+            "https://cloud.mongodb.com/api/atlas/v2/groups/$ATLAS_PROJECT_ID/accessList/$RUNNER_IP" > /dev/null
+
+      - name: Summary
+        env:
+          BACKUP_ID: ${{ steps.backup.outputs.backup-id }}
+        run: echo "Atlas backup \`${BACKUP_ID}\` created and verified." >> "$GITHUB_STEP_SUMMARY"

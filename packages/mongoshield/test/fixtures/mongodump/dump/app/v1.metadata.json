@@ -1,0 +1,1 @@
+{"options":{"viewOn":"users","pipeline":[{"$match":{"name":"a"}}]},"indexes":[],"collectionName":"v1","type":"view"}

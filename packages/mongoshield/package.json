@@ -1,55 +1,145 @@
 {
   "name": "mongoshield",
   "version": "1.0.1-alpha.1",
-  "description": "MongoShield is a revolutionary, self-contained MongoDB data protection utility built specifically for modern Node.js and TypeScript ecosystems. It eliminates the need for native OS binaries like mongodump and mongorestore. This makes it ideal for constrained environments like Serverless Functions, AWS Lambda, minimal Docker containers, or PaaS platforms like Heroku, where system-level installations are restricted.",
-  "publishConfig": {
-    "access": "public"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ShamalRathnayake/mongoshield.git",
-    "directory": "packages/mongoshield"
-  },
-  "engines": {
-    "node": ">= 20.x"
-  },
-  "main": "dist/index.js",
-  "module": "dist/index.mjs",
-  "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
-    }
-  },
+  "description": "Backup, restore and copy MongoDB from Node.js. No mongodump required.",
   "keywords": [
     "mongodb",
     "backup",
     "restore",
-    "stream",
-    "encryption",
-    "s3",
-    "gdrive",
-    "security",
     "mongodump",
     "mongorestore",
+    "s3",
+    "encryption",
+    "age",
     "serverless",
-    "lambda"
+    "disaster-recovery"
   ],
-  "author": "ShamalRathnayake",
   "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/ShamalRathnayake/mongoshield/issues"
-  },
+  "author": "Shamal Rathnayake",
   "homepage": "https://github.com/ShamalRathnayake/mongoshield#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShamalRathnayake/mongoshield.git",
+    "directory": "packages/mongoshield"
+  },
+  "bugs": "https://github.com/ShamalRathnayake/mongoshield/issues",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "mongoshield": "./dist/cli.mjs"
+  },
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./storage/file": "./dist/storage/file.mjs",
+    "./storage/memory": "./dist/storage/memory.mjs",
+    "./storage/s3": "./dist/storage/s3.mjs",
+    "./storage/gcs": "./dist/storage/gcs.mjs",
+    "./storage/azure": "./dist/storage/azure.mjs",
+    "./storage/sftp": "./dist/storage/sftp.mjs",
+    "./kms": "./dist/kms.mjs",
+    "./testing": "./dist/testing.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
-    "build": "tsup",
-    "test": "vitest run"
+    "build": "tsdown",
+    "prepack": "node scripts/prepare-package-readme.ts",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc",
+    "test": "vitest run --project unit --project integration",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:topology": "vitest run --project topology",
+    "test:cloud": "vitest run --project cloud",
+    "test:runtimes": "tsdown && node test/runtimes/run.ts",
+    "test:watch": "vitest --project unit --project integration",
+    "coverage": "vitest run --project unit --project integration --coverage",
+    "check:package": "publint --strict && attw --pack . --profile esm-only",
+    "bench": "node bench/compare.ts",
+    "docs:errors": "node scripts/generate-error-docs.ts",
+    "docs:errors:check": "node scripts/generate-error-docs.ts --check"
   },
   "dependencies": {
-    "@mongoshield/core": "workspace:*",
-    "pino": "^10.3.1",
-    "zod": "^4.3.6"
+    "@clack/prompts": "^1.8.1",
+    "@noble/ciphers": "2.4.0",
+    "croner": "^10.0.0",
+    "jiti": "^2.7.0",
+    "zod": "^4.6.7"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-kms": "^3.600.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/lib-storage": "^3.600.0",
+    "@azure/identity": "^4.0.0",
+    "@azure/keyvault-keys": "^4.8.0",
+    "@azure/storage-blob": "^12.20.0",
+    "@google-cloud/kms": "^5.0.0 || ^6.0.0",
+    "@google-cloud/storage": "^7.0.0 || ^8.0.0",
+    "@opentelemetry/api": "^1.9.0",
+    "mongodb": "^6.10.0 || ^7.0.0",
+    "mongodb-memory-server": "^10.0.0 || ^11.0.0",
+    "ssh2": "^1.15.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-kms": {
+      "optional": true
+    },
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@aws-sdk/lib-storage": {
+      "optional": true
+    },
+    "@azure/identity": {
+      "optional": true
+    },
+    "@azure/keyvault-keys": {
+      "optional": true
+    },
+    "@azure/storage-blob": {
+      "optional": true
+    },
+    "@google-cloud/kms": {
+      "optional": true
+    },
+    "@google-cloud/storage": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
+      "optional": true
+    },
+    "mongodb-memory-server": {
+      "optional": true
+    },
+    "ssh2": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@aws-sdk/client-kms": "^3.1100.0",
+    "@aws-sdk/client-s3": "^3.1100.0",
+    "@aws-sdk/lib-storage": "^3.1100.0",
+    "@testcontainers/minio": "^11.14.0",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^5.0.5",
+    "aws-sdk-client-mock": "^4.1.0",
+    "fast-check": "^4.10.2",
+    "mongodb": "^7.7.0",
+    "mongodb-memory-server": "^11.3.0",
+    "publint": "^0.3.25",
+    "testcontainers": "^11.14.0",
+    "tsdown": "^0.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
   }
 }

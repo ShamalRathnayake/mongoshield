@@ -1,0 +1,65 @@
+{
+  "name": "@mongoshield/operator",
+  "version": "0.0.0",
+  "description": "Kubernetes operator for MongoShield: backup plans, backups and restores as custom resources.",
+  "keywords": [
+    "mongodb",
+    "backup",
+    "restore",
+    "kubernetes",
+    "operator",
+    "crd"
+  ],
+  "license": "MIT",
+  "author": "Shamal Rathnayake",
+  "homepage": "https://github.com/ShamalRathnayake/mongoshield#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShamalRathnayake/mongoshield.git",
+    "directory": "packages/operator"
+  },
+  "bugs": "https://github.com/ShamalRathnayake/mongoshield/issues",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "mongoshield-operator": "./dist/main.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc",
+    "test": "vitest run --project unit",
+    "test:unit": "vitest run --project unit",
+    "test:e2e": "node scripts/e2e.ts",
+    "coverage": "vitest run --project unit --coverage",
+    "crds": "node scripts/generate-crds.ts",
+    "crds:check": "node scripts/generate-crds.ts --check",
+    "check:package": "publint --strict",
+    "manifests": "node scripts/generate-manifests.ts",
+    "manifests:check": "node scripts/generate-manifests.ts --check"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^2.0.1",
+    "croner": "^10.0.1",
+    "mongodb": "^7.7.0",
+    "mongoshield": "workspace:*",
+    "undici": "^8.12.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@vitest/coverage-v8": "^5.0.5",
+    "js-yaml": "^5.5.0",
+    "publint": "^0.3.25",
+    "tsdown": "^0.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

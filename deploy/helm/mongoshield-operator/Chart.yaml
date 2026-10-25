@@ -1,0 +1,22 @@
+# Helm chart metadata. `version` is the chart's own version (bump it when templates
+# change); `appVersion` is the operator image tag used when image.tag is empty.
+apiVersion: v2
+name: mongoshield-operator
+description: Kubernetes operator for MongoShield. Backup plans, backups and restores of MongoDB as custom resources.
+type: application
+version: 0.1.0
+appVersion: "next"
+# CronJob `timeZone` needs 1.27; the CRDs' CEL validation rules are GA in 1.29
+# (beta and on by default since 1.25).
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/ShamalRathnayake/mongoshield
+sources:
+  - https://github.com/ShamalRathnayake/mongoshield
+keywords:
+  - mongodb
+  - backup
+  - restore
+  - operator
+  - crd
+maintainers:
+  - name: Shamal Rathnayake

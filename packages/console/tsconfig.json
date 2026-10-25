@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    // The UI runs in browsers: it needs the DOM types and React's JSX transform.
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src", "test", "e2e", "*.config.ts"]
+}

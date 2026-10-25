@@ -1,0 +1,44 @@
+# A nightly backup plan: S3 storage, encrypted for an age public key, verified
+# after each run, pruned with a GFS retention policy.
+#
+#   kubectl create secret generic prod-mongodb \
+#     --from-literal=MONGODB_URI='mongodb+srv://backup:PASSWORD@cluster0.example.net/'
+#   kubectl create secret generic s3-credentials \
+#     --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+#   kubectl apply -f plan.yaml
+#   kubectl get msplan nightly
+apiVersion: mongoshield.io/v1alpha1
+kind: MongoShieldBackupPlan
+metadata:
+  name: nightly
+spec:
+  source:
+    # A user with the built-in `backup` role is enough.
+    uriSecretRef:
+      name: prod-mongodb
+  storage:
+    url: s3://acme-backups/prod?region=eu-west-1
+    # Leave this out with IRSA / Workload Identity (set job.serviceAccountName instead).
+    credentialsSecretRef:
+      name: s3-credentials
+  encryption:
+    # Public keys only: the cluster can write backups but never read them.
+    recipients:
+      - age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq
+  schedule:
+    cron: "15 3 * * *"
+    timeZone: Europe/Berlin
+  backup:
+    exclude: ["*.sessions"]
+    consistency: auto
+  retention:
+    last: 3
+    daily: 7
+    weekly: 4
+    monthly: 12
+  # "drill" would restore every new backup into spec.drill's scratch deployment:
+  #   verify: drill
+  #   drill:
+  #     targetUriSecretRef: { name: scratch-mongodb }
+  #     sample: 100
+  verify: fast

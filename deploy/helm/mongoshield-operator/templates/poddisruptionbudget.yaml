@@ -1,0 +1,15 @@
+{{- /* Keep a replica during voluntary disruptions (node drains), when there are several. */}}
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "mongoshield-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "mongoshield-operator.selectorLabels" . | nindent 6 }}
+{{- end }}

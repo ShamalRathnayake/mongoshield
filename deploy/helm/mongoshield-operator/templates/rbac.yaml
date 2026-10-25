@@ -1,0 +1,167 @@
+{{- /*
+Least-privilege RBAC for the operator. Every rule says why it exists.
+
+Notably absent: Secrets. The operator never reads connection strings, keys or cloud
+credentials; the Jobs it creates reference Secrets by name and the kubelet injects
+them. (Creating a pod that mounts a Secret is still a powerful permission, which is
+why `watchNamespaces` can confine the operator to the namespaces you choose.)
+*/}}
+{{- if .Values.rbac.create }}
+{{- $fullname := include "mongoshield-operator.fullname" . }}
+{{- $serviceAccount := include "mongoshield-operator.serviceAccountName" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+rules:
+  # Watch the MongoShield kinds; patch adds and removes finalizers.
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackupplans", "mongoshieldrestores", "mongoshielddrills"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Backups also: create one record per scheduled run, delete old records (spec.history).
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackups"]
+    verbs: ["get", "list", "watch", "patch", "create", "delete"]
+  # Results and conditions are written through the status subresource only.
+  - apiGroups: ["mongoshield.io"]
+    resources:
+      - "mongoshieldbackupplans/status"
+      - "mongoshieldbackups/status"
+      - "mongoshieldrestores/status"
+      - "mongoshielddrills/status"
+    verbs: ["get", "patch", "update"]
+  # Owner references with blockOwnerDeletion need this where the
+  # OwnerReferencesPermissionEnforcement admission plugin is enabled (e.g. OpenShift).
+  - apiGroups: ["mongoshield.io"]
+    resources:
+      - "mongoshieldbackupplans/finalizers"
+      - "mongoshieldbackups/finalizers"
+      - "mongoshieldrestores/finalizers"
+      - "mongoshielddrills/finalizers"
+    verbs: ["update"]
+  # A plan's schedule is a CronJob, created, kept in sync (update) and removed.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # Runs, restores, drills and data deletions are Jobs. patch marks a CronJob's Job as
+  # recorded; delete stops a run whose object was deleted, or clears a refused deletion.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # The generated mongoshield.config.json of each plan (no secrets in it).
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+  # A finished Job's result is MongoShield's --json output in its pod's log; listing
+  # pods also shows why a pod is stuck (missing Secret, image pull errors).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Events shown by `kubectl describe` (patch: repeats increase a count).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+{{- if .Values.watchNamespaces }}
+{{- range .Values.watchNamespaces }}
+# Bound only in the namespaces the operator manages.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ . }}
+  labels:
+    {{- include "mongoshield-operator.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ $.Release.Namespace }}
+---
+{{- end }}
+{{- else }}
+# Bound cluster-wide: the operator manages every namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+{{- if .Values.leaderElection.enabled }}
+# Leader election: one Lease, in the operator's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+{{- if .Values.rbac.aggregateToDefaultRoles }}
+# Read access for the built-in `view` role (and so `edit` and `admin`).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-view
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackupplans", "mongoshieldbackups", "mongoshieldrestores", "mongoshielddrills"]
+    verbs: ["get", "list", "watch"]
+---
+# Full access for the built-in `edit` and `admin` roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-edit
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["mongoshield.io"]
+    resources: ["mongoshieldbackupplans", "mongoshieldbackups", "mongoshieldrestores", "mongoshielddrills"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+{{- end }}
+{{- end }}

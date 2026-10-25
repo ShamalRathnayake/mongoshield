@@ -1,0 +1,65 @@
+# Runs the built package under Bun and Deno (docs/guides/bun-and-deno.md).
+# Node.js is covered by ci.yml; this workflow proves the other runtimes, at the
+# oldest supported and the newest tested version of each, with the end-to-end
+# smoke scenarios of packages/mongoshield/test/runtimes (library + CLI, file,
+# memory and S3 storage via S3Mock, zstd/gzip, age recipients and passphrases,
+# corruption, cancellation, backpressure, Ctrl-C).
+name: Runtimes
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: runtimes-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke (${{ matrix.runtime }} ${{ matrix.version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep the first of each pair in sync with the minimum versions in
+          # docs/guides/bun-and-deno.md, and bump the second when testing a new release.
+          - { runtime: bun, version: "1.4.0" }
+          - { runtime: bun, version: "1.4.4" }
+          - { runtime: deno, version: "2.9.0" }
+          - { runtime: deno, version: "2.9.8" }
+    env:
+      # mongodb-memory-server downloads this server version for the smoke runs.
+      MONGOMS_VERSION: "8.0.13"
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@v6
+      # Node.js runs the test runner (mongod, S3Mock, spawning the runtime under test).
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Set up Bun
+        if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.version }}
+      - name: Set up Deno
+        if: matrix.runtime == 'deno'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ matrix.version }}
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      # Builds dist/, then runs the scenarios with only this runtime. --require fails
+      # the job if the runtime is missing; --s3 starts S3Mock (Docker is on ubuntu runners).
+      - run: pnpm --filter mongoshield test:runtimes --runtime ${{ matrix.runtime }} --require --s3

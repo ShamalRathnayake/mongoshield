@@ -1,0 +1,300 @@
+# Builds the MongoShield container image (docker/Dockerfile) and publishes it to
+# ghcr.io/shamalrathnayake/mongoshield.
+#
+# When it runs, and what it pushes:
+#   pull request touching the image  build linux/amd64, smoke-test, Trivy scan; push nothing
+#   push to main                     the above, then push multi-arch `:next` and `:sha-<short>`;
+#                                    the console image also gets `:latest` (see below)
+#   release tag mongoshield@X.Y.Z    push `:X.Y.Z`, `:X.Y`, `:X` and `:latest` (no `latest`,
+#     (or vX.Y.Z)                    `X.Y` or `X` for prereleases such as 2.0.0-next.3)
+#   workflow_call / dispatch         same as a tag, for the version passed in
+#
+# Why the console's `:latest` follows main: its quickstart is the tag-less one-liner
+# `docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console`,
+# which pulls `:latest`. While 2.0 is in prerelease no release ever moves `:latest`
+# (prereleases get only their exact tag), so without this the one-liner would not work
+# at all. The trade-off: between releases `:latest` is the newest main build, not the
+# newest release; pin `:X.Y.Z` for production. After GA, set `latest-on-main: false`
+# for the console entry if `:latest` should track releases only (RELEASING.md). The CLI
+# and operator images keep the release-only `:latest`.
+#
+# Every pushed image gets an SBOM and SLSA provenance attestation (attached by BuildKit)
+# and a keyless cosign signature (Sigstore, using this workflow's GitHub OIDC identity).
+# Verify with:
+#   cosign verify ghcr.io/shamalrathnayake/mongoshield:latest \
+#     --certificate-identity-regexp '^https://github.com/ShamalRathnayake/mongoshield/' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# Note: tags pushed by another workflow with GITHUB_TOKEN (changesets in release.yml) do
+# not trigger `push: tags`. The release workflow should call this one via workflow_call
+# after publishing (see the `workflow_call` input below).
+#
+# Actions are pinned by major version: we get bug and security fixes without editing
+# this file, and Dependabot proposes major upgrades. Pin to full commit SHAs instead if
+# your supply-chain policy requires it.
+name: Docker
+
+on:
+  pull_request:
+    paths:
+      - docker/** # includes docker/smoke/ (the console's end-to-end smoke tests)
+      - .dockerignore
+      - .github/workflows/docker.yml
+      - packages/mongoshield/**
+      - packages/console/**
+      - packages/operator/**
+      - pnpm-lock.yaml
+  push:
+    branches: [main]
+    tags:
+      - "mongoshield@*"
+      # Full versions only (v2.0.0, v2.1.0-next.1). The moving major tag `v2`, which
+      # GitHub Action users reference (`.../action@v2`), must not trigger an image build:
+      # "2" is not a version the tag logic below can publish.
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_call:
+    inputs:
+      version:
+        description: Released version to publish, e.g. 2.0.0 (without the mongoshield@ prefix)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, e.g. 2.0.0. Leave empty to publish `next` from this branch.
+        type: string
+        required: false
+
+# One build per ref at a time; a newer push to the same branch replaces an older build.
+# Releases are never cancelled (their group includes the unique tag/version).
+concurrency:
+  group: docker-${{ github.ref }}-${{ inputs.version || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# Three images are built from this repository: the CLI (docker/Dockerfile), the
+# web console (docker/console.Dockerfile) and the Kubernetes operator
+# (docker/operator.Dockerfile). The matrix below builds them the same way.
+
+jobs:
+  image:
+    name: Build, scan and publish (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mongoshield
+            dockerfile: docker/Dockerfile
+          - image: mongoshield-console
+            dockerfile: docker/console.Dockerfile
+            # `:latest` also on pushes to main (see the header): the quickstart needs it.
+            latest-on-main: true
+          # The operator has its own 0.x version line (its CRDs are v1alpha1), so a
+          # release tags its image with packages/operator/package.json's version.
+          - image: mongoshield-operator
+            dockerfile: docker/operator.Dockerfile
+            version-file: packages/operator/package.json
+    env:
+      IMAGE: ghcr.io/shamalrathnayake/${{ matrix.image }}
+      # The image built for the smoke test and the vulnerability scan (never pushed).
+      LOCAL_IMAGE: ${{ matrix.image }}:ci
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # cosign keyless signing (OIDC token -> Sigstore certificate)
+      # SBOM and provenance are pushed to ghcr.io as part of the image: no extra permission.
+    steps:
+      - uses: actions/checkout@v5 # v5: current major
+
+      # Work out the version (if this is a release) and whether to push at all.
+      - name: Decide version and push
+        id: release
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          VERSION_FILE: ${{ matrix.version-file }}
+        run: |
+          set -euo pipefail
+          version=""
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            version="${INPUT_VERSION}"
+          elif [[ "${REF_TYPE}" == "tag" ]]; then
+            # mongoshield@2.0.0 -> 2.0.0, v2.0.0 -> 2.0.0
+            version="${REF_NAME#mongoshield@}"
+            version="${version#v}"
+          fi
+          # Images with their own version line (the operator): on a release, use the
+          # version in their package.json instead of the library's.
+          if [[ -n "${version}" && -n "${VERSION_FILE}" ]]; then
+            version="$(jq -r .version "${VERSION_FILE}")"
+          fi
+          push=true
+          if [[ "${EVENT}" == "pull_request" ]]; then push=false; fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "push=${push}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${version:-<none, building next>}  Push: ${push}"
+
+      # Tags and labels. `type=semver` skips `latest`, `X.Y` and `X` for prereleases
+      # automatically, so 2.0.0-next.3 is only ever published as `:2.0.0-next.3`.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5 # v5: current major
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
+            type=semver,pattern={{major}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
+            type=raw,value=next,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' && matrix.latest-on-main == true }}
+            type=sha,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' }}
+
+      # QEMU lets the amd64 runner build the arm64 image. Only the deps stage runs
+      # emulated; the build stage runs natively (see FROM --platform in the Dockerfile).
+      - uses: docker/setup-qemu-action@v3 # v3: current major
+      - uses: docker/setup-buildx-action@v3 # v3: current major
+
+      # 1. Build for the runner's platform and load it into the local Docker daemon,
+      #    so it can be run and scanned before anything is published.
+      - name: Build (linux/amd64, local)
+        uses: docker/build-push-action@v6 # v6: current major
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
+          # The GitHub Actions cache makes the multi-arch build below reuse these layers.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 2. Does it start? --version needs no database; --help lists every command,
+      #    which proves all modules load. Runs as the image's non-root user.
+      - name: Smoke test (CLI)
+        if: matrix.image == 'mongoshield'
+        run: |
+          docker run --rm "${LOCAL_IMAGE}" --version
+          docker run --rm "${LOCAL_IMAGE}" --help
+          test "$(docker inspect --format '{{.Config.User}}' "${LOCAL_IMAGE}")" = "65532:65532"
+
+      # The console's zero-setup promise, end to end against a real MongoDB 8 replica set:
+      # no env and a fresh volume → generated secret.key, setup window (admin without
+      # the token), connection check, "Back up now" into Local backups (encrypted with a
+      # console-kept key), restore checked with mongosh, recovery key, restart with the
+      # same key, a different MONGOSHIELD_SECRET refused, HEALTHCHECK healthy, SIGINT and
+      # SIGTERM exit 0, and an explicit/too-short MONGOSHIELD_SECRET as before.
+      - name: Smoke test (console, zero setup)
+        if: matrix.image == 'mongoshield-console'
+        env:
+          SMOKE_PORT: "8080"
+        run: docker/smoke/console-zero-setup.sh "${LOCAL_IMAGE}"
+
+      # Atlas-style `mongodb+srv://` strings from the distroless image: SRV + TXT lookups
+      # (CoreDNS on the Docker network), TLS required by mongod with a private CA mounted
+      # as tlsCAFile, the TXT record's authSource honoured, and TLS/DNS failures explained.
+      - name: Smoke test (console, SRV + TLS)
+        if: matrix.image == 'mongoshield-console'
+        env:
+          SMOKE_PORT: "8081"
+        run: docker/smoke/console-srv-tls.sh "${LOCAL_IMAGE}"
+
+      # The operator needs a cluster to do anything, but without one it must still
+      # start, serve /healthz and shut down cleanly on SIGTERM.
+      - name: Smoke test (operator)
+        if: matrix.image == 'mongoshield-operator'
+        run: |
+          set -euo pipefail
+          docker run -d --name operator -p 8080:8080 -e LEADER_ELECTION=false "${LOCAL_IMAGE}"
+          for _ in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8080/healthz
+          # To a file first: `grep -q` closing the pipe early would fail curl under pipefail.
+          curl -fsS http://localhost:8080/metrics > operator-metrics.txt
+          grep -q mongoshield_operator_leader operator-metrics.txt
+          docker stop operator
+          test "$(docker inspect --format '{{.State.ExitCode}}' operator)" = "0"
+          test "$(docker inspect --format '{{.Config.User}}' "${LOCAL_IMAGE}")" = "65532:65532"
+
+      # 3. Fail on known, fixable HIGH/CRITICAL vulnerabilities in the OS packages or
+      #    node_modules. Unfixed ones are ignored: there is nothing to upgrade to yet.
+      #    trivy-action has no major-version tag, so it is pinned to a release.
+      - name: Vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0 # no major tag exists; bump deliberately
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          # Documented exceptions, each with a reason and an expiry date.
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table
+
+      - name: Log in to GitHub Container Registry
+        if: steps.release.outputs.push == 'true'
+        uses: docker/login-action@v3 # v3: current major
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4. Build every platform and push. Layers come from the cache, so this is mostly
+      #    the arm64 deps stage plus the upload.
+      #    sbom: an SPDX SBOM of the image contents, attached to the image.
+      #    provenance mode=max: SLSA provenance with full build details (no secrets: none
+      #    are passed to the build).
+      - name: Build and push (linux/amd64, linux/arm64)
+        id: push
+        if: steps.release.outputs.push == 'true'
+        uses: docker/build-push-action@v6 # v6: current major
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        if: steps.release.outputs.push == 'true'
+        uses: sigstore/cosign-installer@v3 # v3: current major
+
+      # 5. Sign the pushed manifest list by digest (signing a tag could sign whatever the
+      #    tag points to by then). One signature covers every tag and both platforms.
+      #    Keyless: cosign gets a short-lived certificate for this workflow's identity;
+      #    the signature is recorded in Sigstore's public transparency log.
+      - name: Sign image (cosign keyless)
+        if: steps.release.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Summary
+        if: steps.release.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Published ${IMAGE}"
+            echo
+            echo "Digest: \`${DIGEST}\`"
+            echo
+            echo "Tags:"
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

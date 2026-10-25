@@ -1,0 +1,594 @@
+/**
+ * The main user journey, start to finish, in one browser session against the
+ * real console and a real mongod:
+ *
+ *   first-run setup with the link from the server log → sign out and in → add a
+ *   production connection (its secret is never shown again) and a scratch one →
+ *   test them → add local storage and test it → create a plan with the namespace
+ *   picker, age-recipient encryption and a schedule preview → run it now and watch
+ *   the job live → the backup appears, verified → browse documents (filter, paging)
+ *   of a passphrase-encrypted backup → restore the selected documents into renamed
+ *   collections and check them in MongoDB → edit one of them and preview a restore
+ *   over them (counts, the effect of upsert, the edited document's fields) → preview
+ *   and restore the whole recipient-encrypted backup into the production connection
+ *   (typed name, private key) → drill into
+ *   the scratch connection → hold and release → scoped retention → the audit log shows
+ *   each action → sign out.
+ *
+ * Later specs (project "features") rely on what this one creates; see NAMES.
+ */
+
+import type { Page } from "@playwright/test";
+import { generateIdentity } from "mongoshield";
+import { accessibilityProblems } from "./a11y.ts";
+import { ADMIN, E2E_MONGO_PASSWORD, mongoUri, NAMES, SEED } from "./env.ts";
+import {
+  expect,
+  goTo,
+  idByName,
+  setupLinkFromServerLog,
+  signIn,
+  signOut,
+  test,
+  waitForJob,
+  withMongo,
+} from "./fixtures.ts";
+
+/** A key pair for the recipient-encrypted plan; the private key is only used to restore. */
+const KEY = generateIdentity();
+/** The passphrase of the second plan, which the console stores and can therefore read with. */
+const PASSPHRASE = "a passphrase the console keeps";
+const PASSPHRASE_PLAN = "Shop passphrase";
+
+test("an admin sets up the console, backs up, browses, restores and audits", async ({
+  page,
+  pageProblems,
+}) => {
+  test.setTimeout(10 * 60_000);
+  let recipientBackupId = "";
+  let passphraseBackupId = "";
+  /** The `_id`s restored as "selected documents", previewed again afterwards. */
+  const selectedIds: number[] = [];
+
+  await test.step("first-run setup with the link from the server log", async () => {
+    const link = await setupLinkFromServerLog();
+    await page.goto(link);
+    await expect(page.getByRole("heading", { name: "Welcome to MongoShield" })).toBeVisible();
+    // The token comes from the link (optional while the setup window is open, but a
+    // token that is given is used); the operator only chooses a name and a password.
+    await expect(page.getByLabel(/^Setup token/)).not.toHaveValue("");
+    await page.getByLabel("User name").fill(ADMIN.username);
+    await page.getByLabel("Password", { exact: true }).fill(ADMIN.password);
+    await page.getByRole("button", { name: "Create account and continue" }).click();
+    // A console without connections starts on the welcome page; this journey sets
+    // things up by hand, so it skips it (e2e/onboarding.spec.ts takes the quick path).
+    await expect(
+      page.getByRole("heading", { name: "Connect your database", level: 1 }),
+    ).toBeVisible();
+    // The single-use token is removed from the address bar and history.
+    expect(page.url()).not.toContain("token=");
+    await page.getByRole("button", { name: "Skip for now" }).click();
+    await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+  });
+
+  await test.step("sign out and sign in again", async () => {
+    await signOut(page);
+    await signIn(page, ADMIN);
+    await expect(page.getByTitle(`Signed in as ${ADMIN.username} (admin)`)).toBeVisible();
+  });
+
+  await test.step("add the production connection; its secret is never shown again", async () => {
+    await goTo(page, "/connections");
+    await addConnection(page, NAMES.production, true);
+    const row = page.getByRole("row", { name: new RegExp(NAMES.production) });
+    await expect(row.getByText("Production", { exact: true })).toBeVisible();
+    await expect(row.getByText(/\*\*\*/)).toBeVisible();
+
+    // Not in the page, not in the edit dialog, not in any API response.
+    expect(await page.content()).not.toContain(E2E_MONGO_PASSWORD);
+    await page.getByRole("button", { name: `Edit ${NAMES.production}` }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByLabel("Connection string", { exact: true })).toHaveValue("");
+    await expect(dialog.getByText(/Stored: .*\*\*\*/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    const listed = await page.request.get("/api/connections");
+    expect(await listed.text()).not.toContain(E2E_MONGO_PASSWORD);
+  });
+
+  await test.step("add a scratch connection and test it from the list", async () => {
+    await addConnection(page, NAMES.scratch, false);
+    await page.getByRole("button", { name: `Test ${NAMES.scratch}` }).click();
+    const report = page.getByRole("dialog", { name: `Connection test: ${NAMES.scratch}` });
+    await expect(report.getByText("Connected")).toBeVisible();
+    await report.getByRole("button", { name: "Close", exact: true }).click();
+  });
+
+  await test.step("add local storage and test it", async () => {
+    await goTo(page, "/storage");
+    await page.getByRole("button", { name: "Add storage" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add storage" });
+    // Exact labels: the step tabs and suggestion groups are named with similar words.
+    await dialog.getByLabel("Name", { exact: true }).fill(NAMES.storage);
+    // The location is built from its type and fields: a folder in the data volume here.
+    await dialog.getByLabel("Type", { exact: true }).selectOption("local");
+    await dialog.getByLabel("Folder", { exact: true }).fill(NAMES.storagePath);
+    // A local folder needs no sign-in, so that step is locked and "Add and test" is here.
+    await dialog.getByRole("button", { name: "Add and test" }).click();
+    const report = page.getByRole("dialog", { name: `Storage test: ${NAMES.storage}` });
+    await expect(report.getByText("Write, read and delete work")).toBeVisible();
+    await report.getByRole("button", { name: "Close", exact: true }).click();
+    // Testing again from the list works the same way.
+    await page.getByRole("button", { name: `Test ${NAMES.storage}` }).click();
+    await expect(report.getByText("Write, read and delete work")).toBeVisible();
+    await report.getByRole("button", { name: "Close", exact: true }).click();
+  });
+
+  await test.step("create a plan: namespace picker, recipient encryption, schedule preview", async () => {
+    await goTo(page, "/plans");
+    await page.getByRole("link", { name: "New plan" }).click();
+    const form = page.getByRole("form", { name: "Backup plan" });
+    // Step 1, Basics. Exact labels: step tabs are named with their hints, which can
+    // contain the same words.
+    await form.getByLabel("Name", { exact: true }).fill(NAMES.plan);
+    await form
+      .getByLabel("Connection", { exact: true })
+      .selectOption({ label: `${NAMES.production} (production)` });
+    await form.getByLabel("Storage", { exact: true }).selectOption({ label: NAMES.storage });
+
+    // Step 2: tick the whole database in the live tree; the preview shows what that selects.
+    await form.getByRole("button", { name: /^Next: What to back up/ }).click();
+    await form.getByRole("radio", { name: "Choose databases and collections" }).check();
+    await form.getByRole("checkbox", { name: SEED.database, exact: true }).check();
+    const preview = page.getByRole("complementary", { name: "Selection preview" });
+    const ordersRow = preview.getByRole("row", { name: new RegExp(SEED.orders) });
+    await expect(ordersRow.getByText("Included")).toBeVisible();
+    const contactsRow = preview.getByRole("row", { name: /contacts/ });
+    await expect(contactsRow.getByText("Excluded")).toBeVisible();
+
+    // Step 3, Security: encrypted to a public key.
+    await form.getByRole("button", { name: /^Next: Security/ }).click();
+    await form
+      .getByLabel("Encryption", { exact: true })
+      .selectOption({ label: "Public keys (age recipients) — recommended" });
+    await form.getByLabel("Recipients", { exact: true }).fill(KEY.recipient);
+
+    // Step 4, the schedule from selects: every day at 01:30 UTC, with its next five runs.
+    await form.getByRole("button", { name: /^Next: Schedule/ }).click();
+    await form.getByLabel("Repeat", { exact: true }).selectOption("daily");
+    await form.getByLabel("Time of day", { exact: true }).selectOption("01:30");
+    await form.getByLabel("Time zone", { exact: true }).selectOption("UTC");
+    // Scoped to the preview: the Schedule tab's hint and the summary say it as well.
+    const schedule = form.locator(".schedule-preview");
+    await expect(schedule.getByText("Every day at 01:30")).toBeVisible();
+    await expect(schedule.getByRole("listitem")).toHaveCount(5);
+    await expect(schedule.getByRole("listitem").filter({ hasText: "01:30" })).toHaveCount(5);
+
+    // Step 5: keep one backup so the prune dry run later has something to show.
+    await form.getByRole("button", { name: /^Next: Retention & alerts/ }).click();
+    await form.getByLabel("Keep", { exact: true }).selectOption("custom");
+    await form.getByLabel("Last N", { exact: true }).fill("1");
+    for (const bucket of ["Daily", "Weekly", "Monthly"]) {
+      await form.getByLabel(bucket, { exact: true }).fill("");
+    }
+
+    // Step 6, Review, ends with "Create plan".
+    await form.getByRole("button", { name: /^Next: Review/ }).click();
+    await form.getByRole("button", { name: "Create plan" }).click();
+    await expect(page.getByRole("heading", { name: "Backup plans", level: 1 })).toBeVisible();
+    await expect(page.getByRole("row", { name: new RegExp(NAMES.plan) })).toBeVisible();
+  });
+
+  await test.step("run the plan now and watch the job live", async () => {
+    await page.getByRole("button", { name: `Run now ${NAMES.plan}` }).click();
+    await expect(page.getByRole("heading", { name: "Backup job", level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Progress" })).toBeVisible();
+    expect(await waitForJob(page)).toBe("Succeeded");
+    // Progress arrived over the live event stream and shows the finished totals.
+    const progress = page.getByRole("progressbar", { name: "Documents" });
+    await expect(progress).toHaveAttribute("value", String(SEED.orderCount + SEED.customerCount));
+    await expect(page.getByText(/128 of ~128/)).toBeVisible();
+    await expect(page.getByText(/verified \(fast\)/)).toBeVisible();
+    // Each namespace with its own final count (a small collection used to be lost
+    // between two throttled progress events, and its documents counted to another).
+    const namespaces = page.locator(".panel", { hasText: "Namespaces" }).getByRole("listitem");
+    await expect(namespaces).toHaveCount(2);
+    await expect(namespaces.filter({ hasText: `${SEED.database}.${SEED.orders}` })).toContainText(
+      `Done${SEED.database}.${SEED.orders}${SEED.orderCount} documents`,
+    );
+    await expect(
+      namespaces.filter({ hasText: `${SEED.database}.${SEED.customers}` }),
+    ).toContainText(`${SEED.customerCount} documents`);
+    recipientBackupId = await backupIdOnJobPage(page);
+  });
+
+  await test.step("the backup appears in the catalog, verified", async () => {
+    await page.getByRole("link", { name: "Backups", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Backups", level: 1 })).toBeVisible();
+    await showJourneyStorage(page);
+    const row = page.getByRole("row", { name: new RegExp(recipientBackupId) });
+    await expect(row.getByText("Verified (fast)")).toBeVisible();
+    await row.getByRole("link", { name: recipientBackupId }).click();
+    await expect(page.getByRole("heading", { name: recipientBackupId, level: 1 })).toBeVisible();
+    await page.getByRole("tab", { name: "Verification & drills" }).click();
+    const verification = page.locator(".panel", { hasText: "Latest verification" });
+    await expect(verification.getByText("Verified", { exact: true })).toBeVisible();
+    await expect(verification.getByText("fast", { exact: true })).toBeVisible();
+  });
+
+  await test.step("a backup encrypted to a public key cannot be browsed without its key", async () => {
+    // The console only holds the public key, so reading documents fails, and says why.
+    pageProblems.allow(/Failed to load resource: the server responded with a status of 4\d\d/);
+    await page.getByRole("tab", { name: "Browse documents" }).click();
+    await expect(page.getByText("Could not read documents")).toBeVisible();
+    await expect(page.getByText(/Encrypted backups can only be browsed/)).toBeVisible();
+  });
+
+  await test.step("a second plan with passphrase encryption backs up shop.orders", async () => {
+    await goTo(page, "/plans/new");
+    const form = page.getByRole("form", { name: "Backup plan" });
+    await form.getByLabel("Name", { exact: true }).fill(PASSPHRASE_PLAN);
+    // The same location as the first plan (the editor preselects the first one, which is
+    // the console's own "Local backups").
+    await form.getByLabel("Storage", { exact: true }).selectOption({ label: NAMES.storage });
+    // Only the orders collection: open the database in the tree and tick it.
+    await form.getByRole("button", { name: /^Next: What to back up/ }).click();
+    await form.getByRole("radio", { name: "Choose databases and collections" }).check();
+    const database = form.getByRole("listitem").filter({
+      has: page.getByRole("checkbox", { name: SEED.database, exact: true }),
+    });
+    const show = database.getByRole("button", { name: `Show collections in ${SEED.database}` });
+    if ((await show.count()) > 0) await show.click();
+    await database
+      .getByRole("checkbox", { name: `${SEED.database}.${SEED.orders}`, exact: true })
+      .check();
+    // Encrypted with a passphrase the console keeps.
+    await form.getByRole("button", { name: /^Next: Security/ }).click();
+    await form.getByLabel("Encryption", { exact: true }).selectOption({ label: "Passphrase" });
+    await form.getByLabel("Passphrase", { exact: true }).fill(PASSPHRASE);
+    // Run by hand only.
+    await form.getByRole("button", { name: /^Next: Schedule/ }).click();
+    await form.getByLabel("Run on a schedule", { exact: true }).uncheck();
+    // Straight to the Review tab, which ends with "Create plan".
+    await form.getByRole("tab", { name: /^Review/ }).click();
+    await form.getByRole("button", { name: "Create plan" }).click();
+    await page.getByRole("button", { name: `Run now ${PASSPHRASE_PLAN}` }).click();
+    expect(await waitForJob(page)).toBe("Succeeded");
+    passphraseBackupId = await backupIdOnJobPage(page);
+    // The passphrase never reaches the browser again.
+    expect(await (await page.request.get("/api/plans")).text()).not.toContain(PASSPHRASE);
+  });
+
+  await test.step("browse its documents with a filter and paging", async () => {
+    await openBackup(page, passphraseBackupId, "Browse documents");
+    // The backup's namespaces are a tree; the documents a table (the default view).
+    await page
+      .getByRole("tree", { name: "Databases and collections in the backup" })
+      .getByRole("treeitem", { name: new RegExp(`^${SEED.orders}`) })
+      .click();
+    const rows = page.getByRole("table", { name: "Documents" }).locator("tbody tr[data-index]");
+    await expect(rows).toHaveCount(20);
+    await page.getByRole("button", { name: "Next page" }).click();
+    await expect(page.getByText(`Page 2 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
+    await expect(rows).toHaveCount(20);
+    await page.getByRole("button", { name: "Previous page" }).click();
+    await expect(page.getByText(`Page 1 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
+
+    // One in three orders is open: 40 documents, two pages of 20.
+    await page.getByLabel("Filter (Extended JSON)").fill('{"status": "open"}');
+    await page.getByRole("button", { name: "Apply", exact: true }).click();
+    await expect(page.getByText(/· filtered/)).toBeVisible();
+    await expect(rows).toHaveCount(20);
+    await expect(rows.first()).toContainText("open");
+    await page.getByRole("button", { name: "Next page" }).click();
+    await expect(page.getByText(`Page 2 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
+    await expect(rows).toHaveCount(20);
+    await expect(page.getByRole("button", { name: "Next page" })).toBeDisabled();
+    await page.getByRole("button", { name: "Previous page" }).click();
+    await expect(page.getByText(`Page 1 of ${SEED.database}.${SEED.orders}`)).toBeVisible();
+  });
+
+  await test.step("restore two selected documents into renamed collections", async () => {
+    const rows = page.getByRole("table", { name: "Documents" }).locator("tbody tr[data-index]");
+    for (const index of [0, 1]) {
+      const choice = rows.nth(index).getByRole("checkbox", { name: /^Select document / });
+      // The checkbox is named after the document's `_id` ("Select document 4").
+      const label = (await choice.getAttribute("aria-label")) ?? "";
+      selectedIds.push(Number(label.replace("Select document ", "")));
+      await choice.check();
+    }
+    await page.getByRole("button", { name: "Restore selected (2)" }).click();
+
+    await expect(page.getByRole("heading", { name: "Restore", level: 1 })).toBeVisible();
+    await expect(page.getByText("Restoring 2 selected documents")).toBeVisible();
+    // A non-production connection is preselected.
+    await expect(page.getByLabel("Target connection")).toHaveValue(
+      await connectionId(page, NAMES.scratch),
+    );
+    // Where: restore as a copy next to the original, shop → shop_selected.
+    await page.getByRole("tab", { name: /^Where/ }).click();
+    await page.getByRole("radio", { name: "A copy next to the original" }).check();
+    await page.getByLabel("Suffix", { exact: true }).fill("_selected");
+    // Keys: the console keeps this plan's passphrase, so nothing to type; review the plan.
+    await page.getByRole("tab", { name: /^Keys/ }).click();
+    await page.getByRole("button", { name: "Review plan" }).click();
+    await expect(
+      page.getByText(`Plan: 1 namespace, 2 documents into ${NAMES.scratch}`),
+    ).toBeVisible();
+    // Selected documents have no preview step: their plan already counts them.
+    await expect(page.getByRole("tab", { name: /^Preview/ })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    await page.getByRole("button", { name: "Next: Confirm" }).click();
+    await page.getByRole("button", { name: "Start restore" }).click();
+    expect(await waitForJob(page)).toBe("Succeeded");
+
+    const restored = await withMongo((client) =>
+      client.db("shop_selected").collection(SEED.orders).find().sort({ _id: 1 }).toArray(),
+    );
+    // Exactly the selected documents, with their backed-up contents.
+    expect(restored.map((document) => document._id)).toEqual(selectedIds.sort((a, b) => a - b));
+    for (const document of restored) {
+      expect(document).toMatchObject({
+        sku: `SKU-${String(document._id).padStart(4, "0")}`,
+        status: "open",
+      });
+    }
+  });
+
+  await test.step("preview what a restore would change, down to one document's fields", async () => {
+    // One of the documents restored above is edited in the target afterwards.
+    const [editedId] = selectedIds;
+    await withMongo((client) =>
+      client
+        .db("shop_selected")
+        .collection<{ _id: number }>(SEED.orders)
+        .updateOne({ _id: editedId ?? -1 }, { $set: { status: "edited after the restore" } }),
+    );
+    await openBackup(page, passphraseBackupId);
+    await page.getByRole("link", { name: "Restore…" }).click();
+    // Where: the same copy as before (shop → shop_selected), now upserting into it.
+    await page.getByRole("tab", { name: /^Where/ }).click();
+    await page.getByRole("radio", { name: "A copy next to the original" }).check();
+    await page.getByLabel("Suffix", { exact: true }).fill("_selected");
+    await page
+      .getByLabel("If a target collection already has data", { exact: true })
+      .selectOption("upsert");
+    // Keys (nothing to type) → the plan → the optional preview, started by hand.
+    await page.getByRole("tab", { name: /^Keys/ }).click();
+    await page.getByRole("button", { name: "Review plan" }).click();
+    await page.getByRole("button", { name: "Next: Preview" }).click();
+    await page.getByRole("button", { name: "Preview changes" }).click();
+
+    // 120 orders backed up; the target has 2 of them, one edited since.
+    const summary = page.getByRole("table", { name: "Changes per namespace" });
+    const orders = summary.getByRole("row", { name: new RegExp(`${SEED.database}\\.orders`) });
+    await expect(orders).toContainText("Exact");
+    await expect(orders).toContainText(
+      `${SEED.orderCount - 2} new, 1 replaced, 0 deleted, 1 unchanged`,
+    );
+    await expect(page.getByText("1 namespace would change")).toBeVisible();
+    expect(await accessibilityProblems(page, { shell: true }), "preview summary").toEqual([]);
+
+    // Down to the edited document: the one changed field, both values.
+    await page
+      .getByRole("button", { name: `Documents of ${SEED.database}.${SEED.orders}` })
+      .click();
+    const changed = page.getByRole("list", { name: "Changed: ids" });
+    await changed.getByRole("button", { name: `_id ${editedId}` }).click();
+    const fields = page.getByRole("table", { name: "Fields that differ" });
+    const status = fields.getByRole("row", { name: /status/ });
+    await expect(status).toContainText("edited after the restore");
+    await expect(status).toContainText("open");
+    await expect(fields.getByRole("row")).toHaveCount(2);
+    await expect(page.getByText("In the target now (shop_selected.orders)")).toBeVisible();
+    expect(await accessibilityProblems(page, { shell: true }), "document diff").toEqual([]);
+    // Previewing wrote nothing.
+    const stored = await withMongo((client) =>
+      client
+        .db("shop_selected")
+        .collection<{ _id: number; status?: string }>(SEED.orders)
+        .findOne({ _id: editedId ?? -1 }),
+    );
+    expect(stored?.status).toBe("edited after the restore");
+  });
+
+  await test.step("restore the whole recipient-encrypted backup into production", async () => {
+    await openBackup(page, recipientBackupId);
+    await page.getByRole("link", { name: "Restore…" }).click();
+    // Where: the production connection, which the step warns about.
+    await page.getByRole("tab", { name: /^Where/ }).click();
+    await page
+      .getByLabel("Target connection", { exact: true })
+      .selectOption({ label: `${NAMES.production} — PRODUCTION` });
+    await expect(page.getByText("This is a production connection")).toBeVisible();
+    // Into a new database on the production connection, picked from its list.
+    await page.getByRole("radio", { name: "Into another database" }).check();
+    await page.getByLabel(/^Database in /).selectOption({ label: "New database…" });
+    await page.getByLabel("New database name", { exact: true }).fill("shop_full");
+    // Keys: the private key the console never stores.
+    await page.getByRole("tab", { name: /^Keys/ }).click();
+    await page.getByLabel("Private key (optional)", { exact: true }).fill(KEY.identity);
+    await page.getByRole("button", { name: "Review plan" }).click();
+    await expect(
+      page.getByText(
+        `Plan: 2 namespaces, ${SEED.orderCount + SEED.customerCount} documents into ${NAMES.production}`,
+      ),
+    ).toBeVisible();
+
+    // The preview reads the backup with the typed private key too: new collections only.
+    await page.getByRole("button", { name: "Next: Preview" }).click();
+    await page.getByRole("button", { name: "Preview changes" }).click();
+    const summary = page.getByRole("table", { name: "Changes per namespace" });
+    await expect(summary.getByText("shop_full.orders")).toBeVisible();
+    await expect(summary.getByText("(new)", { exact: false })).toHaveCount(2);
+    await page.getByRole("button", { name: "Next: Confirm" }).click();
+
+    // Production needs its name typed exactly.
+    const start = page.getByRole("button", { name: "Start restore" });
+    await expect(start).toBeDisabled();
+    const confirm = page.getByLabel(`Type ${NAMES.production} to confirm`);
+    await confirm.fill("production shop");
+    await expect(page.getByText("The name does not match.")).toBeVisible();
+    await expect(start).toBeDisabled();
+    await confirm.fill(NAMES.production);
+    await expect(start).toBeEnabled();
+    await start.click();
+    expect(await waitForJob(page)).toBe("Succeeded");
+    expect(await page.content()).not.toContain(KEY.identity);
+
+    const counts = await withMongo(async (client) => ({
+      orders: await client.db("shop_full").collection(SEED.orders).countDocuments(),
+      customers: await client.db("shop_full").collection(SEED.customers).countDocuments(),
+    }));
+    expect(counts).toEqual({ orders: SEED.orderCount, customers: SEED.customerCount });
+  });
+
+  await test.step("drill the passphrase backup into the non-production connection", async () => {
+    await openBackup(page, passphraseBackupId);
+    await page.getByRole("button", { name: "Drill…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Restore drill" });
+    // Production connections are never offered as drill targets.
+    const options = dialog.getByLabel("Target connection", { exact: true }).getByRole("option");
+    await expect(options).toHaveText([NAMES.scratch]);
+    await dialog.getByRole("button", { name: "Start drill" }).click();
+    expect(await waitForJob(page)).toBe("Succeeded");
+
+    await openBackup(page, passphraseBackupId, "Verification & drills");
+    const drills = page.getByRole("table", { name: "Restore drills of this backup" });
+    await expect(drills.getByText("Succeeded")).toBeVisible();
+  });
+
+  await test.step("put the backup on hold and release it", async () => {
+    await page.getByRole("button", { name: "Hold…" }).click();
+    const hold = page.getByRole("dialog", { name: "Put backup on hold" });
+    await hold.getByLabel("Reason", { exact: true }).fill("Legal hold: ticket SEC-1234");
+    await hold.getByRole("button", { name: "Hold backup" }).click();
+    await expect(page.getByText(/Legal hold: ticket SEC-1234 — held since/)).toBeVisible();
+
+    await page.getByRole("button", { name: "Release hold…" }).click();
+    const release = page.getByRole("dialog", { name: "Release hold" });
+    await release.getByRole("button", { name: "Release hold" }).click();
+    await expect(page.getByText(/held since/)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Hold…" })).toBeVisible();
+  });
+
+  await test.step("retention after a run: prunes only the plan's own backups", async () => {
+    // A second run of the plan that keeps only the newest backup. Another plan
+    // writes to the same storage; the run's automatic prune must delete this plan's
+    // older backup and never the other plan's (before scoped retention it deleted both).
+    await goTo(page, "/plans");
+    await page.getByRole("button", { name: `Run now ${NAMES.plan}` }).click();
+    expect(await waitForJob(page)).toBe("Succeeded");
+    await showJourneyStorage(page);
+    await expect(page.getByRole("row", { name: new RegExp(passphraseBackupId) })).toBeVisible();
+    await expect(page.getByRole("row", { name: new RegExp(recipientBackupId) })).toHaveCount(0);
+
+    // The dry run covers the plan's own backups only and says what it leaves alone.
+    await page.getByRole("button", { name: "Apply retention…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Apply retention" });
+    await dialog
+      .getByLabel("Retention of plan", { exact: true })
+      .selectOption({ label: `${NAMES.plan} (last 1)` });
+    await expect(dialog.getByText(/Nothing to prune/)).toBeVisible();
+    await expect(dialog.getByText(/1 other backup in this storage/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByRole("row", { name: new RegExp(passphraseBackupId) })).toBeVisible();
+  });
+
+  await test.step("the audit log shows each action", async () => {
+    await goTo(page, "/audit");
+    const log = page.getByRole("table", { name: "Audit log entries" });
+    for (const action of [
+      "setup.complete",
+      "session.logout",
+      "session.login",
+      "connection.create",
+      "connection.test",
+      "storage.create",
+      "storage.test",
+      "plan.create",
+      "plan.run",
+      "backup.browse",
+      "restore.start",
+      "restore.preview",
+      "restore.preview_documents",
+      "restore.preview_document",
+      "backup.drill",
+      "backup.hold",
+      "backup.release",
+    ]) {
+      await expect(log.getByText(action, { exact: true }).first(), action).toBeVisible();
+    }
+    // Filtering narrows the table to one kind of action.
+    await page.getByLabel("Action", { exact: true }).selectOption("restore.start");
+    await expect(log.getByRole("row")).toHaveCount(3);
+  });
+
+  await test.step("sign out", async () => {
+    await signOut(page);
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
+    expect((await page.request.get("/api/connections")).status()).toBe(401);
+  });
+});
+
+/** The id of the backup a finished backup job wrote (the link in its details). */
+async function backupIdOnJobPage(page: Page): Promise<string> {
+  const link = page.getByRole("link", { name: /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z_/ });
+  const id = await link.textContent();
+  if (id === null || id === "") throw new Error("The job page links no backup.");
+  return id;
+}
+
+/**
+ * Picks the journey's storage location on the Backups page. The page starts on the
+ * first location, which is the "Local backups" the console created by itself.
+ */
+async function showJourneyStorage(page: Page): Promise<void> {
+  const storageId = await idByName(page.request, "/api/storage", NAMES.storage);
+  await goTo(page, `/backups?storage=${encodeURIComponent(storageId)}`);
+  await expect(page.getByLabel("Storage", { exact: true })).toHaveValue(storageId);
+}
+
+/** Opens a backup of the journey's storage location, optionally on one tab. */
+async function openBackup(page: Page, backupId: string, tab?: string): Promise<void> {
+  await showJourneyStorage(page);
+  await page.getByRole("link", { name: backupId }).click();
+  await expect(page.getByRole("heading", { name: backupId, level: 1 })).toBeVisible();
+  if (tab !== undefined) await page.getByRole("tab", { name: tab }).click();
+}
+
+/** A connection's id, read from the API with the page's session. */
+async function connectionId(page: Page, name: string): Promise<string> {
+  const connections: unknown = await (await page.request.get("/api/connections")).json();
+  if (!Array.isArray(connections)) throw new Error("GET /api/connections did not return a list.");
+  for (const connection of connections) {
+    if (Reflect.get(connection, "name") === name) return String(Reflect.get(connection, "id"));
+  }
+  throw new Error(`No connection named ${name}.`);
+}
+
+/** Adds a connection to the test mongod through the dialog and closes the automatic test. */
+async function addConnection(page: Page, name: string, production: boolean): Promise<void> {
+  await page.getByRole("button", { name: "Add connection" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add connection" });
+  // Exact labels: the suggestion groups are named "Suggestions for Name" and so on.
+  await dialog.getByLabel("Name", { exact: true }).fill(name);
+  const uri = dialog.getByLabel("Connection string", { exact: true });
+  await uri.fill(mongoUri());
+  // Leaving the field moves the password out of the visible string into a masked field.
+  await uri.blur();
+  await expect(uri).not.toHaveValue(new RegExp(E2E_MONGO_PASSWORD));
+  await expect(dialog.getByLabel(/^Password for /)).toHaveAttribute("type", "password");
+  // The console proposes the production flag from the string; set it as this test wants.
+  await dialog
+    .getByLabel("This is a production deployment", { exact: true })
+    .setChecked(production);
+  await dialog.getByRole("button", { name: "Add and test" }).click();
+  // Saving runs a connection test right away.
+  const report = page.getByRole("dialog", { name: `Connection test: ${name}` });
+  await expect(report.getByText("Connected")).toBeVisible();
+  await report.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByRole("row", { name: new RegExp(name) })).toBeVisible();
+}

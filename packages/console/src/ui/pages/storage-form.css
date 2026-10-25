@@ -1,0 +1,96 @@
+/*
+ * Layout for the storage add/edit dialog (storage-form.tsx). Only arrangement lives
+ * here: colors, type sizes, radii and spacing come from the design tokens in
+ * ../styles.css, so both themes apply as is.
+ *
+ * This file loads BEFORE styles.css; where a rule must win over a styles.css rule of
+ * the same element (the `.input` font), the selector is made more specific.
+ */
+
+/* The fields of one step (Location, Sign in), one under the other. */
+.storage-form-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/*
+ * The flow's Back / Next row is the dialog's footer: it stays in view at the bottom of
+ * the scrolling dialog body, over the fields that scroll under it. The negative margin
+ * and the padding cover the body's own bottom padding (18px, `.dialog-body` in
+ * ../styles.css), so the row ends flush with the dialog. `.storage-form` raises the
+ * specificity over step-flow.css.
+ */
+.storage-form .step-nav {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  /* Flush with the dialog's bottom edge (its body has --panel-pad of padding). */
+  margin-bottom: calc(-1 * var(--panel-pad));
+  padding-bottom: var(--panel-pad);
+  background: var(--color-surface-raised);
+}
+
+/* Two or three short fields side by side; one per row on a phone. */
+.storage-form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3);
+  align-items: start;
+}
+
+/* User · host · port: the port field only needs a few digits. */
+.storage-form-row-host {
+  grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr) minmax(80px, 0.6fr);
+}
+
+@media (max-width: 640px) {
+  .storage-form-row-host {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Machine values (URLs, key IDs, fingerprints) in the mono font. */
+.storage-form-mono .input {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* The URL the fields stand for: read-only, mono, wraps instead of widening the dialog. */
+.storage-form-url {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+  overflow-wrap: anywhere;
+}
+
+.storage-form-url output {
+  font-size: var(--text-sm);
+}
+
+/* A secret file (JSON key, private key): the textarea with its "Choose file…" button. */
+.storage-form-file {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.storage-form-file > .field {
+  align-self: stretch;
+}
+
+/* The button-styled label shows the focus of the hidden file input inside it. */
+.storage-form-file-button:focus-within {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* Key files are long and dense; keep them small and mono. */
+.storage-form-secret .input {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}

@@ -1,0 +1,88 @@
+---
+title: Limitations
+description: What MongoShield does not do, or does not do yet, collected from the specs and guides.
+---
+
+An honest list, gathered from the [specs](/specs/format/) and guides. Most of these are
+consequences of taking *logical* backups through the driver.
+
+## In general
+
+- **Logical backups only.** Restores re-insert every document and rebuild every index,
+  so restore time grows with data size. For very large deployments, storage snapshots
+  or physical backups restore faster (see [Compare](/compare/percona/)).
+- **User data first.** Server settings and `system.*` collections are not backed up.
+  Users and custom roles are only included with `includeUsersAndRoles` (off by default).
+- **Release candidate.** Until the first stable release (2.0.0) is out, install from the
+  `next` npm tag.
+
+## Consistency and point-in-time recovery
+
+- `converge` and the journal need a replica set or sharded cluster on MongoDB 6.0+ and a
+  user who may open cluster-wide change streams; the built-in `backup` role is not enough.
+  Without that, `auto` falls back to `none`.
+- `snapshot` fails if the backup outlasts the server's snapshot window (5 minutes by
+  default).
+- **Time series collections** are not converged or journaled: change streams do not
+  report their writes. They are restored as read.
+- Collection-option (`collMod`, such as hiding an index or changing a TTL) and view
+  changes made during a backup, or after a base backup, are not replayed; the dumped
+  metadata is used. Index builds and drops are replayed after the documents.
+- A change event over MongoDB's 16 MiB limit (a document close to 16 MiB with a large
+  `_id`) fails a converge backup and stops the journal writer: the server cannot send
+  it, even with `$changeStreamSplitLargeEvent`.
+- A connection that stays down for more than a few seconds fails a converge backup;
+  shorter interruptions are resumed from the last change received.
+- On MongoDB 6.0 (before `disambiguatedPaths` in 6.1), an update to a field name that
+  contains a dot looks like an update to a nested field (the manifest records a warning).
+- In restore modes `insert` and `upsert`, the converge replay can overwrite target
+  documents that share an `_id` with a document changed during the backup.
+- On sharded clusters, a `$out` or `renameCollection` that replaces a backed-up
+  collection during a converge backup can fail it with `MS_UNSUPPORTED_TOPOLOGY`
+  (timing-dependent; run it again or use `none`), and restores create unsharded
+  collections: shard the targets first and restore with `--mode insert`.
+- Backing up users and roles needs `viewUser` and `viewRole` on top of the `backup`
+  role.
+- The journal refuses passphrase encryption; use recipients or KMS keys.
+- Base backups must include every namespace the journal records.
+- [Incremental backups](/guides/incremental-backups/) need the oplog to reach back to
+  the previous backup, and the same include/exclude selection without `query` filters.
+  Every incremental copies its time series collections whole (in one snapshot read, so
+  a time series that takes longer than the snapshot window to read fails it) and
+  records every namespace's metadata. Long chains restore more slowly (every change
+  since the full backup is replayed).
+
+## Encryption
+
+- The manifest is not encrypted: database and collection names, counts, sizes and labels
+  are visible to anyone who can read the storage.
+- The manifest is not signed: someone with write access to the storage and a public key
+  could substitute files. Use [immutable backups](/guides/immutable-backups/) and
+  separate credentials for writing and restoring.
+- No post-quantum, SSH or plugin age recipients, and no ASCII-armored files.
+- The `age` CLI cannot unwrap KMS-protected keys; keep an offline recovery recipient.
+
+## Storage
+
+- Immutable (write-once) backups need S3 Object Lock, GCS object retention or Azure
+  immutability; local disk and SFTP cannot lock objects.
+- The journal writer's lease needs conditional writes (file, S3, GCS, Azure).
+
+## mongodump interop
+
+- `import` skips time series collections (mongodump stores internal bucket documents),
+  `system.*` collections, users and roles, and `oplog.bson`.
+- `export` does not export time series collections.
+
+## Copies
+
+- `copy` and `pull` are not atomic and not resumable: re-run an interrupted copy with
+  `--drop`.
+- Masking can make values collide on a unique index, which then fails to build.
+
+## Serverless platforms
+
+- Lambda and Vercel limit how long a function runs. Use `--max-duration` and `--resume`
+  to back up in slices, or run the Docker image where there is no time limit.
+
+Found something missing from this list? [Open an issue](https://github.com/ShamalRathnayake/mongoshield/issues).

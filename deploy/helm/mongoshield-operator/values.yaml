@@ -1,0 +1,117 @@
+# Default values for the MongoShield operator chart.
+#
+# The chart installs:
+#   - the CRDs (crds/, installed by Helm before everything else and never deleted
+#     by `helm uninstall`, so uninstalling cannot delete your plans and records),
+#   - the operator Deployment, its ServiceAccount and least-privilege RBAC,
+#   - a Service for /metrics (and, optionally, a Prometheus Operator ServiceMonitor).
+#
+#   helm install mongoshield-operator ./deploy/helm/mongoshield-operator \
+#     --namespace mongoshield-system --create-namespace
+#
+# Then create MongoShieldBackupPlans next to your databases' Secrets.
+# Full guide: docs/guides/kubernetes-operator.md
+
+image:
+  # The operator image (docker/operator.Dockerfile).
+  repository: ghcr.io/shamalrathnayake/mongoshield-operator
+  # Defaults to the chart's appVersion. Pin an exact version in production.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The MongoShield image the operator runs backups and restores with
+# (docker/Dockerfile). A plan can override it in spec.job.image.
+jobImage:
+  repository: ghcr.io/shamalrathnayake/mongoshield
+  # Pin an exact version (e.g. "2.0.0") so an image update never changes how your
+  # backups run unannounced. The default image has the AWS SDK; use a CLOUD_SDKS=all
+  # build for Google Cloud Storage or Azure.
+  tag: "latest"
+  # Leave empty for Kubernetes' default (IfNotPresent for pinned tags).
+  pullPolicy: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespaces the operator manages. Empty: every namespace (a ClusterRoleBinding).
+# A list: only those (one RoleBinding per namespace), which also limits what the
+# operator can touch, since it can only create Jobs where it is bound.
+watchNamespaces: []
+
+# Two replicas give fast failover: one leads (holds a Lease) and reconciles, the
+# other waits with warm caches. One is fine for most clusters: a restarted operator
+# picks up where it left off, and scheduled backups keep running without it
+# (they are plain CronJobs).
+replicaCount: 1
+
+# Compete for a coordination.k8s.io Lease before reconciling. Keep it on, even with
+# one replica: a rolling update briefly runs two pods.
+leaderElection:
+  enabled: true
+
+# Parallel reconciles per kind (plans, backups, restores).
+workers: 2
+
+# Re-check every object this often (seconds), as a safety net for missed events.
+resyncSeconds: 600
+
+# debug, info, warn or error. Logs are JSON lines.
+logLevel: info
+
+rbac:
+  # Create the ClusterRole and bindings the operator needs (see templates/rbac.yaml).
+  create: true
+  # Add read access (view) and full access (edit, admin) to the MongoShield kinds to
+  # Kubernetes' default user-facing roles. Note that whoever can create a
+  # MongoShieldRestore can restore into any database whose Secret is in that namespace.
+  aggregateToDefaultRoles: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# The operator only watches and writes Kubernetes objects: little CPU, flat memory.
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# /healthz, /readyz and /metrics.
+service:
+  port: 8080
+
+metrics:
+  # A Prometheus Operator ServiceMonitor for /metrics (needs its CRDs installed).
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+# Keep one replica up during node drains (only with replicaCount > 1).
+podDisruptionBudget:
+  enabled: true
+
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}

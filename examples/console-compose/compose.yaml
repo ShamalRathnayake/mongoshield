@@ -1,0 +1,70 @@
+# The MongoShield web console next to a MongoDB it can back up, with zero setup:
+#
+#   docker compose up -d
+#   open http://localhost:8080          # create the admin there (within 15 minutes)
+#
+# then paste mongodb://mongo:27017/?replicaSet=rs0 as the connection string, browse the
+# data, and press "Back up now". Backups go to the "Local backups" location inside the
+# console's volume, encrypted with a key the console keeps (download its recovery key
+# when the console offers it).
+#
+# Optional: copy .env.example to .env to create the admin from the environment instead
+# of the setup page, or to try a locally built image.
+name: mongoshield-console-demo
+
+services:
+  # MongoDB as a single-node replica set. A replica set (even of one) gives consistent
+  # snapshot backups and change streams, like any production deployment.
+  mongo:
+    image: mongo:8.0
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo-data:/data/db
+    # Doubles as the replica set initialiser: the first check that finds no replica set
+    # configured creates it, with the member named `mongo` (the name the console uses).
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status().ok } catch (error) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }).ok }"
+      interval: 5s
+      timeout: 10s
+      start_period: 10s
+      retries: 10
+    # No published port: only the console (on this Compose network) needs to reach it.
+    # Add `ports: ["127.0.0.1:27017:27017"]` to connect from the host too.
+
+  # The console. With no environment it generates its secret (/data/secret.key), creates
+  # the "Local backups" storage location (/data/backups) and opens a 15-minute setup window.
+  console:
+    image: ${CONSOLE_IMAGE:-ghcr.io/shamalrathnayake/mongoshield-console:latest}
+    # To run local changes instead, build the image from this repository:
+    # build:
+    #   context: ../..
+    #   dockerfile: docker/console.Dockerfile
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      # Loopback only: during the setup window, whoever opens the page first becomes the
+      # admin, so do not publish it on all interfaces before the admin exists. For access
+      # from other machines, put a TLS reverse proxy in front (see docs/guides/docker.md).
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Empty values mean "not set": the setup page creates the admin then.
+      MONGOSHIELD_ADMIN_USERNAME: ${MONGOSHIELD_ADMIN_USERNAME:-}
+      MONGOSHIELD_ADMIN_PASSWORD: ${MONGOSHIELD_ADMIN_PASSWORD:-}
+    volumes:
+      # State, the generated secret and local backups. Back it up, and keep that copy
+      # private: it contains the key next to what it encrypts.
+      - console-data:/data
+    # Running jobs get time to finish on `docker compose stop` (the console's own grace
+    # period is 60 s, MONGOSHIELD_SHUTDOWN_GRACE_SECONDS).
+    stop_grace_period: 70s
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  console-data:

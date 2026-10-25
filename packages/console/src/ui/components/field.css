@@ -1,0 +1,46 @@
+/*
+ * Fields (field.tsx): the show/hide button inside password fields. The other field
+ * styles live in ../styles.css; design tokens only, so both themes apply.
+ */
+
+/* The input fills the box; the eye button sits over its right end. */
+.input-reveal {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* Room on the right for the button, so typed text never runs under it. */
+.input.input-revealable {
+  padding-right: 40px;
+}
+
+.input-reveal-button {
+  position: absolute;
+  right: 4px;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.input-reveal-button:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* Shown: the button keeps a tint, as a pressed toggle (plus the crossed-out eye). */
+.input-reveal-button[aria-pressed="true"] {
+  color: var(--hue);
+}
+
+.input-reveal-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}

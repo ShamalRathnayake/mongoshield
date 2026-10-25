@@ -1,0 +1,32 @@
+The MongoShield operator is installed in namespace {{ .Release.Namespace }}.
+{{- if .Values.watchNamespaces }}
+It manages these namespaces: {{ join ", " .Values.watchNamespaces }}.
+{{- else }}
+It manages every namespace.
+{{- end }}
+
+1. Put the connection string in a Secret next to where the plan will live:
+
+   kubectl create secret generic prod-mongodb --from-literal=MONGODB_URI='mongodb+srv://backup:...@cluster/'
+
+2. Create a plan (full reference: docs/guides/kubernetes-operator.md):
+
+   apiVersion: mongoshield.io/v1alpha1
+   kind: MongoShieldBackupPlan
+   metadata:
+     name: nightly
+   spec:
+     source:
+       uriSecretRef: { name: prod-mongodb }
+     storage:
+       url: s3://my-backups/prod?region=eu-west-1
+     schedule:
+       cron: "15 3 * * *"
+     retention: { last: 3, daily: 7, weekly: 4 }
+
+3. Watch it work:
+
+   kubectl get msplan,msbackup,msrestore
+   kubectl describe msplan nightly
+
+Jobs run {{ include "mongoshield-operator.jobImage" . }}.

@@ -1,0 +1,134 @@
+# MongoShield as a plain Kubernetes CronJob: what the Helm chart in
+# deploy/helm/mongoshield renders with its default values, for people who
+# prefer `kubectl apply` or Kustomize.
+#
+#   1. Create the Secret with the connection string (never commit it):
+#        kubectl -n backups create secret generic mongoshield \
+#          --from-literal=MONGODB_URI='mongodb+srv://backup-user:...@cluster0.example.mongodb.net/'
+#   2. Edit the ConfigMap below (storage, retention) and the recipient public key.
+#   3. kubectl -n backups apply -f deploy/kubernetes/cronjob.yaml
+#   4. Run once now to test:
+#        kubectl -n backups create job --from=cronjob/mongoshield mongoshield-manual
+#        kubectl -n backups logs -f job/mongoshield-manual
+#
+# Full guide: docs/guides/kubernetes.md
+---
+# The identity the pods run as. Annotate it for AWS IRSA / GKE Workload Identity /
+# Azure Workload Identity so no cloud keys live in the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongoshield
+  labels:
+    app.kubernetes.io/name: mongoshield
+  annotations:
+    # AWS IRSA example; replace or remove.
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mongoshield-backups
+# MongoShield never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+# mongoshield.config.json. No secrets here: ConfigMaps are readable by anyone with
+# read access to the namespace. Field reference: packages/mongoshield/src/config/schema.ts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongoshield
+  labels:
+    app.kubernetes.io/name: mongoshield
+data:
+  mongoshield.config.json: |
+    {
+      "storage": "s3://my-backups/mongodb?region=eu-west-1",
+      "backup": {
+        "exclude": ["*.sessions"],
+        "labels": { "trigger": "kubernetes" }
+      },
+      "retention": { "last": 3, "daily": 7, "weekly": 4, "monthly": 12 },
+      "schedule": {
+        "cron": "15 3 * * *",
+        "timezone": "Etc/UTC",
+        "lock": "storage",
+        "verify": "fast",
+        "retries": 2
+      }
+    }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mongoshield
+  labels:
+    app.kubernetes.io/name: mongoshield
+spec:
+  # 03:15 UTC every day. Keep config.schedule.cron above in sync (informational for `run`).
+  schedule: "15 3 * * *"
+  timeZone: "Etc/UTC" # Kubernetes 1.27+
+  # Never start a backup while the previous one is still running.
+  concurrencyPolicy: Forbid
+  # Missed the slot (cluster down)? Still start up to 1 hour late, then skip.
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # MongoShield retries inside the pod (schedule.retries); one extra pod is plenty.
+      backoffLimit: 1
+      # Hard stop after 6 hours. Set comfortably above your longest backup.
+      activeDeadlineSeconds: 21600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: mongoshield
+        spec:
+          restartPolicy: Never
+          serviceAccountName: mongoshield
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532 # the image's non-root user
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: mongoshield
+              # Pin an exact version in production, e.g. :2.0.0.
+              image: ghcr.io/shamalrathnayake/mongoshield:next
+              # The image's entrypoint is the CLI: this is `mongoshield run --config ...`.
+              # run = take a backup, verify it, prune old ones, notify.
+              args: ["run", "--config", "/etc/mongoshield/config/mongoshield.config.json"]
+              env:
+                - name: MONGODB_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: mongoshield
+                      key: MONGODB_URI
+                # Public key(s) to encrypt for (from `mongoshield keygen`). Not secret.
+                # Keep the matching secret key offline, outside the cluster.
+                - name: MONGOSHIELD_RECIPIENTS
+                  value: "age1replacewithyourpublickey"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              # Memory stays flat (everything streams). CPU speeds up compression.
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 256Mi
+                limits:
+                  memory: 1Gi
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/mongoshield/config
+                  readOnly: true
+                # Scratch space; the root filesystem is read-only.
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: config
+              configMap:
+                name: mongoshield
+            - name: tmp
+              emptyDir: {}

@@ -1,0 +1,136 @@
+/*
+ * Layout for the restore wizard (restore-wizard.tsx): its steps inside the shared step
+ * tabs (components/step-flow.css), the namespace picker of the "What" step
+ * (restore-namespace-picker.tsx) and the "Restore as" choice of the "Where" step
+ * (restore-as.tsx). Only arrangement lives here: colors, type sizes, radii and spacing
+ * come from the design tokens in ../styles.css, so the dark and light themes both apply.
+ */
+
+/* ---------------------------------------------------------------- steps */
+
+/*
+ * The content of the What / Where / Keys steps (a div or a form with the .form
+ * column layout). min-width: 0 lets long namespaces wrap instead of widening the
+ * step panel, which is itself a flex item.
+ */
+.restore-step {
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- namespace picker */
+
+.ns-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Search on the left, the buttons next to it, the total on the right; wraps on phones. */
+.ns-picker-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2) var(--space-3);
+}
+
+.ns-picker-search {
+  flex: 1 1 240px;
+}
+
+.ns-picker-buttons {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.ns-picker-total {
+  margin: 0 0 0 auto;
+  font-size: var(--text-sm);
+  /* Line up with the buttons' text, not with the top of the search label. */
+  align-self: center;
+}
+
+.ns-picker-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* One database (a fieldset): a sunken box, its "whole database" checkbox as the heading. */
+.ns-picker-group {
+  margin: 0;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-small);
+  background: var(--color-surface-sunken);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ns-picker-group-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ns-picker-tristate {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.ns-picker-database {
+  font-weight: 650;
+  font-size: var(--text-md);
+}
+
+.ns-picker-count {
+  font-size: var(--text-sm);
+}
+
+/* Collections are indented under their database so the hierarchy reads at a glance. */
+.ns-picker-collections {
+  padding-left: var(--space-5);
+}
+
+/* ---------------------------------------------------------------- restore as */
+
+.restore-as {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The live "shop.users → shop_restored.users" list. */
+.restore-as-preview {
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-small);
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+}
+
+.restore-as-preview ul {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  /* Long namespaces wrap instead of widening the form. */
+  overflow-wrap: anywhere;
+}
+
+.restore-as-preview p {
+  margin: 0;
+}
+
+.restore-as-preview .muted {
+  font-size: var(--text-sm);
+}

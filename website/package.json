@@ -1,0 +1,17 @@
+{
+  "name": "website",
+  "private": true,
+  "type": "module",
+  "description": "The MongoShield documentation website (Astro + Starlight).",
+  "scripts": {
+    "sync": "node scripts/sync-docs.ts && node --experimental-transform-types --no-warnings scripts/gen-cli-reference.ts && node --experimental-transform-types --no-warnings scripts/gen-config-reference.ts",
+    "dev": "pnpm sync && astro dev",
+    "build": "pnpm sync && astro build && node scripts/check-links.ts",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.3",
+    "@astrojs/starlight": "0.42.6",
+    "astro": "7.4.1"
+  }
+}

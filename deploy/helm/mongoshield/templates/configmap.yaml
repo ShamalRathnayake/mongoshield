@@ -1,0 +1,27 @@
+{{- /*
+mongoshield.config.json, built from `.Values.config`.
+
+The CronJob's `schedule` and `timeZone` are copied into config.schedule.cron and
+config.schedule.timezone, so the time is set in one place only. Skipped when the
+user brings their own ConfigMap (existingConfigMap).
+*/}}
+{{- if not .Values.existingConfigMap }}
+{{- /* deepCopy: never modify .Values itself while building the file. */}}
+{{- $config := deepCopy (.Values.config | default dict) }}
+{{- $fromValues := dict "cron" .Values.schedule }}
+{{- if .Values.timeZone }}
+{{- $_ := set $fromValues "timezone" .Values.timeZone }}
+{{- end }}
+{{- /* merge: keys already in $fromValues win; the rest come from config.schedule. */}}
+{{- $schedule := merge $fromValues ($config.schedule | default dict) }}
+{{- $_ := set $config "schedule" $schedule }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mongoshield.fullname" . }}
+  labels:
+    {{- include "mongoshield.labels" . | nindent 4 }}
+data:
+  mongoshield.config.json: |
+    {{- $config | toPrettyJson | nindent 4 }}
+{{- end }}

@@ -1,0 +1,20 @@
+MongoShield is scheduled: {{ include "mongoshield.fullname" . }} runs `mongoshield {{ .Values.command }}` at "{{ .Values.schedule }}" ({{ .Values.timeZone | default "controller time zone" }}).
+
+Run a backup now, without waiting for the schedule:
+  kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "mongoshield.fullname" . }} {{ include "mongoshield.fullname" . }}-manual-$(date +%s)
+
+Follow it:
+  kubectl -n {{ .Release.Namespace }} logs -f -l app.kubernetes.io/instance={{ .Release.Name }} --tail=100
+
+Before the first run, make sure the Secret "{{ .Values.mongodbUri.secretName }}" exists with key {{ .Values.mongodbUri.secretKey }}:
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.mongodbUri.secretName }} --from-literal={{ .Values.mongodbUri.secretKey }}='mongodb+srv://...'
+{{- if not .Values.recipients }}
+
+WARNING: `recipients` is empty, so backups are NOT encrypted (unless your config sets encryption).
+  Generate a key pair with `npx mongoshield@next keygen --output backup.key` and set
+  recipients: ["age1..."]. Keep backup.key offline, outside the cluster.
+{{- end }}
+{{- if not (get (.Values.config | default dict) "heartbeat") }}
+
+Tip: set config.heartbeat to a healthchecks.io / Cronitor URL to be alerted when backups stop arriving.
+{{- end }}
