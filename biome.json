@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.2/schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
     "includes": [
@@ -8,7 +8,10 @@
       "!**/coverage",
       "!**/.astro",
       "!**/node_modules",
-      "!**/test/fixtures"
+      "!**/test/fixtures",
+      "!**/*.md",
+      "!**/*.yaml",
+      "!**/*.yml"
     ]
   },
   "formatter": {
@@ -36,7 +39,11 @@
         "noNonNullAssertion": "error",
         "useConst": "error"
       },
-      "correctness": { "noUnusedImports": "error", "noUnusedVariables": "error" },
+      "correctness": {
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "noInvalidGridAreas": "off"
+      },
       "complexity": { "noBannedTypes": "error" }
     }
   },
@@ -44,6 +51,10 @@
     {
       "includes": ["**/*.test.ts", "**/test/**"],
       "linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }
+    },
+    {
+      "includes": ["**/*.test.tsx"],
+      "linter": { "rules": { "correctness": { "noComponentHookFactories": "off" } } }
     },
     {
       "includes": ["**/src/cli/**"],
