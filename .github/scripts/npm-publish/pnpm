@@ -2,10 +2,10 @@
 # A `pnpm` stand-in for the release job: every command goes to the real pnpm except
 # `pnpm publish`, which is done with the npm CLI instead.
 #
-# Why: pnpm 12 publishes with its own code, and npm's registry refuses its trusted
-# publishing (OIDC) token exchange ("403 OIDC permission denied for this action").
-# The npm CLI (11.5.1+) does the exchange properly, and uses NPM_TOKEN (written to
-# .npmrc by changesets/action) for packages that have no trusted publisher yet.
+# Why: pnpm 12 publishes with its own code, which has reported problems with npm's
+# trusted publishing (OIDC). The npm CLI (11.5.1+) is the documented path, and falls
+# back to NPM_TOKEN (referenced from ~/.npmrc, see release.yml) for packages that have
+# no trusted publisher yet.
 #
 # How: changesets runs `pnpm publish [<tarball>] --json --access <a> --tag <t>
 # --no-git-checks [--otp <code>]` in the package's directory. We pack the package with

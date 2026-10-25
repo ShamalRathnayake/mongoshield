@@ -66,16 +66,21 @@ jobs:
       # package must never reach npm even if CI was skipped for the merge.
       - run: pnpm check:package
 
-      # pnpm 12 cannot publish with npm trusted publishing (the registry refuses its OIDC
-      # token exchange), so `pnpm publish` is routed through the npm CLI by a stand-in
-      # `pnpm` placed first on PATH: .github/scripts/npm-publish/pnpm. Trusted publishing
-      # needs npm 11.5.1 or newer.
+      # `pnpm publish` is routed through the npm CLI by a stand-in `pnpm` placed first on
+      # PATH (.github/scripts/npm-publish/pnpm): npm's own trusted publishing (OIDC) is the
+      # documented path, and pnpm 12's native publish has reported OIDC problems. Trusted
+      # publishing needs npm 11.5.1 or newer.
+      #
+      # NPM_TOKEN goes into ~/.npmrc as a reference (npm reads the variable at publish
+      # time, from the changesets step's env below). npm still tries OIDC first and uses
+      # the token only for packages without a trusted publisher, i.e. a first publish.
       - name: Publish with the npm CLI
         run: |
           npm install --global npm@11
           npm --version
           echo "REAL_PNPM=$(command -v pnpm)" >> "$GITHUB_ENV"
           echo "${GITHUB_WORKSPACE}/.github/scripts/npm-publish" >> "$GITHUB_PATH"
+          echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > "${HOME}/.npmrc"
 
       # changesets/action v2 needs @changesets/cli v3 (this repository uses v3).
       - uses: changesets/action@v2
