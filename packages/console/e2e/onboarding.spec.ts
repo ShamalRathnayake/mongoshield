@@ -78,7 +78,7 @@ test("paste a connection string, browse it, back it up and restore it in a few c
     ).not.toBeChecked();
     await expect(page.getByText(/runs on this computer or in Docker/)).toBeVisible();
     // The password is never shown: only the masked password field holds it.
-    expect(await page.locator("body").innerText()).not.toContain(E2E_MONGO_PASSWORD);
+    expect(await page.locator("body").textContent()).not.toContain(E2E_MONGO_PASSWORD);
     await page.getByLabel("Name", { exact: true }).fill("Quick start");
   });
 

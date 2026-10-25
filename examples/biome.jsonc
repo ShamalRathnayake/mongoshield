@@ -1,7 +1,7 @@
 // Lint settings for the examples, on top of the repository's biome.json ("//").
 // Examples are small applications, not library code, so a few library rules don't fit.
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.2/schema.json",
   "root": false,
   "extends": "//",
   "javascript": {
