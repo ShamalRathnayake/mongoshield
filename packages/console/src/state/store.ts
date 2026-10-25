@@ -24,7 +24,7 @@ import {
   encryptSecret,
   MIN_SECRET_LENGTH,
 } from "./crypto.ts";
-import { acquireDataDirLock, type DataDirLock } from "./lock.ts";
+import { acquireDataDirLock, type DataDirLock, type WaitForPrevious } from "./lock.ts";
 import { type ConsoleState, type MutableState, STATE_FORMAT_VERSION } from "./types.ts";
 
 /** File name of the state document inside the data directory. */
@@ -45,6 +45,11 @@ export interface OpenStateOptions {
   readonly secret: string;
   /** Lock heartbeat interval; tests shorten it. */
   readonly lockHeartbeatMs?: number;
+  /**
+   * Wait for the lock of a console that just went away (a replaced container)
+   * instead of failing at once. The server sets it; tests leave it off.
+   */
+  readonly waitForPreviousLock?: WaitForPrevious;
 }
 
 /** Why the store could not be opened, in words an operator can act on. */
@@ -85,10 +90,12 @@ export class StateStore {
     }
     // 0700: only the console's own user may look inside the data directory.
     await mkdir(options.dataDir, { recursive: true, mode: 0o700 });
-    const lock = await acquireDataDirLock(
-      options.dataDir,
-      options.lockHeartbeatMs === undefined ? {} : { heartbeatMs: options.lockHeartbeatMs },
-    );
+    const lock = await acquireDataDirLock(options.dataDir, {
+      ...(options.lockHeartbeatMs === undefined ? {} : { heartbeatMs: options.lockHeartbeatMs }),
+      ...(options.waitForPreviousLock === undefined
+        ? {}
+        : { waitForPrevious: options.waitForPreviousLock }),
+    });
     const path = join(options.dataDir, STATE_FILE);
     try {
       const existing = await readStateFile(path);

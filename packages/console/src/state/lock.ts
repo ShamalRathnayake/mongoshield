@@ -12,6 +12,12 @@
  * heartbeat is older than {@link STALE_AFTER_MS} belongs to a process that is
  * gone (crashed, killed, container replaced) and may be taken over.
  *
+ * Replacing a container: `docker rm -f` (or a crash) leaves a lock whose heartbeat
+ * is still fresh for up to {@link STALE_AFTER_MS}. With `waitForPrevious`, a new
+ * console starting in that window waits instead of failing: if the heartbeat stops
+ * changing, the previous holder is gone and the lock is taken over once it is stale;
+ * if the heartbeat moves, another console is alive and the start is refused.
+ *
  * Known limit: two processes that start within the same instant against a
  * stale lock can both take it over. Starting two consoles on one volume at the
  * same moment is an operator error this lock is not meant to arbitrate.
@@ -44,6 +50,14 @@ export interface DataDirLock {
   release(): Promise<void>;
 }
 
+/** How `acquireDataDirLock` waits for a predecessor's lock to go stale. */
+export interface WaitForPrevious {
+  /** Called once, when the wait starts, with a message for the log. */
+  readonly onWait?: (message: string) => void;
+  /** How often the lock file is read again while waiting (default 1 s). */
+  readonly pollMs?: number;
+}
+
 /** Thrown when another live process holds the data directory. */
 export class DataDirLockedError extends Error {
   override readonly name = "DataDirLockedError";
@@ -54,10 +68,16 @@ export class DataDirLockedError extends Error {
  * live console holds it.
  *
  * @param now the clock; tests move it to simulate a stale lock.
+ * @param waitForPrevious wait for a fresh lock whose heartbeat does not move (a
+ *   console that just crashed or whose container was removed) instead of failing.
  */
 export async function acquireDataDirLock(
   dataDir: string,
-  options: { readonly now?: () => Date; readonly heartbeatMs?: number } = {},
+  options: {
+    readonly now?: () => Date;
+    readonly heartbeatMs?: number;
+    readonly waitForPrevious?: WaitForPrevious;
+  } = {},
 ): Promise<DataDirLock> {
   const now = options.now ?? (() => new Date());
   const path = join(dataDir, LOCK_FILE);
@@ -69,13 +89,34 @@ export async function acquireDataDirLock(
     heartbeatAt: now().toISOString(),
   });
 
-  const existing = await readLock(path);
-  if (existing !== undefined) {
-    const age = now().getTime() - Date.parse(existing.heartbeatAt);
-    if (Number.isFinite(age) && age < STALE_AFTER_MS) {
-      throw new DataDirLockedError(
-        `Another MongoShield console (pid ${existing.pid} on ${existing.host}) is using ${dataDir}.`,
-      );
+  const isFresh = (lock: LockContent): boolean => {
+    const age = now().getTime() - Date.parse(lock.heartbeatAt);
+    return Number.isFinite(age) && age < STALE_AFTER_MS;
+  };
+  const lockedError = (lock: LockContent) =>
+    new DataDirLockedError(
+      `Another MongoShield console (pid ${lock.pid} on ${lock.host}) is using ${dataDir}.`,
+    );
+
+  let existing = await readLock(path);
+  if (existing !== undefined && isFresh(existing)) {
+    const wait = options.waitForPrevious;
+    if (wait === undefined) throw lockedError(existing);
+    // The heartbeat as first seen: a live holder rewrites it within HEARTBEAT_MS.
+    const seen = existing;
+    // A dead holder's lock goes stale within STALE_AFTER_MS; one poll of slack.
+    const pollMs = wait.pollMs ?? 1_000;
+    const deadline = now().getTime() + STALE_AFTER_MS + pollMs;
+    wait.onWait?.(
+      `The data directory ${dataDir} was in use moments ago (pid ${seen.pid} on ${seen.host}). ` +
+        `Waiting up to ${Math.ceil(STALE_AFTER_MS / 1000)} s for that console to let go…`,
+    );
+    while (existing !== undefined && isFresh(existing)) {
+      const refreshed = existing.owner !== seen.owner || existing.heartbeatAt !== seen.heartbeatAt;
+      // Past the deadline: a heartbeat from the future (a skewed clock) never goes stale.
+      if (refreshed || now().getTime() > deadline) throw lockedError(existing);
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      existing = await readLock(path);
     }
   }
 

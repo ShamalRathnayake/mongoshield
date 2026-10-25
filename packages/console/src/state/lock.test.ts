@@ -85,6 +85,57 @@ describe("acquireDataDirLock", () => {
     await lock.release();
   });
 
+  describe("waiting for a predecessor (a replaced container)", () => {
+    /** Writes a lock file as a console that stopped without releasing it would leave. */
+    async function leftBehind(heartbeatAt: Date): Promise<void> {
+      const content = { owner: "0123456789abcdef", host: "old-box", pid: 1, heartbeatAt };
+      await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(content));
+    }
+
+    it("takes over a fresh lock whose heartbeat stops, once it goes stale", async () => {
+      // Refreshed "just now", 100 ms before it counts as abandoned.
+      await leftBehind(new Date(Date.now() - STALE_AFTER_MS + 100));
+      const messages: string[] = [];
+      const lock = await acquireDataDirLock(dataDir, {
+        waitForPrevious: { onWait: (message) => messages.push(message), pollMs: 20 },
+      });
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatch(/pid 1 on old-box.*Waiting up to 30 s/);
+      expect((await readLockFile()).owner).not.toBe("0123456789abcdef");
+      await lock.release();
+    });
+
+    it("starts as soon as the previous console releases the lock", async () => {
+      await leftBehind(new Date());
+      setTimeout(() => void rm(join(dataDir, LOCK_FILE), { force: true }), 50);
+      const lock = await acquireDataDirLock(dataDir, { waitForPrevious: { pollMs: 10 } });
+      expect(await lockExists()).toBe(true);
+      await lock.release();
+    });
+
+    it("still refuses a live console: its heartbeat moves while we wait", async () => {
+      const live = await acquireDataDirLock(dataDir, { heartbeatMs: 15 });
+      await expect(
+        acquireDataDirLock(dataDir, { waitForPrevious: { pollMs: 10 } }),
+      ).rejects.toBeInstanceOf(DataDirLockedError);
+      await live.release();
+    });
+
+    it("gives up after the stale period on a heartbeat that never ages", async () => {
+      // A heartbeat from the future (a skewed clock) stays fresh forever.
+      await leftBehind(new Date(Date.now() + 3_600_000));
+      // Each reading of the clock moves it 10 s on, so the deadline passes quickly.
+      let clock = Date.now();
+      const now = () => {
+        clock += 10_000;
+        return new Date(clock);
+      };
+      await expect(
+        acquireDataDirLock(dataDir, { now, waitForPrevious: { pollMs: 1 } }),
+      ).rejects.toThrow(/pid 1 on old-box/);
+    });
+  });
+
   it("reports a missing data directory instead of pretending to hold the lock", async () => {
     await expect(acquireDataDirLock(join(dataDir, "missing"))).rejects.toMatchObject({
       code: "ENOENT",
