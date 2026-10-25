@@ -29,7 +29,7 @@ import { auditRoutes } from "./routes/audit.ts";
 import { backupRoutes } from "./routes/backups.ts";
 import { browseExtrasRoutes } from "./routes/browse-extras.ts";
 import { configRoutes } from "./routes/config.ts";
-import { connectionRoutes } from "./routes/connections.ts";
+import { type ConnectionRouteOptions, connectionRoutes } from "./routes/connections.ts";
 import { healthRoutes, type JournalStatusReader } from "./routes/health.ts";
 import { jobRoutes } from "./routes/jobs.ts";
 import { liveRoutes } from "./routes/live.ts";
@@ -60,6 +60,8 @@ export interface ConsoleAppOptions {
   readonly previewLimits?: PreviewLimits;
   /** The onboarding routes' network and container detection; tests replace them. */
   readonly onboarding?: OnboardingRouteOptions;
+  /** How saved connections are tested (tests replace the container detection). */
+  readonly connections?: ConnectionRouteOptions;
 }
 
 /** Builds the console's HTTP app. */
@@ -97,7 +99,7 @@ export function createConsoleApp(
   sessionRoutes(app, services);
   oidcRoutes(app, services);
   userRoutes(app, services);
-  connectionRoutes(app, services);
+  connectionRoutes(app, services, options.connections);
   // The welcome flow: check a pasted connection string, public IP, "Back up now".
   onboardingRoutes(app, services, options.onboarding);
   storageRoutes(app, services);

@@ -25,10 +25,12 @@ import type { MongoClient } from "mongodb";
 import type { ConnectionProblem, ConnectionTestResult } from "../shared/api.ts";
 import {
   analyzeConnectionString,
+  CONTAINER_HOST,
   ConnectionStringError,
   type ConnectionStringInfo,
   cleanPastedConnectionString,
   encodeCredentials,
+  throughContainerHost,
 } from "../shared/connection-string.ts";
 import { scrubText } from "../state/redact.ts";
 import type { DeploymentRecord } from "../state/types.ts";
@@ -61,11 +63,21 @@ export function runsInContainer(): boolean {
 /** Options for {@link inspectConnection}; tests replace the container check. */
 export interface InspectOptions {
   readonly inContainer?: boolean;
+  /**
+   * The address to try when a loopback address is refused in a container. Defaults to
+   * {@link throughContainerHost}; tests point it at their own database.
+   */
+  readonly containerAddress?: (uri: string) => string | undefined;
 }
 
 /**
  * Connects with `uri` and reports everything the onboarding page shows. Never throws:
  * failures come back as `ok: false` with `problem` (and the scrubbed `error`).
+ *
+ * In a container, `localhost` is the container itself. When a loopback address is
+ * refused there, the console tries the machine it runs on (`host.docker.internal`)
+ * by itself; if that connects, the result says so in `reachedThrough`, and the caller
+ * uses {@link throughContainerHost} to get the address that worked.
  */
 export async function inspectConnection(
   uri: string,
@@ -83,6 +95,21 @@ export async function inspectConnection(
     // Driver messages can contain the URI; scrub it before anything leaves the server.
     const detail = scrubText(error instanceof Error ? error.message : String(error), [uri]);
     const problem = explainConnectionError(error, detail, attempt);
+    // "localhost" refused inside a container: the database is most likely on the host.
+    const onHost = attempt.inContainer
+      ? (options.containerAddress ?? throughContainerHost)(uri)
+      : undefined;
+    if (problem.kind === "connection-refused" && onHost !== undefined) {
+      try {
+        const viaHost = await withClient(onHost, (client) => describeWithExtras(client, attempt));
+        return {
+          ...viaHost,
+          reachedThrough: { from: attempt.hosts.join(", "), to: CONTAINER_HOST },
+        };
+      } catch {
+        // Not there either: report the original problem, which explains both options.
+      }
+    }
     return {
       ok: false,
       missingBackupPrivileges: [],

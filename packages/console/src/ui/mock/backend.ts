@@ -49,6 +49,11 @@ import {
   LIVE_SAMPLE_DEFAULT_SIZE,
   LIVE_SAMPLE_MAX_SIZE,
 } from "../../shared/api.ts";
+import {
+  analyzeConnectionString,
+  CONTAINER_HOST,
+  throughContainerHost,
+} from "../../shared/connection-string.ts";
 import type {
   EventSourceFactory,
   FetchLike,
@@ -197,6 +202,11 @@ export interface MockBackendOptions {
   readonly setupWindow?: boolean;
   /** Start like a brand-new console: no connections, plans or backups (`?fresh=1`). */
   readonly fresh?: boolean;
+  /**
+   * Behave like a console running in a container (default false): the session says so,
+   * and `localhost` strings are reached through host.docker.internal, as on the server.
+   */
+  readonly inContainer?: boolean;
 }
 
 /** A running mock server. */
@@ -251,6 +261,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
   )?.id;
   let csrfToken = randomToken();
   let nextId = 2000;
+  const inContainer = options.inContainer ?? false;
   const authMethods = options.authMethods ?? ["password"];
   // SSO-only accounts are possible only when some single sign-on method is enabled.
   const ssoEnabled = authMethods.includes("oidc") || authMethods.includes("proxy");
@@ -284,7 +295,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
               ...(setupWindowEndsAt === undefined ? {} : { windowEndsAt: setupWindowEndsAt }),
             },
           }),
-      ...(user === undefined ? {} : { user, csrfToken }),
+      ...(user === undefined ? {} : { user, csrfToken, inContainer }),
     };
   };
 
@@ -493,6 +504,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
         body: undefined,
         user: currentUser(),
       }),
+    inContainer,
   });
 
   const backupNamespaces = (backup: BackupDetail | undefined) =>
@@ -680,6 +692,22 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
     },
     "POST /api/connections/:id/test": ({ params }) => {
       const connection = findConnection(params.id);
+      // In a container, a localhost string is refused but the host machine answers: the
+      // connection is stored with the address that works, as on the real server.
+      const onHost = inContainer ? throughContainerHost(connection.uri) : undefined;
+      if (onHost !== undefined) {
+        const from = analyzeConnectionString(connection.uri).hosts.join(", ");
+        connection.uri = onHost;
+        audit("connection.update", "success", connection.name);
+        return {
+          ok: true,
+          topology: connection.topology,
+          serverVersion: connection.serverVersion,
+          missingBackupPrivileges: connection.missingBackupPrivileges,
+          missingRestorePrivileges: connection.missingRestorePrivileges,
+          reachedThrough: { from, to: CONTAINER_HOST },
+        };
+      }
       if (connection.uri.includes("staging-db.internal")) {
         return {
           ok: false,

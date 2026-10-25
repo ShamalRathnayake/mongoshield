@@ -94,7 +94,8 @@ test("an admin turns on live edits; production needs the typed name and a reason
 
   await goTo(page, `/connections/${scratchId}`);
   await page.getByLabel("Allow live edits").check();
-  await page.getByLabel("Reason").fill("e2e: fixing test data");
+  // Exact: the reason has a group of suggestions named after it.
+  await page.getByLabel("Reason", { exact: true }).fill("e2e: fixing test data");
   await page.getByRole("button", { name: "Save live edit settings" }).click();
   await expect(page.getByText(/live edits are (on|allowed|enabled)/i).first()).toBeVisible();
   await signOut(page);

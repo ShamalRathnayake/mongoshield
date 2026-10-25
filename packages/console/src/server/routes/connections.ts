@@ -17,13 +17,19 @@ import type { Hono } from "hono";
 import { MongoShieldError, redactMongoUri } from "mongoshield";
 import { connectionById } from "../../jobs/tasks.ts";
 import type { ConnectionTestResult } from "../../shared/api.ts";
+import { throughContainerHost } from "../../shared/connection-string.ts";
 import { randomId } from "../../state/crypto.ts";
 import { scrubText } from "../../state/redact.ts";
 import { openConnectionUri, sealConnectionUri } from "../../state/secrets.ts";
 import type { ConnectionRecord, DeploymentRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
-import { inspectConnection, normalizeConnectionUri, recallCheck } from "../connection-check.ts";
+import {
+  type InspectOptions,
+  inspectConnection,
+  normalizeConnectionUri,
+  recallCheck,
+} from "../connection-check.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
 import { ConsoleError, invalid, notFound } from "../errors.ts";
 import { namespaceTree } from "../mongo-inspect.ts";
@@ -41,7 +47,17 @@ import { connectionView } from "../views.ts";
 const MAX_URI_LENGTH = 4096;
 
 /** Registers the connection routes. */
-export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
+/** Options for {@link connectionRoutes}; tests replace the container detection. */
+export interface ConnectionRouteOptions {
+  /** How `POST /api/connections/:id/test` connects (see `inspectConnection`). */
+  readonly inspect?: InspectOptions;
+}
+
+export function connectionRoutes(
+  app: Hono<AppEnv>,
+  services: ConsoleServices,
+  options: ConnectionRouteOptions = {},
+): void {
   const { store } = services;
 
   app.get("/api/connections", (c) => {
@@ -153,7 +169,34 @@ export function connectionRoutes(app: Hono<AppEnv>, services: ConsoleServices): 
   app.post("/api/connections/:id/test", async (c) => {
     const principal = requireRole(c, "operator");
     const connection = connectionById(store, c.req.param("id"));
-    const result = await inspectConnection(openConnectionUri(store, connection));
+    const uri = openConnectionUri(store, connection);
+    const result = await inspectConnection(uri, options.inspect);
+    // In a container, "localhost" was refused but the host machine answered: store the
+    // address that works, so backups and browsing use it from now on.
+    const working =
+      result.reachedThrough === undefined
+        ? undefined
+        : (options.inspect?.containerAddress ?? throughContainerHost)(uri);
+    if (result.ok && working !== undefined) {
+      await store.update((state) => {
+        state.connections = state.connections.map((candidate) =>
+          candidate.id === connection.id
+            ? {
+                ...candidate,
+                uri: sealConnectionUri(store, connection.id, working),
+                uriPreview: redactMongoUri(working),
+              }
+            : candidate,
+        );
+      });
+      await recordAudit(services, {
+        actor: principal,
+        action: "connection.update",
+        target: connection.name,
+        outcome: "success",
+        details: { id: connection.id, uriChanged: true, reason: "localhost-in-container" },
+      });
+    }
     if (result.ok) await rememberDeployment(services, connection.id, result);
     await recordAudit(services, {
       actor: principal,

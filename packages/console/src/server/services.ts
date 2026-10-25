@@ -56,6 +56,12 @@ export interface OpenConsoleOptions {
    * directory. Off unless asked for; main.ts turns it on (MONGOSHIELD_DEFAULT_STORAGE).
    */
   readonly defaultStorage?: boolean;
+  /**
+   * When the data directory's lock was refreshed moments ago but its holder has
+   * stopped (a container replaced with `docker rm -f`, a crash), wait for it to go
+   * stale instead of failing at once. main.ts turns it on; tests leave it off.
+   */
+  readonly waitForPreviousLock?: boolean;
 }
 
 /** An opened console and what it did at startup, for main.ts to log. */
@@ -93,7 +99,13 @@ const DEFAULT_SETTINGS: ConsoleSettings = {
 export async function openConsole(options: OpenConsoleOptions): Promise<OpenedConsole> {
   const now = options.now ?? (() => new Date());
   const logger = options.logger ?? silentLogger;
-  const store = await StateStore.open({ dataDir: options.dataDir, secret: options.secret });
+  const store = await StateStore.open({
+    dataDir: options.dataDir,
+    secret: options.secret,
+    ...(options.waitForPreviousLock === true
+      ? { waitForPreviousLock: { onWait: (message: string) => logger.info(message) } }
+      : {}),
+  });
   const audit = new AuditLog({
     dataDir: options.dataDir,
     ...(options.auditMaxBytes === undefined ? {} : { maxBytes: options.auditMaxBytes }),

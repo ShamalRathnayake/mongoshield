@@ -12,6 +12,9 @@
  * Permissions are granted on top of the role: "Can edit live data" (`data:write`) lets
  * an operator or admin change documents in the live data browser, on connections where
  * live edits are allowed. Being an admin does not include it; viewers cannot hold it.
+ *
+ * The role is chosen from three cards (a radio group), each saying what the role may
+ * do, so the choice is made with the consequences in view rather than hidden in a select.
  */
 
 import { type FormEvent, useState } from "react";
@@ -19,18 +22,34 @@ import { ROLES, type Role, type UserInput, type UserView } from "../../shared/ap
 import { describeError } from "../api.ts";
 import { Button } from "../components/button.tsx";
 import { Dialog } from "../components/dialog.tsx";
-import { CheckboxField, SelectField, TextField } from "../components/field.tsx";
+import { CheckboxField, TextField } from "../components/field.tsx";
 import { EmptyState, ErrorNotice, Loading, PageHeader, Time } from "../components/layout.tsx";
+import { type RadioCardOption, RadioCards } from "../components/radio-cards.tsx";
 import { Table } from "../components/table.tsx";
 import { useToast } from "../components/toast.tsx";
 import { useApi, useLoad, useSession } from "../context.tsx";
 import { MIN_PASSWORD_LENGTH } from "./setup.tsx";
 
-/** What each role may do, shown next to the role picker. */
-const ROLE_DESCRIPTIONS: Readonly<Record<Role, string>> = {
-  viewer: "Viewer — sees everything except secrets",
-  operator: "Operator — runs backups, verifies and drills; restores into non-production",
-  admin: "Admin — everything, including users and restores into production",
+/** Each role as a card of the role picker: its name and what it may do. */
+export const ROLE_CHOICES: Readonly<Record<Role, RadioCardOption<Role>>> = {
+  viewer: {
+    value: "viewer",
+    label: "Viewer",
+    description:
+      "Sees plans, backups, jobs and the audit log. Changes nothing; never sees secrets.",
+  },
+  operator: {
+    value: "operator",
+    label: "Operator",
+    description:
+      "Also runs backups, verifies and drills, browses data, and restores into non-production.",
+  },
+  admin: {
+    value: "admin",
+    label: "Admin",
+    description:
+      "Everything, including users, connections, storage, plans and restores into production.",
+  },
 };
 
 /** The users page. */
@@ -266,10 +285,11 @@ function UserDialog(props: {
           data-autofocus
           error={submitted ? errors.username : undefined}
         />
-        <SelectField
-          label="Role"
+        <RadioCards
+          legend="Role"
           value={role}
-          options={ROLES.map((value) => ({ value, label: ROLE_DESCRIPTIONS[value] }))}
+          // Least powerful first: each role includes the one before it.
+          options={ROLES.map((value) => ROLE_CHOICES[value])}
           onValue={setRole}
         />
         <CheckboxField

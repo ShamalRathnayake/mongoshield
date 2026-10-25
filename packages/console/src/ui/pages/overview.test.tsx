@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import type { BackupSummary, JobSummary, PlanView, StorageView } from "../../shared/api.ts";
 import { renderFailingApp } from "../failing-backend.testkit.tsx";
 import { renderApp } from "../testing.tsx";
-import { computeWarnings } from "./overview.tsx";
+import { backupsPerDay, computeWarnings } from "./overview.tsx";
 
 const NOW = Date.parse("2026-10-21T12:00:00Z");
 const HOUR = 3_600_000;
@@ -122,6 +122,25 @@ describe("computeWarnings", () => {
   });
 });
 
+describe("backupsPerDay", () => {
+  it("counts backups per UTC day, oldest first, and ignores ones outside the window", () => {
+    const counts = backupsPerDay(
+      [
+        "2026-10-21T01:00:00Z",
+        "2026-10-21T11:00:00Z",
+        "2026-10-20T23:59:00Z",
+        "2026-10-15T00:00:00Z",
+        // Too old for a 7-day window, and one from the future.
+        "2026-10-14T23:00:00Z",
+        "2026-10-22T01:00:00Z",
+      ],
+      NOW,
+      7,
+    );
+    expect(counts).toEqual([1, 0, 0, 0, 0, 1, 2]);
+  });
+});
+
 describe("overview page", () => {
   it("runs a plan from the table and opens its job", async () => {
     const { user } = renderApp({ signedInAs: "maya" });
@@ -173,6 +192,35 @@ describe("overview page", () => {
     expect(screen.getByText("No jobs yet")).toBeTruthy();
     expect(screen.getByText(/Every plan has a recent, verified backup/)).toBeTruthy();
     expect(screen.queryByRole("link", { name: "New backup plan" })).toBeNull();
+  });
+
+  it("sums up the backups and jobs in four tiles", async () => {
+    renderApp({ signedInAs: "sam" });
+    const summary = await screen.findByLabelText("Summary");
+    for (const label of ["Last backup", "Backups stored", "Verified", "Jobs, last 24 h"]) {
+      expect(within(summary).getByText(label)).toBeTruthy();
+    }
+    // The mock has complete backups in several locations, some of them not verified.
+    expect(within(summary).getByText(/across 3 locations/)).toBeTruthy();
+    expect(within(summary).getByText(/not verified yet/)).toBeTruthy();
+    expect(within(summary).getByText(/%$/)).toBeTruthy();
+  });
+
+  it("shows the tiles' empty values without backups or jobs", async () => {
+    renderApp({
+      signedInAs: "sam",
+      prepare: (mock) => {
+        mock.data.jobs = [];
+        mock.data.storage = [];
+      },
+    });
+    const summary = await screen.findByLabelText("Summary");
+    expect(within(summary).getByText("Never")).toBeTruthy();
+    expect(within(summary).getByText("No complete backup yet")).toBeTruthy();
+    expect(within(summary).getByText("–")).toBeTruthy();
+    expect(within(summary).getByText("Every backup checked")).toBeTruthy();
+    expect(within(summary).getByText("0 succeeded, none failed")).toBeTruthy();
+    expect(within(summary).getByText(/across 0 locations/)).toBeTruthy();
   });
 
   it("warns about storage it cannot read but shows everything else", async () => {

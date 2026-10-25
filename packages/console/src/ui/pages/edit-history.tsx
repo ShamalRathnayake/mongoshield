@@ -11,6 +11,11 @@
  *
  * Reading the history needs the operator role; undoing needs the `data:write`
  * permission (and live edits still allowed on the connection, checked by the server).
+ *
+ * Filters: the connection (asks the server for that connection's entries only), then
+ * database, collection, who and what kind of change, all selects built from the loaded
+ * entries (with how many entries each has). The collection select lists the chosen
+ * database's collections, or every namespace while no database is chosen.
  */
 
 import { useState } from "react";
@@ -32,6 +37,7 @@ import { Table } from "../components/table.tsx";
 import { useToast } from "../components/toast.tsx";
 import { useApi, useLoad, useSession } from "../context.tsx";
 import { isJsonObject, parseDocument } from "../ejson.ts";
+import { ANY, filterOptions, matchesChoice } from "../filter-options.ts";
 import { formatNumber } from "../format.ts";
 import { buildHref, replaceQuery, segment } from "../router.ts";
 import { canEditLiveData } from "./live-editor.tsx";
@@ -61,6 +67,120 @@ export interface EditHistoryPageProps {
   readonly connectionId?: string | undefined;
 }
 
+/** The page's filters on the loaded entries. "" (ANY) means "no filter". */
+export interface EditHistoryFilters {
+  /** A database name. */
+  readonly database: string;
+  /** A whole namespace, `db.collection`. */
+  readonly ns: string;
+  /** Who made the change. */
+  readonly by: string;
+  /** The kind of change. */
+  readonly op: LiveEditOp | typeof ANY;
+}
+
+/** Filters that let every entry through. */
+export const NO_EDIT_FILTERS: EditHistoryFilters = { database: ANY, ns: ANY, by: ANY, op: ANY };
+
+/** The database part of a namespace: everything before the first dot. */
+export function databaseOf(ns: string): string {
+  const dot = ns.indexOf(".");
+  return dot === -1 ? ns : ns.slice(0, dot);
+}
+
+/** The collection part of a namespace (collection names may contain dots themselves). */
+export function collectionOf(ns: string): string {
+  const dot = ns.indexOf(".");
+  return dot === -1 ? "" : ns.slice(dot + 1);
+}
+
+/** True when an entry passes the filters. */
+export function editMatches(entry: LiveEditEntryView, filters: EditHistoryFilters): boolean {
+  return (
+    matchesChoice(filters.database, databaseOf(entry.ns)) &&
+    matchesChoice(filters.ns, entry.ns) &&
+    matchesChoice(filters.by, entry.by) &&
+    matchesChoice(filters.op, entry.op)
+  );
+}
+
+/**
+ * The selects that narrow the loaded entries. Every option comes from the entries, so
+ * nothing offered matches nothing; the chosen collection belongs to the chosen database.
+ */
+function EditFilters(props: {
+  entries: readonly LiveEditEntryView[];
+  filters: EditHistoryFilters;
+  onFilters: (filters: EditHistoryFilters) => void;
+}) {
+  const { entries, filters, onFilters } = props;
+  // Collections are offered for the chosen database only (or all, while none is chosen).
+  const inDatabase = entries.filter((entry) =>
+    matchesChoice(filters.database, databaseOf(entry.ns)),
+  );
+  return (
+    <>
+      <SelectField
+        label="Database"
+        value={filters.database}
+        options={filterOptions(
+          entries.map((entry) => databaseOf(entry.ns)),
+          { any: "All databases", selected: filters.database },
+        )}
+        onValue={(database) => {
+          // A collection of another database would leave the table empty: forget it.
+          const keepNs = database === ANY || databaseOf(filters.ns) === database;
+          onFilters({ ...filters, database, ns: keepNs ? filters.ns : ANY });
+        }}
+      />
+      <SelectField
+        label="Collection"
+        value={filters.ns}
+        options={filterOptions(
+          inDatabase.map((entry) => entry.ns),
+          {
+            any: "All collections",
+            selected: filters.ns,
+            // Within one database the collection name says enough; otherwise db.collection.
+            labelFor: (ns) => (filters.database === ANY ? ns : collectionOf(ns)),
+          },
+        )}
+        onValue={(ns) =>
+          // Choosing a collection also chooses its database, so the two always agree.
+          onFilters({ ...filters, ns, database: ns === ANY ? filters.database : databaseOf(ns) })
+        }
+      />
+      <SelectField
+        label="Who"
+        value={filters.by}
+        options={filterOptions(
+          entries.map((entry) => entry.by),
+          { any: "Anyone", selected: filters.by },
+        )}
+        onValue={(by) => onFilters({ ...filters, by })}
+      />
+      <SelectField<LiveEditOp | typeof ANY>
+        label="Change"
+        value={filters.op}
+        options={[
+          { value: ANY, label: "Any change" },
+          // Every kind of change, in the order of OP_LABELS, with its count.
+          ...(Object.keys(OP_LABELS) as LiveEditOp[])
+            .map((op) => ({ op, count: entries.filter((entry) => entry.op === op).length }))
+            .filter(({ op, count }) => count > 0 || op === filters.op)
+            .map(({ op, count }) => ({ value: op, label: `${OP_LABELS[op]} (${count})` })),
+        ]}
+        onValue={(op) => onFilters({ ...filters, op })}
+      />
+      {Object.values(filters).some((value) => value !== ANY) ? (
+        <Button variant="ghost" onClick={() => onFilters(NO_EDIT_FILTERS)}>
+          Clear filters
+        </Button>
+      ) : null}
+    </>
+  );
+}
+
 /** What a row shows in the Document column. */
 function documentsLabel(entry: LiveEditEntryView): string {
   if (entry.documentId !== undefined) return entry.documentId;
@@ -86,6 +206,8 @@ export function EditHistoryPage(props: EditHistoryPageProps) {
   const [undoing, setUndoing] = useState<LiveEditEntryView | undefined>(undefined);
   const [details, setDetails] = useState<LiveEditEntryView | undefined>(undefined);
   const [jobLink, setJobLink] = useState<string | undefined>(undefined);
+  const [filters, setFilters] = useState<EditHistoryFilters>(NO_EDIT_FILTERS);
+  const rows = (entries.data ?? []).filter((entry) => editMatches(entry, filters));
 
   return (
     <>
@@ -104,8 +226,15 @@ export function EditHistoryPage(props: EditHistoryPageProps) {
               label: connection.name,
             })),
           ]}
-          onValue={(value) => replaceQuery({ connection: value === "" ? undefined : value })}
+          onValue={(value) => {
+            // Another connection has other databases: start those filters afresh.
+            setFilters({ ...filters, database: ANY, ns: ANY });
+            replaceQuery({ connection: value === "" ? undefined : value });
+          }}
         />
+        {entries.data === undefined || entries.data.length === 0 ? null : (
+          <EditFilters entries={entries.data} filters={filters} onFilters={setFilters} />
+        )}
       </div>
       {jobLink === undefined ? null : (
         <Notice tone="info" title="Undo is running as a job">
@@ -122,12 +251,16 @@ export function EditHistoryPage(props: EditHistoryPageProps) {
       ) : (
         <Table
           caption="Live edits"
-          rows={entries.data}
+          rows={rows}
           rowKey={(entry) => entry.id}
           empty={
-            <EmptyState title="No live edits yet">
-              Changes made in the live data browser show up here, with undo.
-            </EmptyState>
+            entries.data.length === 0 ? (
+              <EmptyState title="No live edits yet">
+                Changes made in the live data browser show up here, with undo.
+              </EmptyState>
+            ) : (
+              <EmptyState title="No edits match the filters" />
+            )
           }
           columns={[
             {

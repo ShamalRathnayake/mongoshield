@@ -8,6 +8,11 @@
  * what would be created or changed; only then can "Apply import" send the same request
  * for real. Editing any input discards the preview, so what is applied is always what
  * was reviewed. Secrets go in their own field and never inside the config document.
+ *
+ * The plan name follows what was pasted: for a single config it is a box suggesting the
+ * existing plans (choosing one updates that plan, typing a new name creates one); for
+ * several configs keyed by plan name it is not asked at all, and the page lists the plans
+ * found instead, each marked "new" or "updates the existing plan".
  */
 
 import { useState } from "react";
@@ -20,12 +25,15 @@ import type {
 import { describeError } from "../api.ts";
 import { Button } from "../components/button.tsx";
 import { CodeBlock } from "../components/code-block.tsx";
-import { SelectField, TextAreaField, TextField } from "../components/field.tsx";
+import { ComboboxField } from "../components/combobox.tsx";
+import { SelectField, TextAreaField } from "../components/field.tsx";
 import { ErrorNotice, KeyValueList, Notice, PageHeader, Panel } from "../components/layout.tsx";
+import { hasRecoveryKey, RecoveryKeyButton } from "../components/recovery-key.tsx";
 import { StatusBadge } from "../components/status-badge.tsx";
 import { Table } from "../components/table.tsx";
 import { useToast } from "../components/toast.tsx";
-import { useApi, useSession } from "../context.tsx";
+import { useApi, useLoad, useSession } from "../context.tsx";
+import { buildHref, segment } from "../router.ts";
 import { applyTheme, storedTheme, type ThemeChoice } from "../theme.ts";
 
 /**
@@ -107,6 +115,64 @@ export function parseImportInput(documentText: string, secretsText: string): Par
   return { ok: true, document, secrets };
 }
 
+/** The plan name the server uses for a single config when none is given. */
+export const DEFAULT_IMPORT_PLAN_NAME = "Imported plan";
+
+/**
+ * What the pasted configuration holds, as far as the plan name is concerned:
+ *
+ *   single   one config (it has "storage"): the plan name box applies
+ *   several  configs keyed by plan name: the names are the keys, no box needed
+ *   unknown  empty, not JSON, or neither shape yet: keep the box, the server will say
+ *
+ * Mirrors the server's rule (config-import.ts): a document with "storage" is one config,
+ * otherwise every key is a plan name.
+ */
+export type ImportShape =
+  | { readonly kind: "single" }
+  | { readonly kind: "several"; readonly planNames: readonly string[] }
+  | { readonly kind: "unknown" };
+
+/** True for a plain JSON object (not an array or null). */
+function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Works out the shape of the pasted configuration (see `ImportShape`). */
+export function importShape(documentText: string): ImportShape {
+  const parsed = documentText.trim() === "" ? undefined : parseJsonText(documentText);
+  if (parsed === undefined || "error" in parsed || !isObject(parsed.value)) {
+    return { kind: "unknown" };
+  }
+  const document = parsed.value;
+  if (Object.hasOwn(document, "storage")) return { kind: "single" };
+  const entries = Object.entries(document);
+  // Only call it "several plans" when every value looks like a config object.
+  if (entries.length === 0 || !entries.every(([, value]) => isObject(value))) {
+    return { kind: "unknown" };
+  }
+  return { kind: "several", planNames: entries.map(([name]) => name.trim()) };
+}
+
+/** The plans a multi-plan configuration holds, each marked new or updating an existing plan. */
+function ImportedPlanList(props: { planNames: readonly string[]; existing: readonly string[] }) {
+  return (
+    <Notice tone="info" title={`This configuration holds ${props.planNames.length} plan(s)`}>
+      <p>The plans are named by their keys, so no plan name is needed:</p>
+      <ul className="plain-list" aria-label="Plans in the configuration">
+        {props.planNames.map((name) => (
+          <li key={name}>
+            <strong>{name}</strong>{" "}
+            <span className="muted">
+              {props.existing.includes(name) ? "(updates the existing plan)" : "(new plan)"}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Notice>
+  );
+}
+
 /** One change row: a "field: from → to" list for updates. */
 function ChangeFields(props: { change: ConfigImportChange }) {
   if (props.change.fields.length === 0) return <span className="muted">–</span>;
@@ -178,6 +244,13 @@ function ImportConfigPanel() {
   const [applied, setApplied] = useState<ConfigImportResult | undefined>(undefined);
   const [failure, setFailure] = useState<unknown>(undefined);
   const [busy, setBusy] = useState<"preview" | "apply" | undefined>(undefined);
+  // The existing plans, suggested as plan names (an import matches plans by name).
+  const plans = useLoad("plans", (signal) => client.call("GET /api/plans", undefined, { signal }));
+  const existingNames = (plans.data ?? []).map((plan) => plan.name);
+  const shape = importShape(documentText);
+  // The plan name only matters for a single config; for several the keys name the plans.
+  const usesPlanName = shape.kind !== "several";
+  const chosenName = planName.trim();
 
   /** Any edit invalidates the reviewed preview. */
   const edited = (update: (value: string) => void) => (value: string) => {
@@ -202,7 +275,7 @@ function ImportConfigPanel() {
     const request: ConfigImportRequest = {
       document: parsed.document,
       dryRun,
-      ...(planName.trim() === "" ? {} : { planName: planName.trim() }),
+      ...(!usesPlanName || chosenName === "" ? {} : { planName: chosenName }),
       ...(parsed.secrets === undefined ? {} : { secrets: parsed.secrets }),
     };
     try {
@@ -238,12 +311,28 @@ function ImportConfigPanel() {
         error={inputErrors.document}
         hint='For example { "storage": "s3://backups/prod", "retention": { "last": 7 } }.'
       />
-      <TextField
-        label="Plan name"
-        value={planName}
-        onValue={edited(setPlanName)}
-        hint='Used when the configuration is a single config. Defaults to "Imported plan".'
-      />
+      {usesPlanName ? (
+        <ComboboxField
+          label="Plan name"
+          value={planName}
+          onValue={edited(setPlanName)}
+          options={existingNames.map((name) => ({ value: name, description: "updates it" }))}
+          listLabel="Existing plans"
+          placeholder={DEFAULT_IMPORT_PLAN_NAME}
+          hint={
+            chosenName === ""
+              ? `Pick an existing plan to update it, or type a new name. Defaults to "${DEFAULT_IMPORT_PLAN_NAME}".`
+              : existingNames.includes(chosenName)
+                ? `Updates the existing plan "${chosenName}".`
+                : `Creates a new plan "${chosenName}".`
+          }
+        />
+      ) : (
+        <ImportedPlanList
+          planNames={shape.kind === "several" ? shape.planNames : []}
+          existing={existingNames}
+        />
+      )}
       <TextAreaField
         label="Secrets (JSON, optional)"
         value={secretsText}
@@ -266,6 +355,53 @@ function ImportConfigPanel() {
       {failure === undefined ? null : <ErrorNotice error={failure} title="Could not import" />}
       {preview === undefined ? null : <ImportResultView result={preview} />}
       {applied === undefined ? null : <ImportResultView result={applied} />}
+    </Panel>
+  );
+}
+
+/**
+ * "Recovery keys": every plan whose backups use a key the console keeps, with a button
+ * to download its recovery key (the private key that restores those backups when the
+ * console itself is gone) and whether it was saved before. One place to find them all.
+ */
+function RecoveryKeysPanel(props: { canDownload: boolean }) {
+  const client = useApi();
+  const plans = useLoad("plans", (signal) => client.call("GET /api/plans", undefined, { signal }));
+  const withKeys = (plans.data ?? []).filter(hasRecoveryKey);
+  return (
+    <Panel title="Recovery keys">
+      <p>
+        Plans that use <strong>Key kept by the console</strong> encrypt their backups with a key the
+        console holds, so restoring needs no typing. Each plan's recovery key restores its backups
+        even if this console is lost: download it and keep it in a password manager or vault, not
+        next to the backups.
+      </p>
+      {plans.error !== undefined ? (
+        <ErrorNotice error={plans.error} onRetry={plans.reload} />
+      ) : plans.data === undefined ? null : withKeys.length === 0 ? (
+        <p className="muted">No plan uses a key kept by the console.</p>
+      ) : (
+        <ul className="plain-list">
+          {withKeys.map((plan) => (
+            <li key={plan.id} className="list-row">
+              <span className="stack">
+                <a href={buildHref(`/plans/${segment(plan.id)}`)}>{plan.name}</a>
+                {plan.encryption.kind === "managed" && plan.encryption.recoveryKeySaved ? (
+                  <StatusBadge status="ok" label="Saved before" />
+                ) : (
+                  <StatusBadge status="unverified" label="Not saved yet" />
+                )}
+              </span>
+              {props.canDownload ? (
+                <RecoveryKeyButton plan={plan} onSaved={plans.reload} size="small" />
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {props.canDownload ? null : (
+        <Notice tone="info">Only admins can download recovery keys.</Notice>
+      )}
     </Panel>
   );
 }
@@ -304,9 +440,9 @@ export function SettingsPage() {
             label="Theme"
             value={theme}
             options={[
-              { value: "system", label: "Same as the operating system" },
+              { value: "dark", label: "Dark (default)" },
               { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
+              { value: "system", label: "Same as the operating system" },
             ]}
             onValue={(value) => {
               applyTheme(value);
@@ -325,6 +461,7 @@ export function SettingsPage() {
           />
         </Panel>
       </div>
+      <RecoveryKeysPanel canDownload={hasRole("admin")} />
       <Panel title="Export configuration">
         <p>
           Download the console's connections, storage and plans as a{" "}

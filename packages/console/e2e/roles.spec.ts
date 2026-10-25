@@ -77,7 +77,7 @@ test("a viewer can look but not touch, and the API refuses every change", async 
   playwright,
 }) => {
   await signIn(page, VIEWER);
-  await expect(page.getByText(`${VIEWER.username} (viewer)`)).toBeVisible();
+  await expect(page.getByTitle(`Signed in as ${VIEWER.username} (viewer)`)).toBeVisible();
   await expect(page.getByRole("link", { name: "Users" })).toHaveCount(0);
 
   await goTo(page, "/connections");
@@ -94,7 +94,8 @@ test("a viewer can look but not touch, and the API refuses every change", async 
   await expectNoButton(page, /^Run now/);
   await goTo(page, `/plans/${ids.plan}`);
   await expect(page.getByText("Only admins can change backup plans.")).toBeVisible();
-  await expect(page.getByLabel("Name")).toBeDisabled();
+  // The Basics step's fields are read only (exact: a suggestion group is named after it).
+  await expect(page.getByLabel("Name", { exact: true })).toBeDisabled();
   await expectNoButton(page, "Run now");
 
   await goTo(page, `/backups/${ids.storage}/${ids.backup}`);
@@ -156,13 +157,18 @@ test("an operator runs and restores, but not into production, and cannot adminis
 
   // The wizard lets an operator plan a restore into production but never start it.
   await page.getByRole("link", { name: "Restore…" }).click();
-  await page
-    .getByLabel("Target connection")
-    .selectOption({ label: `${NAMES.production} — PRODUCTION` });
+  // Where: the production connection, with a notice that only admins may restore into it.
+  await page.getByRole("tab", { name: /^Where/ }).click();
+  const target = page.getByLabel("Target connection", { exact: true });
+  await target.selectOption({ label: `${NAMES.production} — PRODUCTION` });
   await expect(page.getByText(/only admins can restore into production/)).toBeVisible();
+  // Keys: the plan cannot even be asked for.
+  await page.getByRole("tab", { name: /^Keys/ }).click();
   await expect(page.getByRole("button", { name: "Review plan" })).toBeDisabled();
   // Into a non-production connection, the operator may go ahead.
-  await page.getByLabel("Target connection").selectOption({ label: NAMES.scratch });
+  await page.getByRole("tab", { name: /^Where/ }).click();
+  await target.selectOption({ label: NAMES.scratch });
+  await page.getByRole("tab", { name: /^Keys/ }).click();
   await expect(page.getByRole("button", { name: "Review plan" })).toBeEnabled();
 
   const api = await playwright.request.newContext({ baseURL: baseUrl() });

@@ -12,11 +12,14 @@
 import { type FormEvent, useState } from "react";
 import {
   type ConnectionView,
+  LIVE_BULK_DEFAULT_LIMIT,
   LIVE_BULK_HARD_LIMIT,
   type LiveEditSettingsInput,
 } from "../../shared/api.ts";
 import { Button } from "../components/button.tsx";
+import { ComboboxField, type ComboboxOption } from "../components/combobox.tsx";
 import { CheckboxField, SelectField, TextField } from "../components/field.tsx";
+import { FillSuggestions } from "../components/fill-suggestions.tsx";
 import { ErrorNotice, KeyValueList, Notice, Panel, Time } from "../components/layout.tsx";
 import { useToast } from "../components/toast.tsx";
 import { useApi, useLoad, useSession } from "../context.tsx";
@@ -25,6 +28,22 @@ import { buildHref, segment } from "../router.ts";
 
 /** Value of the journal select meaning "the console's data directory". */
 const CONSOLE_JOURNAL = "";
+
+/**
+ * Common limits offered for "Most documents per bulk edit", smallest first; any whole
+ * number up to the hard limit may still be typed. Marks the default and the maximum.
+ */
+export const BULK_LIMIT_PRESETS: readonly ComboboxOption[] = [100, 500, 1_000, 5_000, 10_000]
+  .filter((count) => count <= LIVE_BULK_HARD_LIMIT)
+  .map((count) => ({
+    value: String(count),
+    label: formatNumber(count),
+    ...(count === LIVE_BULK_DEFAULT_LIMIT
+      ? { description: "default" }
+      : count === LIVE_BULK_HARD_LIMIT
+        ? { description: "maximum" }
+        : {}),
+  }));
 
 /** Props for `LiveDataPanel`. */
 export interface LiveDataPanelProps {
@@ -189,11 +208,14 @@ function LiveSettingsForm(props: {
         onValue={setJournal}
         hint="Where the previous state of every edited document is kept for undo, encrypted with the console's key."
       />
-      <TextField
+      <ComboboxField
         label="Most documents per bulk edit"
         inputMode="numeric"
         value={max}
         onValue={setMax}
+        options={BULK_LIMIT_PRESETS}
+        listLabel="Common limits"
+        hint={`Pick a common limit or type any whole number up to ${formatNumber(LIVE_BULK_HARD_LIMIT)}.`}
         error={submitted ? errors.max : undefined}
       />
       <TextField
@@ -207,6 +229,19 @@ function LiveSettingsForm(props: {
             : "Optional; recorded in the audit log."
         }
         error={submitted ? errors.reason : undefined}
+        suggestions={
+          <FillSuggestions
+            field="Reason"
+            items={[
+              "Fixing bad data reported by support",
+              "Data cleanup",
+              "Hotfix: incident ",
+              "Testing in staging",
+            ]}
+            current={reason}
+            onPick={setReason}
+          />
+        }
       />
       {needsConfirmation ? (
         <>

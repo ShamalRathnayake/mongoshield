@@ -75,6 +75,8 @@ async function main(): Promise<void> {
     logger,
     setupWindowMs: environment.setupWindowMs,
     defaultStorage: environment.defaultStorage,
+    // A replaced container must not fail on its predecessor's lock.
+    waitForPreviousLock: true,
     ...(environment.initialAdmin === undefined ? {} : { initialAdmin: environment.initialAdmin }),
     settings: {
       cookieSecure: environment.cookieSecure,

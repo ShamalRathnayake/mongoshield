@@ -1,9 +1,10 @@
 /**
  * Keyboard-only use of the restore wizard: from the backup page to a finished
- * restore without the mouse, through the "Preview changes" step down to one
- * document. Every control is reached with Tab, changed with the keyboard, and focus
- * goes somewhere sensible when the wizard changes step or opens a detail (a step
- * that unmounts the focused button must not drop focus on <body>).
+ * restore without the mouse, step by step (What → Where → Keys → Review → Preview →
+ * Confirm) and through the preview down to one document. Every control is reached
+ * with Tab, changed with the keyboard, and focus goes somewhere sensible when the
+ * wizard changes step or opens a detail (a step that unmounts the focused button must
+ * not drop focus on <body>): a step's heading, or the panel of a step without one.
  */
 
 import type { Locator, Page } from "@playwright/test";
@@ -52,14 +53,35 @@ test("the restore wizard works with the keyboard alone", async ({ page }) => {
   await page.keyboard.press("Space");
   await expect(namespace).toBeChecked();
 
+  // On to the Where step; it has no heading, so its panel takes focus.
+  await tabTo(page, page.getByRole("button", { name: "Next: Where" }));
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("tabpanel", { name: /^Where/ }),
+    `focus is on ${await focused(page)}`,
+  ).toBeFocused();
+
   // Choosing the production connection by typing the start of its name.
-  const target = page.getByLabel("Target connection");
+  const target = page.getByLabel("Target connection", { exact: true });
   await tabTo(page, target);
   await page.keyboard.type("Prod");
   await expect(target.locator("option:checked")).toHaveText(`${NAMES.production} — PRODUCTION`);
 
-  await tabTo(page, page.getByLabel("Rename rules (optional)"));
-  await page.keyboard.type(`${SEED.database}.*=shop_keyboard.*`);
+  // "Restore as": a copy next to the original, chosen with Space, suffix typed.
+  await tabTo(page, page.getByRole("radio", { name: "Original names" }));
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("radio", { name: "A copy next to the original" })).toBeChecked();
+  await tabTo(page, page.getByLabel("Suffix", { exact: true }));
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("_keyboard");
+
+  // On to Keys (the console holds this backup's key: nothing to type), then the plan.
+  await tabTo(page, page.getByRole("button", { name: "Next: Keys" }));
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("tabpanel", { name: /^Keys/ }),
+    `focus is on ${await focused(page)}`,
+  ).toBeFocused();
   await tabTo(page, page.getByRole("button", { name: "Review plan" }));
   await page.keyboard.press("Enter");
 
@@ -68,11 +90,16 @@ test("the restore wizard works with the keyboard alone", async ({ page }) => {
   await expect(planHeading).toBeVisible();
   await expect(planHeading, `focus is on ${await focused(page)}`).toBeFocused();
 
+  // The Preview step opens on what it does, with its heading focused.
+  await tabTo(page, page.getByRole("button", { name: "Next: Preview" }));
+  await page.keyboard.press("Enter");
+  const previewHeading = page.getByRole("heading", { name: /^Preview: / });
+  await expect(previewHeading, `focus is on ${await focused(page)}`).toBeFocused();
+
   // The preview: its heading, then one namespace, then one document, each focused.
   await tabTo(page, page.getByRole("button", { name: "Preview changes" }));
   await page.keyboard.press("Enter");
   await expect(page.getByRole("table", { name: "Changes per namespace" })).toBeVisible();
-  const previewHeading = page.getByRole("heading", { name: /^Preview: / });
   await expect(previewHeading, `focus is on ${await focused(page)}`).toBeFocused();
   const orders = `${SEED.database}.${SEED.orders}`;
   await tabTo(page, page.getByRole("button", { name: `Documents of ${orders}` }));
@@ -86,7 +113,7 @@ test("the restore wizard works with the keyboard alone", async ({ page }) => {
   await tabTo(page, firstId);
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: /^Document _id / })).toBeFocused();
-  await tabTo(page, page.getByRole("button", { name: "Continue" }));
+  await tabTo(page, page.getByRole("button", { name: "Next: Confirm" }));
   await page.keyboard.press("Enter");
   await expect(
     page.getByRole("heading", { name: "Confirm restore into production" }),
@@ -107,18 +134,32 @@ test("the restore wizard works with the keyboard alone", async ({ page }) => {
   expect(restored).toBe(SEED.orderCount);
 });
 
-test("going back from the review step returns focus to the form", async ({ page }) => {
+test("going back from the review step focuses the step before it and keeps the plan", async ({
+  page,
+}) => {
   await signIn(page, ADMIN);
   const { storageId, backupId } = await readableBackup(page.request);
   await goTo(page, `/backups/${storageId}/${backupId}/restore`);
-  await page.getByLabel("Rename rules (optional)").fill(`${SEED.database}.*=shop_back.*`);
+  // Where: custom rename rules.
+  await page.getByRole("tab", { name: /^Where/ }).click();
+  await page.getByRole("radio", { name: "Custom rules (advanced)" }).check();
+  await page.getByLabel("Rename rules", { exact: true }).fill(`${SEED.database}.*=shop_back.*`);
+  // Keys → the plan.
+  await page.getByRole("tab", { name: /^Keys/ }).click();
   await page.getByRole("button", { name: "Review plan" }).click();
+  await expect(page.getByRole("heading", { name: /^Plan: / })).toBeVisible();
   const back = page.getByRole("button", { name: "Back" });
   await tabTo(page, back);
   await page.keyboard.press("Enter");
-  // The form is back, with what was typed, and focus is on its submit button.
-  await expect(page.getByLabel("Rename rules (optional)")).toHaveValue(
+  // Back on Keys, with its panel focused; the plan is kept, so Next goes to it again.
+  await expect(
+    page.getByRole("tabpanel", { name: /^Keys/ }),
+    `focus is on ${await focused(page)}`,
+  ).toBeFocused();
+  await expect(page.getByRole("button", { name: "Next: Review" })).toBeVisible();
+  // And what was typed in Where is still there.
+  await page.getByRole("tab", { name: /^Where/ }).click();
+  await expect(page.getByLabel("Rename rules", { exact: true })).toHaveValue(
     `${SEED.database}.*=shop_back.*`,
   );
-  await expect(page.getByRole("button", { name: "Review plan" })).toBeFocused();
 });

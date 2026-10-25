@@ -49,9 +49,11 @@ describe("connections", () => {
     const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/connections" });
     await user.click(await screen.findByRole("button", { name: "Edit Production cluster" }));
     const dialog = screen.getByRole("dialog", { name: 'Edit "Production cluster"' });
-    const uriField = within(dialog).getByLabelText("Connection string") as HTMLInputElement;
+    // A normal, visible text box (only a password goes into a masked field), empty: the
+    // stored string is never sent back to the browser.
+    const uriField = within(dialog).getByLabelText("Connection string") as HTMLTextAreaElement;
     expect(uriField.value).toBe("");
-    expect(uriField.type).toBe("password");
+    expect(uriField.tagName).toBe("TEXTAREA");
     expect(
       within(dialog).getByText("mongodb+srv://backup:***@prod-cluster.a1b2c.mongodb.net/"),
     ).toBeTruthy();

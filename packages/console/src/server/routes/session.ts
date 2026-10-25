@@ -43,6 +43,7 @@ import {
   setSessionCookie,
   USERNAME_PATTERN,
 } from "../auth.ts";
+import { runsInContainer } from "../connection-check.ts";
 import type { AppEnv, ConsoleServices, Principal } from "../context.ts";
 import { ConsoleError, invalid } from "../errors.ts";
 import { readJson } from "../security.ts";
@@ -222,7 +223,12 @@ function sessionInfo(services: ConsoleServices, principal: Principal | undefined
         }),
     ...(principal === undefined
       ? {}
-      : { user: userView(principal.user), csrfToken: principal.csrfToken }),
+      : {
+          user: userView(principal.user),
+          csrfToken: principal.csrfToken,
+          // Lets pages suggest host.docker.internal instead of localhost.
+          inContainer: services.inContainer ?? runsInContainer(),
+        }),
   };
 }
 

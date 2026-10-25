@@ -68,6 +68,11 @@ export interface SessionInfo {
   readonly authMethods: readonly ("password" | "oidc" | "proxy")[];
   /** While setup is not complete: whether the setup page needs the token from the log. */
   readonly setup?: SetupState;
+  /**
+   * Signed in only: whether the console runs in a container, where `localhost` is the
+   * container itself. Pages then suggest `host.docker.internal` instead of `localhost`.
+   */
+  readonly inContainer?: boolean;
 }
 
 /**
@@ -216,6 +221,13 @@ export interface ConnectionTestResult {
   readonly readableDatabases?: readonly string[];
   /** Advice about missing privileges, in plain words (a warning, not a failure). */
   readonly privilegeAdvice?: ConnectionProblem;
+  /**
+   * Set when the console got through on another address than the one given. In a
+   * container `localhost` is the container itself, so when it was refused the console
+   * tried the machine the container runs on (`host.docker.internal`), and that worked.
+   * The check page saves that address; a saved connection's test stores it right away.
+   */
+  readonly reachedThrough?: { readonly from: string; readonly to: string };
 }
 
 /** Atlas cluster tiers as the console shows them: Free/Flex share hardware; M10+ is dedicated. */

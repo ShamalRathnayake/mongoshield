@@ -31,7 +31,7 @@ import type {
   PublicIpResult,
   QuickBackupResult,
 } from "../../shared/api.ts";
-import { analyzeConnectionString } from "../../shared/connection-string.ts";
+import { analyzeConnectionString, throughContainerHost } from "../../shared/connection-string.ts";
 import { randomId } from "../../state/crypto.ts";
 import type { PlanRecord, StorageRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
@@ -64,6 +64,8 @@ export interface OnboardingRouteOptions {
   readonly fetchPublicIp?: (url: string, signal: AbortSignal) => Promise<Response>;
   /** Whether the console runs in a container (defaults to detecting it). */
   readonly inContainer?: boolean;
+  /** The address to try for a refused localhost in a container (see `inspectConnection`). */
+  readonly containerAddress?: (uri: string) => string | undefined;
 }
 
 /** Registers the onboarding routes. */
@@ -79,12 +81,19 @@ export function onboardingRoutes(
     const body = asObject(await readJson(c));
     const uri = normalizeConnectionUri(requiredString(body, "uri", MAX_URI_LENGTH));
     const info = analyzeConnectionString(uri);
-    const result = await inspectConnection(
-      uri,
-      options.inContainer === undefined ? {} : { inContainer: options.inContainer },
-    );
-    // Saving the connection right after this keeps what the check found out.
-    if (result.ok) rememberCheck(services, uri, deploymentOf(result, services.now()));
+    const result = await inspectConnection(uri, {
+      ...(options.inContainer === undefined ? {} : { inContainer: options.inContainer }),
+      ...(options.containerAddress === undefined
+        ? {}
+        : { containerAddress: options.containerAddress }),
+    });
+    // Saving the connection right after this keeps what the check found out, under the
+    // address that worked (the page saves that one when the console had to use the host).
+    const reached =
+      result.reachedThrough === undefined
+        ? uri
+        : ((options.containerAddress ?? throughContainerHost)(uri) ?? uri);
+    if (result.ok) rememberCheck(services, reached, deploymentOf(result, services.now()));
     const answer: ConnectionCheckResult = {
       ...result,
       suggestedName: uniqueName(

@@ -1,6 +1,6 @@
 /**
- * Page tests for user management: the sign-in method column, creating password and
- * SSO-only accounts, editing, deleting, and validation.
+ * Page tests for user management: the sign-in method column, the role cards, creating
+ * password and SSO-only accounts, editing, deleting, and validation.
  */
 
 import { screen, within } from "@testing-library/react";
@@ -19,6 +19,29 @@ describe("users", () => {
     ).toBe(true);
   });
 
+  it("chooses the role from cards that say what each role may do", async () => {
+    const { user } = renderApp({ signedInAs: "admin", hash: "#/users" });
+    await user.click(await screen.findByRole("button", { name: "Edit maya" }));
+    const dialog = await screen.findByRole("dialog");
+    const group = within(dialog).getByRole("group", { name: "Role" });
+    const radios = within(group).getAllByRole("radio");
+    // Least powerful first, the user's current role chosen.
+    expect(radios.map((radio) => radio.getAttribute("value"))).toEqual([
+      "viewer",
+      "operator",
+      "admin",
+    ]);
+    const operator = within(group).getByRole("radio", { name: "Operator" }) as HTMLInputElement;
+    expect(operator.checked).toBe(true);
+    // Each card's sentence is the radio's description, read out with it.
+    const description = document.getElementById(operator.getAttribute("aria-describedby") ?? "");
+    expect(description?.textContent).toMatch(/restores into non-production/);
+    await user.click(within(group).getByRole("radio", { name: "Admin" }));
+    expect((within(group).getByRole("radio", { name: "Admin" }) as HTMLInputElement).checked).toBe(
+      true,
+    );
+  });
+
   it("requires a strong initial password when single sign-on is off", async () => {
     const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/users" });
     await user.click(await screen.findByRole("button", { name: "Add user" }));
@@ -35,7 +58,7 @@ describe("users", () => {
 
     await user.clear(within(dialog).getByLabelText("Initial password"));
     await user.type(within(dialog).getByLabelText("Initial password"), "a long passphrase");
-    await user.selectOptions(within(dialog).getByLabelText("Role"), "operator");
+    await user.click(within(dialog).getByRole("radio", { name: "Operator" }));
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Saved riley.")).toBeTruthy();
     expect(requestsTo(backend, "POST", "/api/users")[0]?.body).toEqual({
@@ -72,7 +95,7 @@ describe("users", () => {
     await user.click(await screen.findByRole("button", { name: "Edit sam" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Leave empty to keep the current password.")).toBeTruthy();
-    await user.selectOptions(within(dialog).getByLabelText("Role"), "operator");
+    await user.click(within(dialog).getByRole("radio", { name: "Operator" }));
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Saved sam.")).toBeTruthy();
     expect(requestsTo(backend, "PUT", "/api/users/user-sam")[0]?.body).toEqual({
@@ -96,7 +119,7 @@ describe("users", () => {
     // Sam is a viewer: the permission is unavailable until the role allows it.
     expect(checkbox.disabled).toBe(true);
     expect(within(dialog).getByText(/Viewers cannot edit live data/)).toBeTruthy();
-    await user.selectOptions(within(dialog).getByLabelText("Role"), "operator");
+    await user.click(within(dialog).getByRole("radio", { name: "Operator" }));
     expect(checkbox.disabled).toBe(false);
     await user.click(checkbox);
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
@@ -118,7 +141,7 @@ describe("users", () => {
       (within(dialog).getByLabelText("Can edit live data (data:write)") as HTMLInputElement)
         .checked,
     ).toBe(true);
-    await user.selectOptions(within(dialog).getByLabelText("Role"), "viewer");
+    await user.click(within(dialog).getByRole("radio", { name: "Viewer" }));
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Saved maya.")).toBeTruthy();
     expect(

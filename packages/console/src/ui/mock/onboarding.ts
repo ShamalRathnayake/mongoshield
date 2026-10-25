@@ -31,9 +31,11 @@ import type {
 } from "../../shared/api.ts";
 import {
   analyzeConnectionString,
+  CONTAINER_HOST,
   ConnectionStringError,
   cleanPastedConnectionString,
   encodeCredentials,
+  throughContainerHost,
 } from "../../shared/connection-string.ts";
 import type { RequestOf, ResponseOf, RouteKey } from "../api.ts";
 import type { MockConnection, MockData } from "./fixtures.ts";
@@ -82,6 +84,11 @@ export interface OnboardingMockContext {
   readonly newId: (prefix: string) => string;
   /** Runs a plan like `POST /api/plans/:id/run`. */
   readonly runPlan: (planId: string) => JobSummary;
+  /**
+   * Behave like a console in a container: a `localhost` string is "refused" and then
+   * reached through host.docker.internal (`reachedThrough`), as the real server does.
+   */
+  readonly inContainer: boolean;
 }
 
 /** A recognisable fake age key pair for mock plans (the real server generates one). */
@@ -121,8 +128,14 @@ export function createOnboardingMock(context: OnboardingMockContext): {
         };
       }
       const limited = /\/\/reader[:@]/.test(uri);
+      // In a container, localhost is "refused" and the host machine answers instead.
+      const reachedThrough =
+        context.inContainer && throughContainerHost(uri) !== undefined
+          ? { from: info.hosts.join(", "), to: CONTAINER_HOST }
+          : undefined;
       return {
         ok: true,
+        ...(reachedThrough === undefined ? {} : { reachedThrough }),
         topology: "replicaSet",
         serverVersion: "8.0.4",
         missingBackupPrivileges: limited ? ["find on all databases"] : [],

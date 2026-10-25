@@ -9,9 +9,10 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseNode, PlanView } from "../../shared/api.ts";
+import { renderFailingApp } from "../failing-backend.testkit.tsx";
 import { renderApp, requestsTo } from "../testing.tsx";
 import { chosenFrom, includeFor } from "./backup-actions.tsx";
-import { understand, uriToSend } from "./welcome.tsx";
+import { connectionNameSuggestions, topologyLabel, understand, uriToSend } from "./welcome.tsx";
 
 const ATLAS_COPY =
   "mongodb+srv://shamal:<db_password>@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
@@ -30,8 +31,8 @@ afterEach(() => {
 });
 
 /** Renders a brand-new console signed in as admin, on the welcome page. */
-async function freshAdmin(hash = "#/") {
-  const rendered = renderApp({ signedInAs: "admin", fresh: true, hash });
+async function freshAdmin(hash = "#/", inContainer = false) {
+  const rendered = renderApp({ signedInAs: "admin", fresh: true, hash, inContainer });
   expect(await screen.findByRole("heading", { name: "Connect your database" })).toBeTruthy();
   return rendered;
 }
@@ -46,6 +47,199 @@ describe("the welcome page", () => {
     renderApp({ signedInAs: "admin" });
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(window.location.hash).not.toBe("#/welcome");
+  });
+
+  it("fills in a local connection string with one click", async () => {
+    // Not in a container: "this computer" is localhost, and host.docker.internal is not offered.
+    const { user } = await freshAdmin();
+    await user.click(screen.getByRole("button", { name: "localhost:27017" }));
+    expect((screen.getByLabelText("Connection string") as HTMLTextAreaElement).value).toBe(
+      "mongodb://localhost:27017",
+    );
+    expect(screen.queryByRole("button", { name: "This computer (console in Docker)" })).toBeNull();
+    // The chips are a named group, and the one in the field is marked as chosen.
+    const quickFill = screen.getByRole("group", { name: "Suggestions for Connection string" });
+    expect(quickFill.textContent).toContain("Quick fill:");
+    expect(
+      within(quickFill)
+        .getByRole("button", { name: "localhost:27017" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  it("in Docker, suggests host.docker.internal instead of localhost and explains localhost", async () => {
+    const { user } = await freshAdmin("#/", true);
+    expect(screen.queryByRole("button", { name: "localhost:27017" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "This computer (console in Docker)" }));
+    expect((screen.getByLabelText("Connection string") as HTMLTextAreaElement).value).toBe(
+      "mongodb://host.docker.internal:27017",
+    );
+    // Typing localhost anyway: a hint with a one-click fix.
+    const field = screen.getByLabelText("Connection string");
+    await user.clear(field);
+    await user.type(field, "mongodb://localhost:27017/?appName=x");
+    expect(screen.getByText("localhost is the console's own container here")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Use host.docker.internal" }));
+    expect((field as HTMLTextAreaElement).value).toBe(
+      "mongodb://host.docker.internal:27017/?appName=x",
+    );
+  });
+
+  it("in Docker, saves a localhost string that was reached through the host", async () => {
+    const { user, backend } = await freshAdmin("#/", true);
+    const field = screen.getByLabelText("Connection string");
+    await user.click(field);
+    await user.paste("mongodb://localhost:27017");
+    // The check got through on host.docker.internal: Details says so, and saving uses it.
+    expect(await screen.findByText("Connected through host.docker.internal")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save and browse data" }));
+    // The connection itself (not the check before it, which shares the path prefix).
+    const creates = () =>
+      requestsTo(backend, "POST", "/api/connections").filter(
+        (request) => request.url === "/api/connections",
+      );
+    await waitFor(() => expect(creates()).toHaveLength(1));
+    expect((creates()[0]?.body as { uri?: string } | undefined)?.uri).toBe(
+      "mongodb://host.docker.internal:27017",
+    );
+  });
+
+  it("shows the steps as tabs: Details opens only after a successful check", async () => {
+    const { user } = await freshAdmin();
+    const steps = screen.getByRole("tablist", { name: "Getting started" });
+    const tab = (name: RegExp) => within(steps).getByRole("tab", { name });
+    expect(tab(/Connect/).getAttribute("aria-selected")).toBe("true");
+    // Details waits for the check, and the last step is where saving leads.
+    expect(tab(/Details/).getAttribute("aria-disabled")).toBe("true");
+    expect(tab(/Browse and back up/).getAttribute("aria-disabled")).toBe("true");
+    await user.click(tab(/Details/));
+    expect(tab(/Connect/).getAttribute("aria-selected")).toBe("true");
+    // The step's own action stands where Next would be.
+    expect(screen.queryByRole("button", { name: /Next/ })).toBeNull();
+    expect(screen.getByText("Step 1 of 3")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "localhost:27017" }));
+    await user.click(screen.getByRole("button", { name: "Check connection" }));
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    // Moved on by itself, with focus on the new step so it is announced.
+    expect(tab(/Details/).getAttribute("aria-selected")).toBe("true");
+    expect(tab(/Connect.*\(done\)/)).toBeTruthy();
+    expect(document.activeElement?.getAttribute("role")).toBe("tabpanel");
+    expect(document.activeElement?.textContent).toContain("Connected");
+    expect(screen.getByRole("button", { name: "Save and browse data" })).toBeTruthy();
+    // The destination stays locked: saving is the way there.
+    expect(tab(/Browse and back up/).getAttribute("aria-disabled")).toBe("true");
+
+    // Back to Connect: the string is kept and Next returns to the details.
+    await user.click(screen.getByRole("button", { name: /Back/ }));
+    expect(tab(/Connect/).getAttribute("aria-selected")).toBe("true");
+    await user.click(screen.getByRole("button", { name: "Next: Details" }));
+    expect(tab(/Details/).getAttribute("aria-selected")).toBe("true");
+
+    // A changed string needs a new check: Details locks again.
+    await user.click(tab(/Connect/));
+    await user.type(screen.getByLabelText("Connection string"), "0");
+    expect(tab(/Details/).getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "Check connection" })).toBeTruthy();
+  });
+
+  it("refuses an empty, blank or too long name on Details, with the reason shown", async () => {
+    const { user, backend } = await freshAdmin();
+    await user.click(screen.getByRole("button", { name: "localhost:27017" }));
+    await user.click(screen.getByRole("button", { name: "Check connection" }));
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    const name = screen.getByLabelText("Name");
+    const save = screen.getByRole("button", { name: "Save and browse data" }) as HTMLButtonElement;
+    const detailsTab = screen.getByRole("tab", { name: /^Details/ });
+
+    // Spaces only count as empty.
+    await user.clear(name);
+    await user.type(name, "   ");
+    expect(screen.getByText("Give the connection a name.")).toBeTruthy();
+    expect(save.disabled).toBe(true);
+    expect(detailsTab.textContent).toContain("(needs attention)");
+    await user.click(save);
+    // (Not the check, which is `POST /api/connections/check`.)
+    expect(
+      requestsTo(backend, "POST", "/api/connections").filter(
+        (request) => request.url === "/api/connections",
+      ),
+    ).toHaveLength(0);
+
+    // The server keeps at most 100 characters.
+    await user.clear(name);
+    await user.type(name, "x".repeat(101));
+    expect(screen.getByText("Use at most 100 characters.")).toBeTruthy();
+    expect(save.disabled).toBe(true);
+
+    await user.clear(name);
+    await user.type(name, "Local");
+    expect(save.disabled).toBe(false);
+  });
+
+  it("marks the Connect tab when the check fails, and stays there", async () => {
+    const { user } = await freshAdmin();
+    await user.click(screen.getByLabelText("Connection string"));
+    await user.paste("mongodb://localhost:1");
+    expect(await screen.findByText("Nothing is listening there")).toBeTruthy();
+    const steps = screen.getByRole("tablist", { name: "Getting started" });
+    const connect = within(steps).getByRole("tab", { name: /Connect.*\(needs attention\)/ });
+    expect(connect.getAttribute("aria-selected")).toBe("true");
+    expect(
+      within(steps)
+        .getByRole("tab", { name: /Details/ })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
+  });
+
+  it("says when the check itself could not run, on the Connect tab", async () => {
+    const { user } = renderFailingApp({
+      signedInAs: "admin",
+      fresh: true,
+      hash: "#/",
+      failures: [{ method: "POST", path: "/api/connections/check", status: "network" }],
+    });
+    expect(await screen.findByRole("heading", { name: "Connect your database" })).toBeTruthy();
+    await user.click(screen.getByLabelText("Connection string"));
+    await user.paste("mongodb://localhost:27017");
+    expect(await screen.findByText("That did not work")).toBeTruthy();
+    const steps = screen.getByRole("tablist", { name: "Getting started" });
+    expect(within(steps).getByRole("tab", { name: /Connect.*\(needs attention\)/ })).toBeTruthy();
+  });
+
+  it("asks for a name and shows a failed save on the Details step", async () => {
+    const { user } = renderFailingApp({
+      signedInAs: "admin",
+      fresh: true,
+      hash: "#/",
+      failures: [
+        // The save only: the check (`/api/connections/check`) still answers.
+        { method: "POST", path: /\/api\/connections$/, status: 409, message: "Name taken." },
+      ],
+    });
+    expect(await screen.findByRole("heading", { name: "Connect your database" })).toBeTruthy();
+    await user.click(screen.getByLabelText("Connection string"));
+    await user.paste("mongodb://localhost:27017");
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    const steps = screen.getByRole("tablist", { name: "Getting started" });
+
+    // Without a name the step needs attention and cannot be saved.
+    await user.clear(screen.getByLabelText("Name"));
+    expect(within(steps).getByRole("tab", { name: /Details.*\(needs attention\)/ })).toBeTruthy();
+    const save = screen.getByRole("button", { name: "Save and browse data" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    await user.type(screen.getByLabelText("Name"), "shop");
+    await user.click(save);
+    expect(await screen.findByText("Could not save")).toBeTruthy();
+    expect(screen.getByText("Name taken.")).toBeTruthy();
+    // Still on Details, where the error is.
+    expect(
+      within(steps)
+        .getByRole("tab", { name: /Details/ })
+        .getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(window.location.hash).toBe("#/welcome");
   });
 
   it("can be skipped", async () => {
@@ -101,6 +295,19 @@ describe("the welcome page", () => {
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(
       "MongoDB on this computer",
     );
+    // Names in one click: the suggested one (chosen; the string's own suggestion is the
+    // same, so it is not repeated), then the roles, local first.
+    const names = screen.getByRole("group", { name: "Suggestions for Name" });
+    const chips = within(names).getAllByRole("button");
+    expect(chips.map((chip) => chip.textContent)).toEqual([
+      "MongoDB on this computer",
+      "Local dev",
+      "Staging",
+      "Production",
+    ]);
+    expect(chips[0]?.getAttribute("aria-pressed")).toBe("true");
+    await user.click(within(names).getByRole("button", { name: "Staging" }));
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Staging");
   });
 
   it("moves a pasted password out of sight into the masked field", async () => {
@@ -404,6 +611,31 @@ describe("helpers", () => {
       "shop.orders",
       "shop.users",
     ]);
+  });
+
+  it("suggests connection names, the likelier role first", () => {
+    expect(connectionNameSuggestions("cluster0", "cluster0", true)).toEqual([
+      "cluster0",
+      "cluster0",
+      "Production",
+      "Staging",
+      "Local dev",
+    ]);
+    expect(connectionNameSuggestions("mongo", undefined, false)).toEqual([
+      "mongo",
+      undefined,
+      "Local dev",
+      "Staging",
+      "Production",
+    ]);
+  });
+
+  it("names topologies in plain words", () => {
+    expect(topologyLabel("replicaSet")).toBe("Replica set");
+    expect(topologyLabel("sharded")).toBe("Sharded cluster");
+    expect(topologyLabel("standalone")).toBe("Single server");
+    expect(topologyLabel(undefined)).toBe("Unknown");
+    expect(topologyLabel("load_balanced")).toBe("Load balanced");
   });
 
   it("builds the URI to send only when nothing is missing", () => {

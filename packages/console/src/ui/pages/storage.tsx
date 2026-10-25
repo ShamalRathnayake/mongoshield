@@ -2,19 +2,19 @@
  * Storage: where backups are written (S3-compatible buckets, GCS, Azure, SFTP or a path
  * inside the data volume).
  *
- * Credentials are environment-style pairs (`AWS_ACCESS_KEY_ID=…`), stored encrypted and
- * never returned; editing shows only which keys are configured, and leaving the
- * credentials box empty keeps them. The Test button writes, reads and deletes a probe
- * object and reports what the storage supports, including object lock (needed for
- * immutable backups).
+ * The add/edit dialog (storage-form.tsx) builds the location from a "Type" select and
+ * per-type fields, and the credentials from named fields. Credentials are stored as
+ * environment-style pairs (`AWS_ACCESS_KEY_ID=…`), encrypted and never returned;
+ * editing shows only which keys are configured and keeps them unless replaced. The
+ * Test button writes, reads and deletes a probe object and reports what the storage
+ * supports, including object lock (needed for immutable backups).
  */
 
-import { type FormEvent, useState } from "react";
-import type { StorageInput, StorageTestResult, StorageView } from "../../shared/api.ts";
+import { useState } from "react";
+import type { StorageTestResult, StorageView } from "../../shared/api.ts";
 import { describeError } from "../api.ts";
 import { Button } from "../components/button.tsx";
 import { Dialog } from "../components/dialog.tsx";
-import { TextAreaField, TextField } from "../components/field.tsx";
 import {
   EmptyState,
   ErrorNotice,
@@ -29,23 +29,7 @@ import { Table } from "../components/table.tsx";
 import { useToast } from "../components/toast.tsx";
 import { useApi, useLoad, useSession } from "../context.tsx";
 import { buildHref, segment } from "../router.ts";
-
-/**
- * Parses `KEY=value` lines into credentials. Returns an error message for a bad line.
- * Blank lines and `#` comments are ignored so people can paste a .env snippet.
- */
-export function parseCredentials(text: string): Record<string, string> | string {
-  const credentials: Record<string, string> = {};
-  const lines = text.split("\n");
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = (lines[index] ?? "").trim();
-    if (line === "" || line.startsWith("#")) continue;
-    const equals = line.indexOf("=");
-    if (equals <= 0) return `Line ${index + 1} is not KEY=value.`;
-    credentials[line.slice(0, equals).trim()] = line.slice(equals + 1).trim();
-  }
-  return credentials;
-}
+import { StorageDialog } from "./storage-form.tsx";
 
 /** Lists storage locations with add, edit, test and delete. */
 export function StoragePage() {
@@ -188,6 +172,10 @@ export function StoragePage() {
       {editing === undefined ? null : (
         <StorageDialog
           storage={editing === "new" ? undefined : editing}
+          // The other locations' names, which this one may not take.
+          takenNames={(storage.data ?? [])
+            .filter((location) => editing === "new" || location.id !== editing.id)
+            .map((location) => location.name)}
           onClose={() => setEditing(undefined)}
           onSaved={(saved) => {
             setEditing(undefined);
@@ -268,118 +256,5 @@ export function StorageTestReport(props: {
         ]}
       />
     </div>
-  );
-}
-
-/** Add/edit form for a storage location. Credentials are write-only. */
-function StorageDialog(props: {
-  storage: StorageView | undefined;
-  onClose: () => void;
-  onSaved: (storage: StorageView) => void;
-}) {
-  const client = useApi();
-  const existing = props.storage;
-  const [name, setName] = useState(existing?.name ?? "");
-  const [url, setUrl] = useState(existing?.url ?? "");
-  const [credentialsText, setCredentialsText] = useState("");
-  const [submitted, setSubmitted] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(undefined);
-
-  const parsedCredentials = parseCredentials(credentialsText);
-  const errors = {
-    name: name.trim() === "" ? "Give the storage a name, e.g. “S3 primary”." : undefined,
-    url:
-      url.trim() === ""
-        ? "Enter a URL such as s3://bucket/prefix/ or a path like /data/backups."
-        : undefined,
-    credentials: typeof parsedCredentials === "string" ? parsedCredentials : undefined,
-  };
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setSubmitted(true);
-    if (
-      Object.values(errors).some((message) => message !== undefined) ||
-      typeof parsedCredentials === "string"
-    )
-      return;
-    setBusy(true);
-    setError(undefined);
-    // Empty credentials on edit = keep the stored ones.
-    const keep = credentialsText.trim() === "" && existing !== undefined;
-    const input: StorageInput = {
-      name: name.trim(),
-      url: url.trim(),
-      ...(keep ? {} : { credentials: parsedCredentials }),
-    };
-    try {
-      const saved =
-        existing === undefined
-          ? await client.call("POST /api/storage", input)
-          : await client.call("PUT /api/storage/:id", input, { params: { id: existing.id } });
-      setCredentialsText("");
-      props.onSaved(saved);
-    } catch (failure) {
-      setError(failure);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Dialog
-      open
-      title={existing === undefined ? "Add storage" : `Edit "${existing.name}"`}
-      onClose={props.onClose}
-      footer={
-        <>
-          <Button onClick={props.onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" form="storage-form" busy={busy}>
-            {existing === undefined ? "Add and test" : "Save and test"}
-          </Button>
-        </>
-      }
-    >
-      <form id="storage-form" onSubmit={submit} noValidate className="form">
-        <TextField
-          label="Name"
-          value={name}
-          onValue={setName}
-          data-autofocus
-          error={submitted ? errors.name : undefined}
-        />
-        <TextField
-          label="Location"
-          value={url}
-          onValue={setUrl}
-          spellCheck={false}
-          placeholder="s3://acme-backups/prod/"
-          hint="s3://, gs://, az://, sftp:// or a path inside the console's data volume."
-          error={submitted ? errors.url : undefined}
-        />
-        <TextAreaField
-          label="Credentials"
-          value={credentialsText}
-          onValue={setCredentialsText}
-          rows={4}
-          spellCheck={false}
-          autoComplete="off"
-          placeholder={"AWS_ACCESS_KEY_ID=…\nAWS_SECRET_ACCESS_KEY=…"}
-          hint={
-            existing?.credentials.configured ? (
-              <>
-                Stored: {existing.credentials.preview ?? "configured"}. Leave empty to keep them;
-                anything typed here replaces all of them.
-              </>
-            ) : (
-              "One KEY=value per line, stored encrypted. Leave empty to use the console's environment (e.g. an IAM role)."
-            )
-          }
-          error={submitted ? errors.credentials : undefined}
-        />
-        {error === undefined ? null : <ErrorNotice error={error} title="Could not save" />}
-      </form>
-    </Dialog>
   );
 }

@@ -50,7 +50,8 @@ test("paste a connection string, browse it, back it up and restore it in a few c
   expect(await accessibilityProblems(page, { shell: true }), "welcome page").toEqual([]);
 
   await test.step("paste the connection string: it is checked right away", async () => {
-    const field = page.getByLabel("Connection string");
+    // Exact: the Connect step's panel and the suggestion chips are named with it too.
+    const field = page.getByLabel("Connection string", { exact: true });
     await field.focus();
     // A real paste event, as from the clipboard, wrapped in quotes like many copies are.
     await page.evaluate((text) => {
@@ -66,12 +67,19 @@ test("paste a connection string, browse it, back it up and restore it in a few c
     // The password moved into the masked field: the string shows a placeholder.
     await expect(field).toHaveValue(/:<password>@/);
     await expect(page.getByText(/Connected$/)).toBeVisible();
-    // A local test database: not production by default, and the reason is shown.
-    await expect(page.getByLabel("This is a production database")).not.toBeChecked();
+    // A successful check opens the Details step by itself. A local test database: not
+    // production by default, and the reason is shown.
+    await expect(page.getByRole("tab", { name: /^Details/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(
+      page.getByLabel("This is a production database", { exact: true }),
+    ).not.toBeChecked();
     await expect(page.getByText(/runs on this computer or in Docker/)).toBeVisible();
     // The password is never shown: only the masked password field holds it.
     expect(await page.locator("body").innerText()).not.toContain(E2E_MONGO_PASSWORD);
-    await page.getByLabel("Name").fill("Quick start");
+    await page.getByLabel("Name", { exact: true }).fill("Quick start");
   });
 
   await test.step("save and land on the live data with the backup actions", async () => {

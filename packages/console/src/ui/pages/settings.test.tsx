@@ -1,13 +1,14 @@
 /**
  * Page tests for the settings page: theme, account, config export, and the config
- * import flow (input checks, dry run, apply, server errors, non-admins).
+ * import flow (input checks, the plan name suggestions or the detected plan list, dry
+ * run, apply, server errors, non-admins).
  */
 
 import { screen, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderApp, requestsTo } from "../testing.tsx";
-import { parseImportInput } from "./settings.tsx";
+import { importShape, parseImportInput } from "./settings.tsx";
 
 /** jsdom has no Blob URLs and cannot follow `<a download>` clicks, so both are faked. */
 beforeEach(() => {
@@ -35,7 +36,8 @@ describe("settings", () => {
   it("shows the account and changes the theme", async () => {
     const { user } = renderApp({ signedInAs: "maya", hash: "#/settings" });
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
-    expect(screen.getByText("operator")).toBeTruthy();
+    // The account panel (the sidebar shows the role too).
+    expect(within(screen.getByRole("main")).getByText("operator")).toBeTruthy();
     await user.selectOptions(screen.getByLabelText("Theme"), "dark");
     expect((screen.getByLabelText("Theme") as HTMLSelectElement).value).toBe("dark");
     await user.selectOptions(screen.getByLabelText("Theme"), "system");
@@ -115,9 +117,51 @@ describe("config import", () => {
     expect(within(table).getByText(/"gzip" → "none"/)).toBeTruthy();
     expect(within(table).getByText(/\{"last":24\} → \{"last":48\}/)).toBeTruthy();
 
-    await user.type(screen.getByLabelText("Plan name"), "x");
+    // Several plans keyed by name: no plan name is asked; the plans found are listed.
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    const plans = screen.getByRole("list", { name: "Plans in the configuration" });
+    expect(plans.textContent).toBe("Staging hourly (updates the existing plan)");
+    await paste(user, "Secrets (JSON, optional)", "{}");
     expect(screen.queryByRole("table", { name: "Changes the import would make" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Apply import" })).toBeNull();
+  });
+
+  it("suggests the existing plans as the plan name and says what the import will do", async () => {
+    const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/settings" });
+    await paste(user, "Configuration (JSON)", NEW_CONFIG);
+    const name = screen.getByRole("combobox", { name: "Plan name" });
+    expect(screen.getByText(/Pick an existing plan to update it, or type a new name/)).toBeTruthy();
+    // Down opens the list of every existing plan; Enter picks the highlighted (first) one.
+    await user.click(name);
+    await user.keyboard("{ArrowDown}");
+    const list = await screen.findByRole("listbox", { name: "Existing plans" });
+    expect(within(list).getAllByRole("option")).toHaveLength(3);
+    await user.keyboard("{Enter}");
+    expect(name).toHaveProperty("value", "Nightly production");
+    expect(screen.getByText('Updates the existing plan "Nightly production".')).toBeTruthy();
+    await user.clear(name);
+    await user.type(name, "Reports");
+    expect(screen.getByText('Creates a new plan "Reports".')).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await screen.findByRole("table", { name: "Changes the import would make" });
+    expect(requestsTo(backend, "POST", "/api/config/import")[0]?.body).toMatchObject({
+      planName: "Reports",
+    });
+  });
+
+  it("does not send a plan name for a configuration of several plans", async () => {
+    const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/settings" });
+    await user.type(await screen.findByRole("combobox", { name: "Plan name" }), "Ignored");
+    const document = { Reports: JSON.parse(NEW_CONFIG) as object, Archive: { storage: "/b" } };
+    await paste(user, "Configuration (JSON)", JSON.stringify(document));
+    expect(screen.getByRole("list", { name: "Plans in the configuration" }).textContent).toBe(
+      "Reports (new plan)Archive (new plan)",
+    );
+    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await screen.findByText("Could not import");
+    expect(requestsTo(backend, "POST", "/api/config/import")[0]?.body).not.toHaveProperty(
+      "planName",
+    );
   });
 
   it("explains a refused document", async () => {
@@ -131,6 +175,22 @@ describe("config import", () => {
     expect(await screen.findByText("Could not import")).toBeTruthy();
     expect(screen.getByText(/source.uri contains a password/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Apply import" })).toBeNull();
+  });
+});
+
+describe("importShape", () => {
+  it("tells one config from several keyed by plan name", () => {
+    expect(importShape('{"storage": "/b"}')).toEqual({ kind: "single" });
+    expect(importShape('{" Nightly ": {"storage": "/a"}, "Hourly": {}}')).toEqual({
+      kind: "several",
+      planNames: ["Nightly", "Hourly"],
+    });
+  });
+
+  it("is unknown for empty text, invalid JSON and other shapes", () => {
+    for (const text of ["", "  ", "{ not json", "[1]", "{}", '{"a": 1}', "null"]) {
+      expect(importShape(text), text).toEqual({ kind: "unknown" });
+    }
   });
 });
 

@@ -1,12 +1,14 @@
 /**
- * Page tests for the Edit history (undo of live edits) and the connection page's Live
- * data panel (the "Allow live edits" settings with the production confirmation).
+ * Page tests for the Edit history (undo of live edits, the database / collection / who /
+ * change filters) and the connection page's Live data panel (the "Allow live edits"
+ * settings with the production confirmation and the bulk limit presets).
  */
 
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { MockBackend } from "../mock/backend.ts";
 import { renderApp, requestsTo } from "../testing.tsx";
+import { collectionOf, databaseOf, editMatches, NO_EDIT_FILTERS } from "./edit-history.tsx";
 
 /** Makes one live edit through the mock's API, as the browser would, signed in as maya. */
 async function editFirstUser(backend: MockBackend, plan: string): Promise<void> {
@@ -44,6 +46,55 @@ async function editFirstUser(backend: MockBackend, plan: string): Promise<void> 
   });
   if (response.status !== 200) throw new Error(await response.text());
 }
+
+/** Inserts a document into `ns` of the staging connection through the mock's API, as maya. */
+async function insertInto(backend: MockBackend, ns: string): Promise<void> {
+  const session = JSON.parse(
+    await (
+      await backend.fetch("/api/session", {
+        method: "GET",
+        headers: {},
+        credentials: "same-origin",
+      })
+    ).text(),
+  ) as { csrfToken: string };
+  const response = await backend.fetch("/api/live/conn-staging/documents", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-csrf-token": session.csrfToken },
+    credentials: "same-origin",
+    body: JSON.stringify({ ns, document: '{"note": "added by a test"}' }),
+  });
+  if (response.status !== 200) throw new Error(await response.text());
+}
+
+/** The texts of a select's options, to compare them in one go. */
+function optionTexts(select: HTMLElement): (string | null)[] {
+  return within(select)
+    .getAllByRole("option")
+    .map((option) => option.textContent);
+}
+
+describe("namespace helpers", () => {
+  it("splits a namespace at its first dot", () => {
+    expect(databaseOf("shop.users")).toBe("shop");
+    expect(collectionOf("shop.events.2026")).toBe("events.2026");
+    expect(databaseOf("admin")).toBe("admin");
+    expect(collectionOf("admin")).toBe("");
+  });
+
+  it("matches entries by database, namespace, user and change", () => {
+    const entry = { ns: "shop.users", by: "maya", op: "update" } as const;
+    const match = (filters: Partial<typeof NO_EDIT_FILTERS>) =>
+      // Only the fields the filters look at matter here.
+      editMatches(entry as never, { ...NO_EDIT_FILTERS, ...filters });
+    expect(match({})).toBe(true);
+    expect(match({ database: "shop", ns: "shop.users", by: "maya", op: "update" })).toBe(true);
+    expect(match({ database: "analytics" })).toBe(false);
+    expect(match({ ns: "shop.orders" })).toBe(false);
+    expect(match({ by: "admin" })).toBe(false);
+    expect(match({ op: "delete" })).toBe(false);
+  });
+});
 
 describe("edit history", () => {
   it("is empty at first and is in the navigation for operators", async () => {
@@ -87,6 +138,65 @@ describe("edit history", () => {
     await waitFor(() =>
       expect(backend.live.documents("conn-staging", "shop.users")[0]?.plan).toBe("enterprise"),
     );
+  });
+
+  it("narrows the entries by database, collection, who and change", async () => {
+    const { user, backend } = renderApp({ signedInAs: "maya", hash: "#/edit-history" });
+    expect(await screen.findByText("No live edits yet")).toBeTruthy();
+    // No entries yet: nothing to filter by, so only the connection select is shown.
+    expect(screen.queryByLabelText("Database")).toBeNull();
+    await editFirstUser(backend, "enterprise");
+    await insertInto(backend, "shop.orders");
+    await insertInto(backend, "shop_restored.users");
+    await user.selectOptions(await screen.findByLabelText("Connection"), "conn-staging");
+    const table = await screen.findByRole("table", { name: "Live edits" });
+    await within(table).findByText("shop_restored.users");
+
+    // Databases and namespaces come from the entries, with counts.
+    const database = screen.getByLabelText("Database");
+    const collection = screen.getByLabelText("Collection");
+    expect(optionTexts(database)).toEqual(["All databases", "shop (2)", "shop_restored (1)"]);
+    expect(optionTexts(collection)).toEqual([
+      "All collections",
+      "shop.orders (1)",
+      "shop.users (1)",
+      "shop_restored.users (1)",
+    ]);
+    // Within one database, the collections are listed by their own names.
+    await user.selectOptions(database, "shop");
+    expect(optionTexts(collection)).toEqual(["All collections", "orders (1)", "users (1)"]);
+    await user.selectOptions(collection, "shop.users");
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+    // Another database drops the collection of the first one.
+    await user.selectOptions(database, "shop_restored");
+    expect((collection as HTMLSelectElement).value).toBe("");
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+    expect(within(table).getByText("shop_restored.users")).toBeTruthy();
+    // Choosing a collection while all databases are shown also picks its database.
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await user.selectOptions(collection, "shop.orders");
+    expect((database as HTMLSelectElement).value).toBe("shop");
+
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(optionTexts(screen.getByLabelText("Who"))).toEqual(["Anyone", "maya (3)"]);
+    const change = screen.getByLabelText("Change");
+    expect(optionTexts(change)).toEqual(["Any change", "Insert (2)", "Edit (1)"]);
+    await user.selectOptions(change, "update");
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+    await user.selectOptions(screen.getByLabelText("Who"), "maya");
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+
+    // Switching the connection starts the database filters afresh; the rest stays.
+    await user.selectOptions(database, "shop");
+    await user.selectOptions(screen.getByLabelText("Connection"), "");
+    await waitFor(() =>
+      expect((screen.getByLabelText("Database") as HTMLSelectElement).value).toBe(""),
+    );
+    expect((screen.getByLabelText("Change") as HTMLSelectElement).value).toBe("update");
+    await user.selectOptions(screen.getByLabelText("Change"), "insert");
+    await user.selectOptions(screen.getByLabelText("Who"), "");
+    await user.selectOptions(screen.getByLabelText("Collection"), "shop.users");
+    expect(await screen.findByText("No edits match the filters")).toBeTruthy();
   });
 
   it("refuses an undo when the document changed since the edit", async () => {
@@ -201,6 +311,41 @@ describe("live data settings on the connection page", () => {
       journalStorageId: "st-s3",
     });
     expect(await screen.findByText("Allowed")).toBeTruthy();
+  });
+
+  it("offers reasons for the audit log to fill in with one click", async () => {
+    const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/connections/conn-local" });
+    const reasons = await screen.findByRole("group", { name: "Suggestions for Reason" });
+    await user.click(within(reasons).getByRole("button", { name: "Data cleanup" }));
+    expect(screen.getByLabelText("Reason")).toHaveProperty("value", "Data cleanup");
+    await user.click(screen.getByRole("button", { name: "Save live edit settings" }));
+    expect(await screen.findByText("Live edits are off.")).toBeTruthy();
+    expect(
+      (
+        requestsTo(backend, "PUT", "/api/connections/conn-local/live-edits")[0]?.body as
+          | { reason?: string }
+          | undefined
+      )?.reason,
+    ).toBe("Data cleanup");
+  });
+
+  it("offers common bulk limits, marking the default and the maximum", async () => {
+    const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/connections/conn-local" });
+    const limit = await screen.findByRole("combobox", { name: "Most documents per bulk edit" });
+    await user.click(screen.getByRole("button", { name: "Show all suggestions" }));
+    const list = screen.getByRole("listbox", { name: "Common limits" });
+    expect(
+      within(list)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["100", "500", "1,000default", "5,000", "10,000maximum"]);
+    await user.click(within(list).getByRole("option", { name: "5,000" }));
+    expect(limit).toHaveProperty("value", "5000");
+    await user.click(screen.getByRole("button", { name: "Save live edit settings" }));
+    expect(await screen.findByText("Live edits are off.")).toBeTruthy();
+    expect(
+      requestsTo(backend, "PUT", "/api/connections/conn-local/live-edits")[0]?.body,
+    ).toMatchObject({ maxBulkDocuments: 5000 });
   });
 
   it("needs the typed name and a reason for a production connection", async () => {

@@ -44,6 +44,8 @@ export interface ConsoleSettings {
 /** Everything a console is made of. Created by `openConsole()` (services.ts). */
 export interface ConsoleServices {
   readonly dataDir: string;
+  /** Whether the console runs in a container; detected when absent (tests set it). */
+  readonly inContainer?: boolean;
   readonly store: StateStore;
   readonly audit: AuditLog;
   readonly runner: JobRunner;

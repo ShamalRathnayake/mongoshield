@@ -12,6 +12,7 @@ import {
   encodeCredentials,
   maskConnectionString,
   separatePassword,
+  throughContainerHost,
   withPassword,
 } from "./connection-string.ts";
 
@@ -237,5 +238,34 @@ describe("separatePassword", () => {
     for (const uri of ["mongodb://h/", "mongodb://app@h/", ATLAS, "not a uri"]) {
       expect(separatePassword(uri), uri).toEqual({ uri });
     }
+  });
+});
+
+describe("throughContainerHost", () => {
+  it("points every loopback host at host.docker.internal, keeping the rest", () => {
+    expect(throughContainerHost("mongodb://localhost:27017")).toBe(
+      "mongodb://host.docker.internal:27017",
+    );
+    expect(throughContainerHost("mongodb://u:p%40ss@127.0.0.1:27018/app?authSource=admin")).toBe(
+      "mongodb://u:p%40ss@host.docker.internal:27018/app?authSource=admin",
+    );
+    expect(throughContainerHost("mongodb://[::1]:27017/")).toBe(
+      "mongodb://host.docker.internal:27017/",
+    );
+    // Two loopback names for the same port become one host.
+    expect(throughContainerHost("mongodb://localhost:27017,127.0.0.1:27017")).toBe(
+      "mongodb://host.docker.internal:27017",
+    );
+    // A placeholder password stays a placeholder.
+    expect(throughContainerHost("mongodb://app:<password>@localhost")).toBe(
+      "mongodb://app:<password>@host.docker.internal",
+    );
+  });
+
+  it("leaves SRV strings, other hosts and unparseable text alone", () => {
+    expect(throughContainerHost("mongodb+srv://u:p@cluster0.x.mongodb.net/")).toBeUndefined();
+    expect(throughContainerHost("mongodb://localhost:27017,db2:27017")).toBeUndefined();
+    expect(throughContainerHost("mongodb://mongo:27017")).toBeUndefined();
+    expect(throughContainerHost("postgres://localhost")).toBeUndefined();
   });
 });

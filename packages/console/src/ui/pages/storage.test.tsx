@@ -1,30 +1,15 @@
 /**
- * Page tests for storage locations: adding one (validation, credentials parsing, the
- * automatic test), editing with write-only credentials, removing, the test report in
- * all its outcomes, error paths and what each role may do.
+ * Page tests for storage locations: adding one (validation, credentials, the automatic
+ * test), editing with write-only credentials, removing, the test report in all its
+ * outcomes, error paths and what each role may do. The dialog's per-type fields have
+ * their own tests (storage-form.test.tsx).
  */
 
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderFailingApp } from "../failing-backend.testkit.tsx";
 import { renderApp, requestsTo } from "../testing.tsx";
-import { parseCredentials, StorageTestReport } from "./storage.tsx";
-
-describe("parseCredentials", () => {
-  it("reads KEY=value lines and skips blank lines and comments", () => {
-    expect(
-      parseCredentials("# a comment\n\nAWS_ACCESS_KEY_ID = abc \nAWS_SECRET_ACCESS_KEY=x=y"),
-    ).toEqual({
-      AWS_ACCESS_KEY_ID: "abc",
-      AWS_SECRET_ACCESS_KEY: "x=y",
-    });
-  });
-
-  it("names the first line that is not KEY=value", () => {
-    expect(parseCredentials("A=1\nnot a pair")).toBe("Line 2 is not KEY=value.");
-    expect(parseCredentials("=value")).toBe("Line 1 is not KEY=value.");
-  });
-});
+import { StorageTestReport } from "./storage.tsx";
 
 describe("storage test report", () => {
   it("shows a spinner while the probe runs", () => {
@@ -79,19 +64,48 @@ describe("storage page", () => {
     await user.click(await screen.findByRole("button", { name: "Add storage" }));
     const dialog = screen.getByRole("dialog", { name: "Add storage" });
 
-    await user.click(within(dialog).getByRole("button", { name: "Add and test" }));
+    // Amazon S3 with access keys is preselected; the dialog starts on its first step.
+    expect((within(dialog).getByLabelText("Type") as HTMLSelectElement).value).toBe("s3");
+    const tab = (name: RegExp) => within(dialog).getByRole("tab", { name });
+    expect(tab(/^Location/).getAttribute("aria-selected")).toBe("true");
+    // Nothing is flagged before the user tries to move on; Sign in is closed until then.
+    expect(within(dialog).queryByText("Enter the bucket name.")).toBeNull();
+    expect(tab(/^Sign in/).getAttribute("aria-disabled")).toBe("true");
+    expect(tab(/^Sign in/).getAttribute("title")).toBe("Complete “Location” first");
+    // Next on the empty location stays there and says what is missing, focus on the name.
+    await user.click(within(dialog).getByRole("button", { name: "Next: Sign in" }));
     expect(within(dialog).getByText("Give the storage a name, e.g. “S3 primary”.")).toBeTruthy();
-    expect(within(dialog).getByText(/Enter a URL such as/)).toBeTruthy();
+    expect(within(dialog).getByText("Enter the bucket name.")).toBeTruthy();
+    expect(tab(/^Location.*\(needs attention\)/).getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(within(dialog).getByLabelText("Name"));
+    // The sign-in fields are not flagged: that step was not tried yet.
+    expect(within(dialog).queryByText("Enter the access key ID.")).toBeNull();
 
     await user.type(within(dialog).getByLabelText("Name"), "Archive");
-    await user.type(within(dialog).getByLabelText("Location"), "s3://archive/prod/");
+    await user.type(within(dialog).getByLabelText("Bucket"), "archive");
+    await user.type(within(dialog).getByLabelText("Folder in the bucket (optional)"), "prod/");
+    expect(within(dialog).getByLabelText("Resulting URL").textContent).toBe("s3://archive/prod/");
+    await user.click(within(dialog).getByRole("button", { name: "Next: Sign in" }));
+    // The location is complete now: its tab has a check mark.
+    expect(tab(/^Location.*\(done\)/)).toBeTruthy();
+    // Saving without keys flags the sign-in step.
+    await user.click(within(dialog).getByRole("button", { name: "Add and test" }));
+    expect(within(dialog).getByText("Enter the access key ID.")).toBeTruthy();
+    expect(tab(/^Sign in.*\(needs attention\)/).getAttribute("aria-selected")).toBe("true");
+    // KEY=value lines are still possible, and still checked.
+    await user.click(within(dialog).getByRole("radio", { name: /KEY=value lines/ }));
     await user.type(within(dialog).getByLabelText("Credentials"), "oops");
     await user.click(within(dialog).getByRole("button", { name: "Add and test" }));
     expect(within(dialog).getByText("Line 1 is not KEY=value.")).toBeTruthy();
+    // Only the sign-in step has a problem now: the flow stays there.
+    expect(tab(/^Sign in/).getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(within(dialog).getByLabelText("Credentials"));
     expect(requestsTo(backend, "POST", "/api/storage")).toHaveLength(0);
 
-    await user.clear(within(dialog).getByLabelText("Credentials"));
-    await user.type(within(dialog).getByLabelText("Credentials"), "AWS_ACCESS_KEY_ID=AKIA1");
+    await user.click(within(dialog).getByRole("radio", { name: /Access keys/ }));
+    await user.type(within(dialog).getByLabelText("Access key ID"), "AKIA1");
+    await user.type(within(dialog).getByLabelText("Secret access key"), "s3cret-value");
+    expect(within(dialog).getByLabelText("Secret access key")).toHaveProperty("type", "password");
     await user.click(within(dialog).getByRole("button", { name: "Add and test" }));
 
     const report = await screen.findByRole("dialog", { name: "Storage test: Archive" });
@@ -100,21 +114,33 @@ describe("storage page", () => {
     expect(create?.body).toEqual({
       name: "Archive",
       url: "s3://archive/prod/",
-      credentials: { AWS_ACCESS_KEY_ID: "AKIA1" },
+      credentials: { AWS_ACCESS_KEY_ID: "AKIA1", AWS_SECRET_ACCESS_KEY: "s3cret-value" },
     });
     await user.click(within(report).getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(await screen.findByRole("link", { name: "Archive" })).toBeTruthy();
     expect(document.body.innerHTML).not.toContain("AKIA1");
+    expect(document.body.innerHTML).not.toContain("s3cret-value");
   });
 
-  it("keeps stored credentials when the credentials box is left empty on edit", async () => {
+  it("keeps stored credentials on edit unless they are replaced", async () => {
     const { user, backend } = renderApp({ signedInAs: "admin", hash: "#/storage" });
     await user.click(await screen.findByRole("button", { name: "Edit S3 primary" }));
     const dialog = screen.getByRole("dialog", { name: 'Edit "S3 primary"' });
-    expect(within(dialog).getByText(/Leave empty to keep them/)).toBeTruthy();
+    // A saved location opens with both steps complete.
+    expect(within(dialog).getByRole("tab", { name: /^Location.*\(done\)/ })).toBeTruthy();
+    expect(within(dialog).getByRole("tab", { name: /^Sign in.*\(done\)/ })).toBeTruthy();
+    await user.click(within(dialog).getByRole("tab", { name: /^Sign in/ }));
+    const keep = within(dialog).getByRole("radio", { name: /Keep the stored credentials/ });
+    expect(keep).toHaveProperty("checked", true);
+    expect(
+      within(dialog).getByText(/Stored: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY/),
+    ).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: /Back/ }));
     await user.clear(within(dialog).getByLabelText("Name"));
     await user.type(within(dialog).getByLabelText("Name"), "S3 main");
+    // Saving is on the last step.
+    await user.click(within(dialog).getByRole("button", { name: "Next: Sign in" }));
     await user.click(within(dialog).getByRole("button", { name: "Save and test" }));
 
     expect(await screen.findByRole("dialog", { name: "Storage test: S3 main" })).toBeTruthy();
@@ -138,10 +164,46 @@ describe("storage page", () => {
     await user.click(await screen.findByRole("button", { name: "Add storage" }));
     const dialog = screen.getByRole("dialog", { name: "Add storage" });
     await user.type(within(dialog).getByLabelText("Name"), "Weird");
-    await user.type(within(dialog).getByLabelText("Location"), "ftp://x");
+    await user.click(within(dialog).getByLabelText("Edit as URL (advanced)"));
+    await user.clear(within(dialog).getByLabelText("Location URL"));
+    // A scheme the console cannot write to is refused right here.
+    await user.type(within(dialog).getByLabelText("Location URL"), "ftp://x");
+    await user.click(within(dialog).getByRole("button", { name: "Next: Sign in" }));
+    expect(
+      within(dialog).getByText(
+        "Use s3://, gs://, az://, sftp:// or a folder in the console's data volume.",
+      ),
+    ).toBeTruthy();
+    // One the browser cannot tell is wrong goes to the server, which refuses it here.
+    await user.clear(within(dialog).getByLabelText("Location URL"));
+    await user.type(within(dialog).getByLabelText("Location URL"), "s3://x/?odd=1");
+    await user.click(within(dialog).getByRole("button", { name: "Next: Sign in" }));
+    await user.click(within(dialog).getByRole("radio", { name: /The console's environment/ }));
     await user.click(within(dialog).getByRole("button", { name: "Add and test" }));
-    expect(await within(dialog).findByText("Could not save")).toBeTruthy();
+    // Shown on the step the save was made from, above its button.
+    const failure = await within(dialog).findByText("Could not save");
     expect(within(dialog).getByText("Unsupported storage URL scheme.")).toBeTruthy();
+    expect(failure.closest("[role=tabpanel]")?.hasAttribute("hidden")).toBe(false);
+  });
+
+  it("saves a local folder from the first step, shows a failure there, and cancels", async () => {
+    const { user } = renderFailingApp({
+      signedInAs: "admin",
+      hash: "#/storage",
+      failures: [{ method: "POST", path: "/api/storage", status: 400, message: "Disk full." }],
+    });
+    await user.click(await screen.findByRole("button", { name: "Add storage" }));
+    const dialog = screen.getByRole("dialog", { name: "Add storage" });
+    await user.type(within(dialog).getByLabelText("Name"), "Here");
+    await user.selectOptions(within(dialog).getByLabelText("Type"), "local");
+    await user.type(within(dialog).getByLabelText("Folder"), "backups");
+    // No credentials to ask for: "Sign in" is locked and saving happens on "Location".
+    await user.click(within(dialog).getByRole("button", { name: "Add and test" }));
+    const failure = await within(dialog).findByText("Disk full.");
+    expect(failure.closest("[role=tabpanel]")?.hasAttribute("hidden")).toBe(false);
+    // The flow's Cancel closes the dialog without saving.
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("refuses to remove a location a plan still writes to", async () => {

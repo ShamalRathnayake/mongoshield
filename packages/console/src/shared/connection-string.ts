@@ -177,6 +177,42 @@ export function withPassword(uri: string, password: string): string {
   return joinConnectionString({ ...parts, password: encodeURIComponent(password) });
 }
 
+/** The host name a container uses to reach the machine it runs on (Docker, OrbStack, Podman). */
+export const CONTAINER_HOST = "host.docker.internal";
+
+/** Loopback names: this machine — but inside a container, the container itself. */
+function isLoopbackHost(host: string): boolean {
+  const name = host.toLowerCase().replace(/^\[|\]$/g, "");
+  return name === "localhost" || name === "::1" || /^127(?:\.\d{1,3}){3}$/.test(name);
+}
+
+/**
+ * The same connection string, reaching the machine the container runs on: every
+ * loopback host (`localhost`, `127.x.x.x`, `::1`) becomes {@link CONTAINER_HOST}, ports
+ * and everything else kept. Undefined when there is nothing to rewrite: an SRV string,
+ * a string that does not parse, or a host list with any host that is not loopback.
+ *
+ *   mongodb://u:p@localhost:27017/?tls=false → mongodb://u:p@host.docker.internal:27017/?tls=false
+ */
+export function throughContainerHost(uri: string): string | undefined {
+  let parts: ConnectionStringParts;
+  try {
+    parts = splitConnectionString(uri);
+  } catch {
+    return undefined;
+  }
+  if (parts.scheme !== "mongodb") return undefined;
+  const rewritten: string[] = [];
+  for (const entry of parts.hostList.split(",")) {
+    // `host`, `host:port`, or an IPv6 address in brackets with an optional port.
+    const match = /^(\[[^\]]+\]|[^:]+)(:\d+)?$/.exec(entry.trim());
+    if (match === null || !isLoopbackHost(match[1] ?? "")) return undefined;
+    rewritten.push(`${CONTAINER_HOST}${match[2] ?? ""}`);
+  }
+  // `localhost:27017,127.0.0.1:27017` would become the same host twice: keep it once.
+  return joinConnectionString({ ...parts, hostList: [...new Set(rewritten)].join(",") });
+}
+
 /** The placeholder {@link separatePassword} leaves where the password was. */
 export const PASSWORD_PLACEHOLDER = "<password>";
 

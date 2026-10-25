@@ -407,3 +407,77 @@ function planInput(view: PlanView, changes: Partial<PlanInput>): PlanInput {
     ...changes,
   };
 }
+
+describe("localhost from a console in a container", () => {
+  /**
+   * A console "in a container" whose host machine is the test replica set: a refused
+   * localhost is retried there, as `host.docker.internal` would be in real Docker.
+   */
+  let docker: TestConsole;
+  let dockerAdmin: TestClient;
+  const refusedLocalhost = "mongodb://localhost:1/?serverSelectionTimeoutMS=2000";
+  // localhost:1 → the test database (the "host" answers); localhost:2 → another closed
+  // port (the host does not answer either).
+  const toHost = (uri: string) =>
+    uri.includes("localhost:1")
+      ? mongoUri()
+      : uri.includes("localhost:2")
+        ? "mongodb://127.0.0.1:3/?serverSelectionTimeoutMS=2000"
+        : undefined;
+
+  beforeAll(async () => {
+    docker = await startConsole({
+      app: {
+        onboarding: { inContainer: true, containerAddress: toHost },
+        connections: { inspect: { inContainer: true, containerAddress: toHost } },
+      },
+    });
+    dockerAdmin = await setupAdmin(docker);
+  });
+
+  afterAll(async () => {
+    await docker.close();
+    await removeDataDir(docker.dataDir);
+  });
+
+  it("checks a refused localhost on the host machine and says so", async () => {
+    const check = await dockerAdmin.request("POST", "/api/connections/check", {
+      uri: refusedLocalhost,
+    });
+    expect(check.body).toMatchObject({
+      ok: true,
+      reachedThrough: { from: "localhost", to: "host.docker.internal" },
+    });
+  });
+
+  it("stores the working address when a saved localhost connection is tested", async () => {
+    const created = await dockerAdmin.request("POST", "/api/connections", {
+      name: "Local in Docker",
+      uri: refusedLocalhost,
+      production: false,
+    });
+    expect(created.status).toBe(200);
+    const id = created.body.id as string;
+    const test = await dockerAdmin.request("POST", `/api/connections/${id}/test`);
+    expect(test.body).toMatchObject({ ok: true, reachedThrough: { to: "host.docker.internal" } });
+    // The stored string is now the one that works (its preview shows the new host).
+    const listed = await dockerAdmin.request("GET", "/api/connections");
+    const stored = (listed.body as { id: string; uri: { preview?: string } }[]).find(
+      (connection) => connection.id === id,
+    );
+    expect(stored?.uri.preview).not.toContain("localhost:1");
+    // Testing again needs no retry: the address works directly.
+    const again = await dockerAdmin.request("POST", `/api/connections/${id}/test`);
+    expect(again.body.ok).toBe(true);
+    expect(again.body.reachedThrough).toBeUndefined();
+  });
+
+  it("keeps the original problem when the host machine does not answer either", async () => {
+    const check = await dockerAdmin.request("POST", "/api/connections/check", {
+      uri: "mongodb://localhost:2/?serverSelectionTimeoutMS=2000",
+    });
+    expect(check.body.ok).toBe(false);
+    expect(check.body.problem.kind).toBe("connection-refused");
+    expect(check.body.reachedThrough).toBeUndefined();
+  });
+});
