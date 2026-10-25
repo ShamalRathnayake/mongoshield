@@ -291,7 +291,7 @@ describe("reconcilePlan", () => {
           completionTime: time,
           ...(id ? { backupId: id, bytesStored: 2048 } : {}),
           ...(phase === "Failed"
-            ? { error: { code: "MS_CONNECT_FAILED", message: "no route" } }
+            ? { error: { code: "MS_CONNECTION_FAILED", message: "no route" } }
             : {}),
         },
       });
@@ -316,7 +316,7 @@ describe("reconcilePlan", () => {
       reason: "BackupFailed",
     });
     expect(findCondition(status?.conditions, "LastBackupSucceeded")?.message).toContain(
-      "MS_CONNECT_FAILED",
+      "MS_CONNECTION_FAILED",
     );
   });
 

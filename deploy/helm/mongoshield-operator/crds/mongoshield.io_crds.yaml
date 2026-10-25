@@ -93,7 +93,7 @@ spec:
                     url:
                       type: string
                       maxLength: 1024
-                      description: Storage URL (s3://bucket/prefix?region=…, gs://…, azure://…, sftp://…) or an absolute path on a mounted volume.
+                      description: Storage URL (s3://bucket/prefix?region=…, gs://…, az://…, sftp://…) or an absolute path on a mounted volume.
                       minLength: 1
                       pattern: ^([a-z][a-z0-9+.-]*://.+|/.*)$
                     credentialsSecretRef:
@@ -931,7 +931,7 @@ spec:
                     code:
                       type: string
                       maxLength: 1024
-                      description: MongoShield error code, e.g. MS_CONNECT_FAILED (see docs/errors.md).
+                      description: MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md).
                     message:
                       type: string
                       maxLength: 32768
@@ -1232,7 +1232,7 @@ spec:
                     code:
                       type: string
                       maxLength: 1024
-                      description: MongoShield error code, e.g. MS_CONNECT_FAILED (see docs/errors.md).
+                      description: MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md).
                     message:
                       type: string
                       maxLength: 32768
@@ -1508,7 +1508,7 @@ spec:
                     code:
                       type: string
                       maxLength: 1024
-                      description: MongoShield error code, e.g. MS_CONNECT_FAILED (see docs/errors.md).
+                      description: MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md).
                     message:
                       type: string
                       maxLength: 32768

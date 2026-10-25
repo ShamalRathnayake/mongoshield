@@ -214,7 +214,7 @@ const conditionsSchema: JsonSchema = {
 
 /** The `error` object of backup and restore statuses. */
 const runErrorSchema = object("Why the run failed (no secrets: MongoShield scrubs them).", {
-  code: text("MongoShield error code, e.g. MS_CONNECT_FAILED (see docs/errors.md)."),
+  code: text("MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md)."),
   message: text("What went wrong.", { maxLength: 32768 }),
   hint: text("How to fix it, when known.", { maxLength: 32768 }),
   step: text("The step that failed: setup, lock, backup, verify, replicate or prune."),
@@ -286,7 +286,7 @@ const planSpecSchema = object(
       "Where backups are stored.",
       {
         url: text(
-          "Storage URL (s3://bucket/prefix?region=…, gs://…, azure://…, sftp://…) or an absolute path on a mounted volume.",
+          "Storage URL (s3://bucket/prefix?region=…, gs://…, az://…, sftp://…) or an absolute path on a mounted volume.",
           { minLength: 1, pattern: "^([a-z][a-z0-9+.-]*://.+|/.*)$" },
         ),
         credentialsSecretRef: localRef(

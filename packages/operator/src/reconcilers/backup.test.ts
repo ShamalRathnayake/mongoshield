@@ -209,7 +209,7 @@ describe("reconcileBackup: manual runs", () => {
       prune: undefined,
       error: {
         step: "backup",
-        code: "MS_CONNECT_FAILED",
+        code: "MS_CONNECTION_FAILED",
         message: "connection refused",
         hint: "Check the URI",
       },
@@ -225,7 +225,7 @@ describe("reconcileBackup: manual runs", () => {
     const backup = storedBackup(client);
     expect(backup.status?.phase).toBe("Failed");
     expect(backup.status?.error).toEqual({
-      code: "MS_CONNECT_FAILED",
+      code: "MS_CONNECTION_FAILED",
       message: "connection refused",
       hint: "Check the URI",
       step: "backup",

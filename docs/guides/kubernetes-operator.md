@@ -106,7 +106,7 @@ spec:
   source:
     uriSecretRef: { name: prod-mongodb }          # key defaults to MONGODB_URI
   storage:
-    url: s3://acme-backups/prod?region=eu-west-1  # or gs://, azure://, sftp://, /path
+    url: s3://acme-backups/prod?region=eu-west-1  # or gs://, az://, sftp://, /path
     credentialsSecretRef: { name: s3-credentials } # its keys become environment variables
   encryption:
     recipients: [age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq]

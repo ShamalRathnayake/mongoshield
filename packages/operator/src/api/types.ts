@@ -84,7 +84,7 @@ export interface BackupPlanSpec {
     readonly uriSecretRef: SecretKeyRef;
   };
   readonly storage: {
-    /** A storage URL (`s3://bucket/prefix`, `gs://…`, `azure://…`) or an absolute path. */
+    /** A storage URL (`s3://bucket/prefix`, `gs://…`, `az://…`) or an absolute path. */
     readonly url: string;
     /** Cloud credentials as environment variables (AWS_ACCESS_KEY_ID, …), if not using workload identity. */
     readonly credentialsSecretRef?: SecretRef;
@@ -276,7 +276,7 @@ export interface BackupSpec {
 
 /** An error reported by a run, without secrets (MongoShield scrubs them). */
 export interface RunError {
-  /** MongoShield error code, e.g. MS_CONNECT_FAILED (see docs/errors.md). */
+  /** MongoShield error code, e.g. MS_CONNECTION_FAILED (see docs/errors.md). */
   code: string;
   message: string;
   hint?: string;
