@@ -32,18 +32,23 @@ afterEach(() => {
 });
 
 describe("theme", () => {
-  it("stores light and dark and forgets system", () => {
+  it("is dark by default, stores light and system and forgets the default", () => {
+    expect(storedTheme()).toBe("dark");
+    applyTheme("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(storedTheme()).toBe("light");
+    applyTheme("system");
+    expect(document.documentElement.dataset.theme).toBe("system");
+    expect(storedTheme()).toBe("system");
     applyTheme("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(window.localStorage.getItem("mongoshield.theme")).toBeNull();
     expect(storedTheme()).toBe("dark");
-    applyTheme("system");
-    expect(document.documentElement.dataset.theme).toBeUndefined();
-    expect(storedTheme()).toBe("system");
   });
 
   it("ignores unknown stored values", () => {
     window.localStorage.setItem("mongoshield.theme", "purple");
-    expect(storedTheme()).toBe("system");
+    expect(storedTheme()).toBe("dark");
   });
 
   it("still works when storage throws", () => {
@@ -53,15 +58,15 @@ describe("theme", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("blocked");
     });
-    expect(storedTheme()).toBe("system");
+    expect(storedTheme()).toBe("dark");
     applyTheme("light");
     expect(document.documentElement.dataset.theme).toBe("light");
   });
 
-  it("cycles system → light → dark → system", () => {
-    expect(nextTheme("system")).toBe("light");
-    expect(nextTheme("light")).toBe("dark");
-    expect(nextTheme("dark")).toBe("system");
+  it("cycles dark → light → system → dark", () => {
+    expect(nextTheme("dark")).toBe("light");
+    expect(nextTheme("light")).toBe("system");
+    expect(nextTheme("system")).toBe("dark");
   });
 });
 

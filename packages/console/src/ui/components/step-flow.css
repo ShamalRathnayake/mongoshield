@@ -1,0 +1,220 @@
+/*
+ * StepFlow (step-flow.tsx): numbered step tabs joined by a line, one panel at a time,
+ * and a Back / Next row. Only design tokens from ../styles.css are used, so the dark and
+ * light themes both apply; the current step uses the section's colour (`--hue`).
+ */
+
+.step-flow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+  /* Room above when the flow scrolls into view on a step change. */
+  scroll-margin-top: var(--space-4);
+}
+
+/* The tabs: equal columns on wide screens, a scrolling row on narrow ones. */
+.step-tabs {
+  display: grid;
+  grid-auto-columns: minmax(150px, 1fr);
+  grid-auto-flow: column;
+  gap: var(--space-2);
+  overflow-x: auto;
+  padding: 2px 2px var(--space-1);
+}
+
+.step-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.step-tab:hover:not([aria-disabled="true"]) {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+/* A step that cannot be opened yet: dimmed, with the not-allowed cursor. */
+.step-tab[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* The line joining one tab to the next (decoration). */
+.step-tab:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: calc(-1 * var(--space-2) - 1px);
+  width: var(--space-2);
+  height: 1px;
+  background: var(--color-border-strong);
+}
+
+/* The current step: the section's colour on its border, a soft ring and a tint. */
+.step-tab[aria-selected="true"] {
+  border-color: color-mix(in srgb, var(--hue) 60%, transparent);
+  background: color-mix(in srgb, var(--hue) 9%, var(--color-surface));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue) 16%, transparent);
+  color: var(--color-text);
+}
+
+/* The circle with the number, check mark or exclamation mark. */
+.step-tab-marker {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.step-tab[aria-selected="true"] .step-tab-marker {
+  border-color: transparent;
+  background: var(--hue);
+  color: var(--color-bg);
+  box-shadow: 0 0 14px -2px color-mix(in srgb, var(--hue) 70%, transparent);
+}
+
+.step-tab[data-state="done"] .step-tab-marker {
+  border-color: color-mix(in srgb, var(--color-success) 50%, transparent);
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.step-tab[data-state="error"] {
+  border-color: color-mix(in srgb, var(--color-danger) 55%, transparent);
+}
+
+.step-tab[data-state="error"] .step-tab-marker {
+  border-color: transparent;
+  background: var(--color-danger);
+  color: var(--color-bg);
+}
+
+.step-tab-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.step-tab-title {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.step-tab-hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A panel gets focus from script after a step change; no ring for that. */
+.step-panel:focus {
+  outline: none;
+}
+
+.step-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+  animation: step-in 160ms ease-out;
+}
+
+/* `hidden` must win over the flex display above. */
+.step-panel[hidden] {
+  display: none;
+}
+
+@keyframes step-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-panel {
+    animation: none;
+  }
+}
+
+/* Back on the left, the step count in the middle, Next (or finish) on the right. */
+/*
+ * The row stays in view at the bottom of the window however long the step is (a big
+ * selection preview, a long list of collections), so Next is never a scroll away. It
+ * sits on a frosted strip of the page background, so content scrolling under it
+ * stays readable.
+ */
+.step-nav {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-bg) 82%, transparent);
+  backdrop-filter: blur(12px) saturate(140%);
+  box-shadow: 0 -12px 24px -18px rgb(0 0 0 / 0.45);
+}
+
+.step-nav-start,
+.step-nav-end {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.step-nav-end {
+  justify-content: flex-end;
+}
+
+.step-nav-count {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  letter-spacing: 0.04em;
+}
+
+/* Phones: the hints go, the tabs keep just their number and title. */
+@media (max-width: 600px) {
+  .step-tabs {
+    grid-auto-columns: minmax(120px, 1fr);
+  }
+
+  .step-tab-hint,
+  .step-nav-count {
+    display: none;
+  }
+}

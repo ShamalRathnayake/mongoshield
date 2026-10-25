@@ -1,0 +1,20 @@
+/*
+ * KeyFileInput (key-file-input.tsx): the "Load key from file" button and its outcome
+ * line. Design tokens only, so both themes apply as is.
+ *
+ * This file loads BEFORE styles.css, so the error color uses a more specific selector
+ * (0,2,0) than `.field-hint` (0,1,0) from styles.css rather than relying on order.
+ */
+
+/* The button above its outcome line, left-aligned under the field it fills. */
+.key-file-input {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+/* "No private key found …": in the danger color, like a field error. */
+.key-file-input .key-file-input-error {
+  color: var(--color-danger);
+}

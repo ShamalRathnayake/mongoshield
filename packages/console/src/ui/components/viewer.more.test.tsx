@@ -126,6 +126,35 @@ describe("ChartView", () => {
     expect(onField).toHaveBeenCalledWith("at");
   });
 
+  it("says what kind of chart each field makes in the Field select", () => {
+    // One field per kind: a few values (one of them alone), numbers, dates.
+    const summary = analyzeSchema(
+      Array.from({ length: 20 }, (_, index) => ({
+        status: index % 2 === 0 ? "open" : "paid",
+        kind: "order",
+        total: index * 1.5,
+        at: { $date: new Date(Date.UTC(2026, 0, index + 1)).toISOString() },
+      })),
+    );
+    render(
+      <ChartView
+        summary={summary}
+        sampleDescription="a sample"
+        field={undefined}
+        onField={vi.fn()}
+      />,
+    );
+    const labels = within(screen.getByLabelText("Field"))
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(labels).toEqual([
+      "status · 2 values",
+      "kind · 1 value",
+      "total · numbers",
+      "at · dates",
+    ]);
+  });
+
   it("charts numbers and dates as a histogram with counts, and says when nothing fits", () => {
     // Twenty different days: too many values for bars, so a histogram.
     const days = analyzeSchema(

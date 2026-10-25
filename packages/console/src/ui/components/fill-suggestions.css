@@ -1,0 +1,85 @@
+/*
+ * FillSuggestions (fill-suggestions.tsx): one-click values right under a field. They are
+ * meant to be noticed at a glance, so the row is a tinted strip in the section's colour
+ * (`--hue`) with a sparkle label, and each chip is a clear, coloured button. Design
+ * tokens only, so both themes apply.
+ */
+
+/* A fieldset (for its group role) without the fieldset's own border and spacing. */
+.fill-suggestions {
+  min-width: 0;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border: 1px dashed color-mix(in srgb, var(--hue) 35%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--hue) 6%, transparent);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* "✦ Suggestions:" in the section's colour. */
+.fill-suggestions-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 2px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--hue);
+}
+
+.fill-suggestion {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 11px;
+  border: 1px solid color-mix(in srgb, var(--hue) 45%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--hue) 14%, var(--color-surface));
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.fill-suggestion:hover {
+  border-color: var(--hue);
+  background: color-mix(in srgb, var(--hue) 24%, var(--color-surface));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue) 14%, transparent);
+}
+
+.fill-suggestion:active {
+  transform: translateY(0.5px);
+}
+
+/* The suggestion already in the field: filled with the colour, with a check mark. */
+.fill-suggestion[aria-pressed="true"] {
+  border-color: var(--hue);
+  background: color-mix(in srgb, var(--hue) 32%, var(--color-surface));
+  font-weight: 600;
+}
+
+.fill-suggestion-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fill-suggestion {
+    transition: none;
+  }
+}

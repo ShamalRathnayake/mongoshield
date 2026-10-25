@@ -32,6 +32,18 @@ export function chartableFields(summary: SchemaSummary): SchemaField[] {
   ];
 }
 
+/**
+ * The words for a field in the Field select: its path plus what kind of chart it makes,
+ * e.g. "status · 4 values", "price · numbers", "createdAt · dates", so people can pick
+ * the field they want without trying each one.
+ */
+export function chartFieldLabel(field: SchemaField): string {
+  if (isCategorical(field)) {
+    return `${field.path} · ${field.distinct} ${field.distinct === 1 ? "value" : "values"}`;
+  }
+  return `${field.path} · ${field.range?.kind === "date" ? "dates" : "numbers"}`;
+}
+
 /** Props for `ChartView`. */
 export interface ChartViewProps {
   readonly summary: SchemaSummary;
@@ -65,7 +77,10 @@ export function ChartView(props: ChartViewProps) {
         <SelectField
           label="Field"
           value={field.path}
-          options={fields.map((candidate) => ({ value: candidate.path, label: candidate.path }))}
+          options={fields.map((candidate) => ({
+            value: candidate.path,
+            label: chartFieldLabel(candidate),
+          }))}
           onValue={props.onField}
         />
       </div>

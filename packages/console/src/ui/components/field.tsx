@@ -11,7 +11,10 @@ import {
   type ReactNode,
   type TextareaHTMLAttributes,
   useId,
+  useState,
 } from "react";
+import { Icon } from "./icons.tsx";
+import "./field.css";
 
 /** Ids and state handed to the control inside a `Field`. */
 export interface FieldControl {
@@ -28,6 +31,11 @@ interface FieldBaseProps {
   /** Shown under the control in the danger color, with a "!" marker. */
   readonly error?: string | undefined;
   readonly className?: string | undefined;
+  /**
+   * One-click values right under the control, above the hint (a `FillSuggestions`):
+   * there they are seen first, instead of after a paragraph of help text.
+   */
+  readonly suggestions?: ReactNode;
 }
 
 /** Wraps any control with a label, hint and error. */
@@ -45,6 +53,7 @@ export function Field(props: FieldBaseProps & { children: (control: FieldControl
         {props.label}
       </label>
       {props.children({ id, describedBy, invalid: props.error !== undefined })}
+      {props.suggestions}
       {props.hint === undefined ? null : (
         <p id={hintId} className="field-hint">
           {props.hint}
@@ -60,7 +69,24 @@ export function Field(props: FieldBaseProps & { children: (control: FieldControl
   );
 }
 
-/** A single-line text input. `onValue` receives the new string. */
+/**
+ * What the show/hide button calls the field: "password" for "Password", the label as
+ * written otherwise ("Show Secret access key"), keeping acronyms such as "URL" intact.
+ */
+function revealName(label: ReactNode): string {
+  if (typeof label !== "string") return "password";
+  // Lower-case the first letter only when the second is lower case too ("Password",
+  // not "URL").
+  return /^[A-Z][a-z]/.test(label) ? label.charAt(0).toLowerCase() + label.slice(1) : label;
+}
+
+/**
+ * A single-line text input. `onValue` receives the new string.
+ *
+ * A `type="password"` field gets an eye button at its right end that shows and hides
+ * what was typed (a toggle: `aria-pressed`, named "Show password" / "Hide password"),
+ * so people can check a long password or key before saving it.
+ */
 export function TextField(
   props: FieldBaseProps &
     Omit<InputHTMLAttributes<HTMLInputElement>, "onChange" | "value" | "className"> & {
@@ -68,21 +94,46 @@ export function TextField(
       readonly onValue: (value: string) => void;
     },
 ) {
-  const { label, hint, error, className, value, onValue, ...inputProps } = props;
+  const { label, hint, error, className, suggestions, value, onValue, ...inputProps } = props;
+  const secret = inputProps.type === "password";
+  const [revealed, setRevealed] = useState(false);
+  const name = revealName(label);
   return (
-    <Field label={label} hint={hint} error={error} className={className}>
-      {(control) => (
-        <input
-          type="text"
-          {...inputProps}
-          id={control.id}
-          className="input"
-          value={value}
-          aria-describedby={control.describedBy}
-          aria-invalid={control.invalid || undefined}
-          onChange={(event) => onValue(event.target.value)}
-        />
-      )}
+    <Field label={label} hint={hint} error={error} className={className} suggestions={suggestions}>
+      {(control) => {
+        const input = (
+          <input
+            type="text"
+            {...inputProps}
+            // A revealed secret is a plain text box until hidden again.
+            {...(secret && revealed ? { type: "text" } : {})}
+            id={control.id}
+            className={secret ? "input input-revealable" : "input"}
+            value={value}
+            aria-describedby={control.describedBy}
+            aria-invalid={control.invalid || undefined}
+            onChange={(event) => onValue(event.target.value)}
+          />
+        );
+        if (!secret) return input;
+        return (
+          <div className="input-reveal">
+            {input}
+            <button
+              type="button"
+              className="input-reveal-button"
+              aria-label={`${revealed ? "Hide" : "Show"} ${name}`}
+              aria-pressed={revealed}
+              aria-controls={control.id}
+              title={revealed ? "Hide" : "Show"}
+              disabled={inputProps.disabled}
+              onClick={() => setRevealed((shown) => !shown)}
+            >
+              <Icon name={revealed ? "eyeOff" : "view"} />
+            </button>
+          </div>
+        );
+      }}
     </Field>
   );
 }
@@ -95,9 +146,9 @@ export function TextAreaField(
       readonly onValue: (value: string) => void;
     },
 ) {
-  const { label, hint, error, className, value, onValue, ...textareaProps } = props;
+  const { label, hint, error, className, suggestions, value, onValue, ...textareaProps } = props;
   return (
-    <Field label={label} hint={hint} error={error} className={className}>
+    <Field label={label} hint={hint} error={error} className={className} suggestions={suggestions}>
       {(control) => (
         <textarea
           {...textareaProps}
@@ -166,6 +217,11 @@ export function CheckboxField(props: {
   readonly onChecked: (checked: boolean) => void;
   readonly hint?: ReactNode;
   readonly disabled?: boolean;
+  /**
+   * A fuller name for screen readers when the visible label alone is ambiguous, e.g.
+   * "shop.orders" for a box that shows only "orders" under its database.
+   */
+  readonly accessibleLabel?: string;
 }) {
   const id = useId();
   return (
@@ -176,6 +232,7 @@ export function CheckboxField(props: {
         className="checkbox"
         checked={props.checked}
         disabled={props.disabled}
+        aria-label={props.accessibleLabel}
         aria-describedby={props.hint === undefined ? undefined : `${id}-hint`}
         onChange={(event) => props.onChecked(event.target.checked)}
       />

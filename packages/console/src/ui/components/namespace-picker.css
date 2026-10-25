@@ -1,0 +1,124 @@
+/*
+ * NamespacePicker (namespace-picker.tsx): the databases → collections checkbox tree.
+ *
+ * Only design tokens from styles.css, so it follows the dark and light themes. Rows are
+ * a three-column grid (expand button, checkbox + name, counts) so names and numbers
+ * line up down the list.
+ */
+
+.ns-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+/* Search box first, growing; the two buttons after it. Wraps on narrow screens. */
+.ns-picker-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.ns-picker-search {
+  flex: 1 1 220px;
+  width: auto;
+}
+
+.ns-picker-summary {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* The list of databases, in a sunken box that scrolls when it is long. */
+.ns-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1) 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface-sunken);
+  max-height: 420px;
+  overflow: auto;
+}
+
+.ns-picker-database + .ns-picker-database {
+  border-top: 1px solid var(--color-border);
+}
+
+.ns-picker-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+}
+
+/* Collections are indented under their database, past the expand button. */
+.ns-picker-collections {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 var(--space-2) 32px;
+}
+
+/* A collection row has no expand button: checkbox + name, an optional badge, the count. */
+.ns-picker-collections .ns-picker-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+.ns-picker-collections .ns-picker-row:hover {
+  background: var(--color-surface-hover);
+}
+
+.ns-picker-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.ns-picker-expand:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* The checkbox and its name, clickable together. */
+.ns-picker-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.ns-picker-check .checkbox {
+  margin: 0;
+}
+
+.ns-picker-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.ns-picker-meta {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  text-align: right;
+}
