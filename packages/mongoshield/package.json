@@ -126,9 +126,9 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
-    "@aws-sdk/client-kms": "^3.1100.0",
-    "@aws-sdk/client-s3": "^3.1100.0",
-    "@aws-sdk/lib-storage": "^3.1100.0",
+    "@aws-sdk/client-kms": "^3.1155.0",
+    "@aws-sdk/client-s3": "^3.1155.0",
+    "@aws-sdk/lib-storage": "^3.1155.0",
     "@testcontainers/minio": "^11.14.0",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^5.0.5",
