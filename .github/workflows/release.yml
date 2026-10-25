@@ -80,6 +80,11 @@ jobs:
           # changelogs (links to PRs and authors). The action itself uses its
           # `github-token` input, which defaults to this same token.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Packages with a trusted publisher on npm publish through OIDC (id-token
+          # above). A package's first publish can't: npm only accepts a trusted
+          # publisher for a package that already exists, so this token covers it.
+          # The action writes it to .npmrc only when it is set.
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # `published-packages` is a JSON array like
       #   [{"name":"mongoshield","version":"2.0.0"},{"name":"@mongoshield/console","version":"2.0.0"}]
