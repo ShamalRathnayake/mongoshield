@@ -71,16 +71,22 @@ jobs:
       # documented path, and pnpm 12's native publish has reported OIDC problems. Trusted
       # publishing needs npm 11.5.1 or newer.
       #
-      # NPM_TOKEN goes into ~/.npmrc as a reference (npm reads the variable at publish
-      # time, from the changesets step's env below). npm still tries OIDC first and uses
-      # the token only for packages without a trusted publisher, i.e. a first publish.
+      # Every package publishes through its trusted publisher. Only a brand-new package
+      # (no trusted publisher yet) needs a token: add an NPM_TOKEN secret for that one
+      # release, and it goes into ~/.npmrc as a reference (npm reads the variable at
+      # publish time, from the changesets step's env below). Without the secret, no
+      # .npmrc is written, so an empty token can't get in the way of OIDC.
       - name: Publish with the npm CLI
+        env:
+          HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
         run: |
           npm install --global npm@11
           npm --version
           echo "REAL_PNPM=$(command -v pnpm)" >> "$GITHUB_ENV"
           echo "${GITHUB_WORKSPACE}/.github/scripts/npm-publish" >> "$GITHUB_PATH"
-          echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > "${HOME}/.npmrc"
+          if [ "${HAS_NPM_TOKEN}" = "true" ]; then
+            echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > "${HOME}/.npmrc"
+          fi
 
       # changesets/action v2 needs @changesets/cli v3 (this repository uses v3).
       - uses: changesets/action@v2
@@ -96,10 +102,8 @@ jobs:
           # changelogs (links to PRs and authors). The action itself uses its
           # `github-token` input, which defaults to this same token.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Packages with a trusted publisher on npm publish through OIDC (id-token
-          # above). A package's first publish can't: npm only accepts a trusted
-          # publisher for a package that already exists, so this token covers it.
-          # The action writes it to .npmrc only when it is set.
+          # Only for a brand-new package's first publish (see "Publish with the npm
+          # CLI" above); empty, and unused, otherwise.
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # `published-packages` is a JSON array like
