@@ -46,7 +46,7 @@ jobs:
       - name: Configure GitHub Pages
         id: pages
         if: github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       # `build` syncs docs/, generates the CLI and config references, builds the site
       # and checks every internal link (website/package.json).
