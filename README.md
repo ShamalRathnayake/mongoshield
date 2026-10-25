@@ -12,12 +12,14 @@
 <img src="https://img.shields.io/badge/Node.js-%E2%89%A522.12-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 22.12 or newer">
 <img src="https://img.shields.io/badge/MongoDB-7.0%20%C2%B7%208.0-47A248?style=flat-square&logo=mongodb&logoColor=white" alt="Tested on MongoDB 7.0 and 8.0">
 <img src="https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker images on ghcr.io">
+<a href="https://shamalrathnayake.github.io/mongoshield/"><img src="https://img.shields.io/badge/docs-shamalrathnayake.github.io-22d3ee?style=flat-square&logo=readthedocs&logoColor=white" alt="Documentation site"></a>
 <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="Written in strict TypeScript">
 <img src="https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square" alt="MIT license">
 
 <br>
 <br>
 
+**[📖 Docs](https://shamalrathnayake.github.io/mongoshield/)** &nbsp;·&nbsp;
 **[Quick start](#quick-start)** &nbsp;·&nbsp;
 **[Web console](#the-web-console)** &nbsp;·&nbsp;
 **[CLI](#the-cli)** &nbsp;·&nbsp;
