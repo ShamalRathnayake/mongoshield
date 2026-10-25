@@ -323,8 +323,11 @@ describe("choosing databases and collections", () => {
     // reached the tree instead of reading it in between (that raced on slow runners).
     await waitFor(() => {
       expect(
-        (screen.getByRole("radio", { name: "Choose databases and collections" }) as HTMLInputElement)
-          .checked,
+        (
+          screen.getByRole("radio", {
+            name: "Choose databases and collections",
+          }) as HTMLInputElement
+        ).checked,
       ).toBe(true);
       expect(checkbox("shop.orders").checked).toBe(true);
       expect(checkbox("shop").indeterminate).toBe(true);
