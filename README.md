@@ -34,12 +34,6 @@
 
 </div>
 
-> [!NOTE]
-> **Release candidate.** The first stable release, **2.0.0**, is on its way. Until then,
-> install from the `next` tag: `mongoshield@next`.
-
-<br>
-
 ## Choose your path
 
 <table>
@@ -88,15 +82,15 @@ Open **http://localhost:8080** → create your admin → paste a connection stri
 ### 2. CLI
 
 ```bash
-npx mongoshield@next init       # a few questions, then mongoshield.config.ts and a key
-npx mongoshield@next backup     # back up everything
-npx mongoshield@next restore latest --rename 'app.*=app_restored.*'
+npx mongoshield init       # a few questions, then mongoshield.config.ts and a key
+npx mongoshield backup     # back up everything
+npx mongoshield restore latest --rename 'app.*=app_restored.*'
 ```
 
 ### 3. Library
 
 ```bash
-npm install mongoshield@next mongodb
+npm install mongoshield mongodb
 ```
 
 ```ts
@@ -343,12 +337,12 @@ Everything else, and the trade-offs: [console specification](./docs/specs/CONSOL
 
 | How | Command | Good for |
 |:--|:--|:--|
-| ⚡ No install | `npx mongoshield@next <command>` | Trying it, one-off jobs |
-| 🌍 Global | `npm install -g mongoshield@next` | Your own machine, servers |
-| 📌 In a project | `npm install -D mongoshield@next`, then `npx mongoshield` | Pinning a version per repository |
-| 🐳 Docker | `docker run --rm ghcr.io/shamalrathnayake/mongoshield:next <command>` | Containers, Kubernetes |
-| 🥟 Bun | `bunx --bun mongoshield@next <command>` | Bun 1.4+ |
-| 🦕 Deno | `deno run -A npm:mongoshield@next <command>` | Deno 2.9+ |
+| ⚡ No install | `npx mongoshield <command>` | Trying it, one-off jobs |
+| 🌍 Global | `npm install -g mongoshield` | Your own machine, servers |
+| 📌 In a project | `npm install -D mongoshield`, then `npx mongoshield` | Pinning a version per repository |
+| 🐳 Docker | `docker run --rm ghcr.io/shamalrathnayake/mongoshield:2 <command>` | Containers, Kubernetes |
+| 🥟 Bun | `bunx --bun mongoshield <command>` | Bun 1.4+ |
+| 🦕 Deno | `deno run -A npm:mongoshield <command>` | Deno 2.9+ |
 
 For cloud storage, also install the SDK it needs (see [Storage and encryption](#storage-and-encryption));
 the Docker image already has S3.
@@ -488,7 +482,7 @@ mongoshield export --output ./dump && mongorestore --dir ./dump
 ### Install
 
 ```bash
-npm install mongoshield@next mongodb
+npm install mongoshield mongodb
 ```
 
 - **ESM and TypeScript first.** The package is an ES module with full type definitions;
@@ -620,7 +614,7 @@ See the [testing guide](./docs/guides/testing.md).
 
 | | Supported |
 |:--|:--|
-| **MongoShield** | **2.0.0**, the first stable release, is coming; release candidates are on the npm `next` tag |
+| **MongoShield** | **2.0.0**, the first stable release, on npm `latest` |
 | **Node.js** | 22.12 or newer (tested on 22 and 24) |
 | **Bun · Deno** | Bun 1.4+ · Deno 2.9+ ([what's tested there](./docs/guides/bun-and-deno.md)) |
 | **MongoDB** | Tested on **7.0** and **8.0**. Point-in-time recovery and `converge` consistency need a replica set or sharded cluster on 6.0+ |
@@ -632,8 +626,8 @@ See the [testing guide](./docs/guides/testing.md).
 
 | Channel | npm | Docker |
 |:--|:--|:--|
-| Release candidates (now) | `mongoshield@next` | `:next` (every change on `main`) |
-| Stable (from 2.0.0) | `mongoshield` (`latest`) | `:2.0.0`, `:2.0`, `:2`, `:latest` |
+| Stable | `mongoshield` (`latest`) | `:2.0.0`, `:2.0`, `:2`, `:latest` |
+| Pre-releases | `mongoshield@next` | `:next` (every change on `main`) |
 
 Versions follow [semantic versioning](https://semver.org): a new major version for
 breaking changes, so `^2.0.0` and `:2` are safe to follow. The backup format has its own
@@ -657,7 +651,7 @@ The console image includes every SDK and the CLI image includes S3. The GitHub A
 the SDK that its `storage` input needs.
 
 Encryption uses [age](https://age-encryption.org): public keys (`age1…`), a passphrase, a key
-the console keeps, or a cloud KMS. Make a key pair with `npx mongoshield@next keygen`.
+the console keeps, or a cloud KMS. Make a key pair with `npx mongoshield keygen`.
 
 And because a backup is plain `mongodump` layout, you can always restore it without us:
 
@@ -687,7 +681,7 @@ The format is specified in [FORMAT.md](./docs/specs/FORMAT.md) and the encryptio
 A nightly backup without a server.
 
 ```yaml
-- uses: ShamalRathnayake/mongoshield/action@main   # pin a release tag or commit SHA
+- uses: ShamalRathnayake/mongoshield/action@v2   # pin a release tag or commit SHA
   with:
     uri: ${{ secrets.MONGODB_URI }}
     storage: s3://acme-backups/prod?region=eu-west-1
@@ -707,7 +701,7 @@ docker run --rm --init \
   -e MONGOSHIELD_STORAGE='s3://acme-backups/prod?region=eu-west-1' \
   -e MONGOSHIELD_RECIPIENTS='age1…' \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  ghcr.io/shamalrathnayake/mongoshield:next backup
+  ghcr.io/shamalrathnayake/mongoshield:2 backup
 ```
 
 Without arguments the image runs `schedule`, on the cron in your config file. Images are
@@ -1585,7 +1579,7 @@ Inputs, outputs, build args.
 | `config` | `""` | Path to a config file |
 | `args` | `""` | Extra arguments, split on spaces |
 | `packages` | `""` | Extra npm packages; the SDK for the `storage` input's scheme is added for you |
-| `version` | `next` | The mongoshield npm version or tag |
+| `version` | `latest` | The mongoshield npm version or tag |
 | `node-version` | `24` | Node.js to set up; `""` uses the runner's |
 | `working-directory` | `.` | Where to run |
 

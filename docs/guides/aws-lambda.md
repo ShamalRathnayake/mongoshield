@@ -5,7 +5,7 @@ library. A ready-to-deploy SAM project is in
 [`examples/aws-lambda`](../../examples/aws-lambda/).
 
 ```bash
-npm install mongoshield@next mongodb @aws-sdk/client-s3 @aws-sdk/lib-storage
+npm install mongoshield mongodb @aws-sdk/client-s3 @aws-sdk/lib-storage
 ```
 
 ```js

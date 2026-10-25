@@ -1,12 +1,11 @@
 # mongoshield
 
-## 2.0.0-next.2
+## 2.0.0
 
 ### Major Changes
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`f49712e`](https://github.com/ShamalRathnayake/mongoshield/commit/f49712ea1d356f78ab2f5f43bfdc37ae320dd888) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - First stable release. MongoShield backs up, restores and copies MongoDB from Node.js using
   only the official driver, with no `mongodump` binary:
-  
   - Backups in the mongodump directory layout and BSON, compressed with zstd or gzip and
     optionally encrypted with age (public keys, passphrases or AWS / GCP / Azure KMS), with a
     SHA-256 checksum for every file and a manifest written last.
@@ -26,7 +25,6 @@
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Atlas Free tier backups: first-class support for MongoDB Atlas Free (M0), Flex and legacy
   shared M2/M5 clusters.
-  
   - When it connects, MongoShield recognises Atlas by its `*.mongodb.net` host names, and
     recognises a Free/Flex cluster because the cluster refuses a read-only `getParameter`
     probe with error code 8000 (`AtlasError`). On those tiers it adapts by itself:
@@ -55,7 +53,6 @@
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Bun and Deno support: the library, the CLI and config files now run on Bun 1.4+ and
   Deno 2.9+ (`bunx --bun mongoshield`, `deno run -A npm:mongoshield`), tested in CI at the
   oldest and newest version of each. See docs/guides/bun-and-deno.md.
-  
   - age encryption works on Bun, whose `node:crypto` has no ChaCha20-Poly1305: where the
     cipher is missing, MongoShield loads the audited `@noble/ciphers` (a new dependency,
     imported lazily) and produces the same bytes. Node.js and Deno keep using `node:crypto`
@@ -78,11 +75,11 @@
   lookups of a sample, with estimated counts and `sampled` on the namespace).
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - - `mongoshield delete <id>` and `shield.deleteBackup(id)`: delete one backup by id. The
-    manifest goes first (so no reader ever sees a half-deleted backup), then its files,
-    annotations and checkpoint. Backups on hold, still write-once (`retainDays` / object
-    lock) or needed by an incremental backup are refused with the new `MS_BACKUP_PROTECTED`
-    (exit code 35). Asks for confirmation (`--yes` in scripts), supports `--json`, and logs
-    an audit line (id, objects, bytes, who, when).
+  manifest goes first (so no reader ever sees a half-deleted backup), then its files,
+  annotations and checkpoint. Backups on hold, still write-once (`retainDays` / object
+  lock) or needed by an incremental backup are refused with the new `MS_BACKUP_PROTECTED`
+  (exit code 35). Asks for confirmation (`--yes` in scripts), supports `--json`, and logs
+  an audit line (id, objects, bytes, who, when).
   - `retention.scopeLabels`: labels that mark a job's backups and scope its retention, so
     two jobs with the same source and selection in one storage location never prune each
     other's backups. Used by `mongoshield run`/`schedule` and by `mongoshield prune`.
@@ -92,7 +89,6 @@
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Incremental backups: store only what changed since the previous backup, in chains of a
   full backup followed by incrementals (docs/guides/incremental-backups.md).
-  
   - `shield.backup({ incremental: true })` (or `{ incremental: { from: "<id>" } }`) and
     `mongoshield backup --incremental [--from <id>]` record every change after the parent
     backup's end time with a change stream, DDL included (create, drop, rename, index
@@ -151,7 +147,7 @@
   storage location. `shield.prune(policy, { scope })` takes `{ clusterId?, labels? }` and reports
   `outOfScope`; scheduled runs and `mongoshield prune` scope by the source's cluster and the
   `mongoshield.shape` label (which `mongoshield backup` now writes too); `mongoshield prune
-  --all-sources` prunes the whole location after a per-source confirmation, `--scope-label` scopes
+--all-sources` prunes the whole location after a per-source confirmation, `--scope-label` scopes
   by custom labels. Journal pruning keeps segments any scope's base backup still needs.
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`3562e4b`](https://github.com/ShamalRathnayake/mongoshield/commit/3562e4b609e710a27e414a2e9d8c01db8a3c86ad) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Upgrade rehearsals: prove a backup works on a newer MongoDB release before upgrading production.
@@ -170,7 +166,6 @@
 ### Patch Changes
 
 - [#47](https://github.com/ShamalRathnayake/mongoshield/pull/47) [`13a7f30`](https://github.com/ShamalRathnayake/mongoshield/commit/13a7f30b5eb8b52b784ecbea1efd5e3f5dcd2553) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Correctness fixes found by a full test sweep:
-  
   - Restore, copy, change replay and point-in-time recovery keep every document's field order,
     including integer-like keys, and so do index keys, validators, users and roles, part bounds,
     copy checkpoints and subset references.

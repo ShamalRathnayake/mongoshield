@@ -22,9 +22,9 @@ export const link = (path) => `${import.meta.env.BASE_URL.replace(/\/$/, "")}/${
 ## Three commands
 
 ```sh
-npx mongoshield@next init      # writes mongoshield.config.ts and generates an encryption key
-npx mongoshield@next backup
-npx mongoshield@next restore latest --rename 'app.*=app_restored.*'
+npx mongoshield init      # writes mongoshield.config.ts and generates an encryption key
+npx mongoshield backup
+npx mongoshield restore latest --rename 'app.*=app_restored.*'
 ```
 
 MongoShield is a TypeScript library and CLI that uses only the official MongoDB driver.

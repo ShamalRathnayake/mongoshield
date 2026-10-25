@@ -88,8 +88,8 @@ mongodump skips both; MongoShield can keep them.
 
 ```bash
 export MONGODB_URI='mongodb+srv://mongoshield-backup:…@cluster0.abcde.mongodb.net/'
-npx mongoshield@next backup --to ./backups --exclude '*.sessions'
-npx mongoshield@next verify --from ./backups
+npx mongoshield backup --to ./backups --exclude '*.sessions'
+npx mongoshield verify --from ./backups
 ```
 
 Then schedule it on your platform: [Docker](./docker.md), [Kubernetes](./kubernetes.md),

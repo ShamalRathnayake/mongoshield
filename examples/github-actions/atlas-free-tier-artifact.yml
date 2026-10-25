@@ -14,14 +14,14 @@
 # Needs (Settings > Secrets and variables > Actions):
 #   secret   MONGODB_URI        mongodb+srv://… of a database user with the
 #                               "Only read any database" role (readAnyDatabase)
-#   variable BACKUP_PUBLIC_KEY  age public key (age1…) from `npx mongoshield@next keygen`
+#   variable BACKUP_PUBLIC_KEY  age public key (age1…) from `npx mongoshield keygen`
 #
 # Network access: GitHub-hosted runners have no fixed IP address, so the Atlas IP
 # Access List must allow 0.0.0.0/0 (use a long random password and the read-only user
 # above), or copy the two access list steps from atlas-free-tier-s3.yml.
 #
 # Restore: download the artifact from the run's page, unzip it into ./backups, then
-#   npx mongoshield@next restore latest --from ./backups --identity-file backup.key
+#   npx mongoshield restore latest --from ./backups --identity-file backup.key
 name: Atlas backup
 
 on:
@@ -47,7 +47,7 @@ jobs:
       # (lower parallelism, a read rate limit, no commands the tier refuses).
       - name: Back up the Atlas cluster
         id: backup
-        uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or commit SHA
+        uses: ShamalRathnayake/mongoshield/action@v2 # pin to a release tag or commit SHA
         with:
           command: backup
           uri: ${{ secrets.MONGODB_URI }}
@@ -57,7 +57,7 @@ jobs:
 
       # Checks every file's checksum against the manifest. No key needed.
       - name: Verify the new backup
-        uses: ShamalRathnayake/mongoshield/action@main
+        uses: ShamalRathnayake/mongoshield/action@v2
         with:
           command: verify
           storage: ./backups

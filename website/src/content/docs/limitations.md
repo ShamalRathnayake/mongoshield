@@ -13,8 +13,6 @@ consequences of taking *logical* backups through the driver.
   or physical backups restore faster (see [Compare](/compare/percona/)).
 - **User data first.** Server settings and `system.*` collections are not backed up.
   Users and custom roles are only included with `includeUsersAndRoles` (off by default).
-- **Release candidate.** Until the first stable release (2.0.0) is out, install from the
-  `next` npm tag.
 
 ## Consistency and point-in-time recovery
 

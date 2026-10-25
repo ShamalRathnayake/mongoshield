@@ -48,7 +48,7 @@ export async function GET(request: Request) {
 export default { serverExternalPackages: ["mongoshield", "mongodb"] };
 ```
 
-Install: `npm install mongoshield@next mongodb @aws-sdk/client-s3 @aws-sdk/lib-storage`.
+Install: `npm install mongoshield mongodb @aws-sdk/client-s3 @aws-sdk/lib-storage`.
 
 ## Environment variables
 
@@ -57,7 +57,7 @@ Install: `npm install mongoshield@next mongodb @aws-sdk/client-s3 @aws-sdk/lib-s
 | `CRON_SECRET` | random string (`openssl rand -hex 32`); Vercel adds it to cron requests |
 | `MONGODB_URI` | a user with a read-only role |
 | `BACKUP_BUCKET`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | storage, with credentials limited to the bucket |
-| `BACKUP_PUBLIC_KEY` | `age1…` from `npx mongoshield@next keygen --output backup.key` (keep the key file offline) |
+| `BACKUP_PUBLIC_KEY` | `age1…` from `npx mongoshield keygen --output backup.key` (keep the key file offline) |
 
 S3-compatible stores (Cloudflare R2, Backblaze B2…) work with `s3Storage({ endpoint })`.
 

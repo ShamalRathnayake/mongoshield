@@ -7,7 +7,7 @@ Everything the CLI does is available from code. The CLI is a thin layer over the
 `MongoShield` class.
 
 ```sh
-npm install mongoshield@next mongodb
+npm install mongoshield mongodb
 npm install @aws-sdk/client-s3 @aws-sdk/lib-storage   # only for S3-compatible storage
 ```
 

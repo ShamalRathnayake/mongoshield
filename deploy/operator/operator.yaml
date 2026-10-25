@@ -261,7 +261,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: operator
-          image: "ghcr.io/shamalrathnayake/mongoshield-operator:next"
+          image: "ghcr.io/shamalrathnayake/mongoshield-operator:2"
           imagePullPolicy: IfNotPresent
           env:
             # Identity for leader election and events, and where the Lease lives.

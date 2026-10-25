@@ -3,7 +3,7 @@
 [`app/api/backup/route.ts`](./app/api/backup/route.ts) backs up MongoDB to S3 (or R2, B2…)
 when Vercel Cron calls it; [`vercel.json`](./vercel.json) schedules it daily at 03:15 UTC.
 
-1. `npx mongoshield@next keygen --output backup.key` and keep `backup.key` offline.
+1. `npx mongoshield keygen --output backup.key` and keep `backup.key` offline.
 2. Set these environment variables in the Vercel project:
 
    | Variable | Value |

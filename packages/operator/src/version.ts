@@ -5,5 +5,5 @@
 
 import packageJson from "../package.json" with { type: "json" };
 
-/** The @mongoshield/operator version, e.g. 0.1.0. */
+/** The @mongoshield/operator version, e.g. 2.0.0. */
 export const OPERATOR_VERSION: string = packageJson.version;

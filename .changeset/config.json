@@ -1,8 +1,13 @@
 {
   "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
-  "changelog": ["@changesets/changelog-github", { "repo": "ShamalRathnayake/mongoshield" }],
+  "changelog": [
+    "@changesets/changelog-github",
+    {
+      "repo": "ShamalRathnayake/mongoshield"
+    }
+  ],
   "commit": false,
-  "fixed": [["mongoshield", "@mongoshield/console"]],
+  "fixed": [["mongoshield", "@mongoshield/console", "@mongoshield/operator"]],
   "linked": [],
   "access": "public",
   "baseBranch": "main",

@@ -28,7 +28,7 @@ Generate an encryption key pair on your machine and keep the secret key **outsid
 cluster; only the public key goes into the values:
 
 ```bash
-npx mongoshield@next keygen --output backup.key   # prints age1…
+npx mongoshield keygen --output backup.key   # prints age1…
 ```
 
 ## 2. Storage credentials
@@ -54,7 +54,7 @@ The published image contains the AWS SDK only. For GCS or Azure, build an image 
 ```yaml
 # my-values.yaml
 image:
-  tag: "next" # pin a release in production, e.g. "2.0.0"
+  tag: "2.0.0" # pin the release you run
 schedule: "15 3 * * *"
 timeZone: Europe/Berlin
 recipients:
@@ -97,7 +97,7 @@ kubectl -n backups logs -f job/mongoshield-test
 List backups from your laptop (or another pod) with the same storage URL:
 
 ```bash
-npx mongoshield@next list --from s3://acme-backups/prod
+npx mongoshield list --from s3://acme-backups/prod
 ```
 
 ## How the CronJob is set up, and why

@@ -15,5 +15,4 @@ README; the matching guides are in [`docs/guides`](../docs/guides/).
 
 Kubernetes lives in [`deploy/`](../deploy/): a Helm chart and a plain CronJob manifest.
 
-All examples use the `mongoshield@next` dist-tag while 2.0 is in development. Pin an exact
-version in production.
+Pin an exact version in production.

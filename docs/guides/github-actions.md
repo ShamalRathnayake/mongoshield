@@ -30,7 +30,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_BACKUP_ROLE }}
           aws-region: eu-west-1
-      - uses: ShamalRathnayake/mongoshield/action@main # pin to a release tag or SHA
+      - uses: ShamalRathnayake/mongoshield/action@v2 # pin to a release tag or SHA
         id: backup
         with:
           uri: ${{ secrets.MONGODB_URI }}
@@ -42,7 +42,7 @@ jobs:
 
 The action runs `npx mongoshield@<version>` and installs the SDK the storage URL needs.
 Inputs: `command` (`backup`, `run`, `verify`, `restore`), `uri`, `storage`, `recipients`,
-`identity`, `config`, `args`, `packages`, `version` (default `next`), `node-version`
+`identity`, `config`, `args`, `packages`, `version` (default `latest`), `node-version`
 (default `24`), `working-directory`. Outputs: `backup-id` and `json`. Details in
 [`action/README.md`](../../action/README.md).
 
@@ -65,7 +65,7 @@ retention and notifications in one step:
 
 ```yaml
       - uses: actions/checkout@v5
-      - uses: ShamalRathnayake/mongoshield/action@main
+      - uses: ShamalRathnayake/mongoshield/action@v2
         with:
           command: run
           uri: ${{ secrets.MONGODB_URI }}
@@ -84,7 +84,7 @@ whose leak is harmless.
         with:
           node-version: 24
       - run: >-
-          npx --yes --package=mongoshield@next
+          npx --yes --package=mongoshield
           --package=@aws-sdk/client-s3@^3 --package=@aws-sdk/lib-storage@^3
           -- mongoshield backup --to "s3://acme-backups/prod?region=eu-west-1" --exclude '*.sessions'
         env:
@@ -95,7 +95,7 @@ whose leak is harmless.
 ## Security
 
 - **Encrypt for a public key.** CI then holds nothing that can read a backup. Generate
-  the pair locally with `npx mongoshield@next keygen --output backup.key` and keep the
+  the pair locally with `npx mongoshield keygen --output backup.key` and keep the
   secret key offline.
 - **OIDC for cloud credentials** instead of stored access keys. Scope the IAM role's trust
   policy to this repository (and branch).

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# A `pnpm` stand-in for the release job: every command goes to the real pnpm except
+# `pnpm publish`, which is done with the npm CLI instead.
+#
+# Why: pnpm 12 publishes with its own code, and npm's registry refuses its trusted
+# publishing (OIDC) token exchange ("403 OIDC permission denied for this action").
+# The npm CLI (11.5.1+) does the exchange properly, and uses NPM_TOKEN (written to
+# .npmrc by changesets/action) for packages that have no trusted publisher yet.
+#
+# How: changesets runs `pnpm publish [<tarball>] --json --access <a> --tag <t>
+# --no-git-checks [--otp <code>]` in the package's directory. We pack the package with
+# the real pnpm (which turns `workspace:*` into real versions), then hand the tarball and
+# the same flags to `npm publish`. Exit codes pass through, so changesets reports
+# success and failure as usual.
+#
+# release.yml puts this directory first on PATH and sets REAL_PNPM to the real binary.
+
+set -euo pipefail
+
+# Anything but `publish` (install, exec, --version, pack …) goes straight to pnpm.
+if [[ "${1:-}" != "publish" ]]; then
+  exec "${REAL_PNPM:?REAL_PNPM must point at the real pnpm}" "$@"
+fi
+shift
+
+# Split pnpm's arguments into the tarball (if changesets packed one) and npm's flags.
+tarball=""
+npm_flags=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-git-checks) shift ;;                              # pnpm only; npm has no such check
+    --access | --tag | --otp) npm_flags+=("$1" "$2"); shift 2 ;;
+    --*) npm_flags+=("$1"); shift ;;                       # --json and any other switch
+    *) tarball="$1"; shift ;;                              # a positional: the tarball
+  esac
+done
+
+# No tarball given: pack the package in this directory into a fresh temporary folder.
+if [[ -z "$tarball" ]]; then
+  out="$(mktemp -d)"
+  "$REAL_PNPM" pack --pack-destination "$out" > /dev/null
+  tarball="$(ls "$out"/*.tgz)"
+fi
+
+# Provenance links the published package to this workflow run (needs id-token: write).
+exec npm publish "$tarball" --provenance "${npm_flags[@]}"
