@@ -41,7 +41,7 @@ jobs:
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
       # Node.js runs the test runner (mongod, S3Mock, spawning the runtime under test).
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Set up Bun

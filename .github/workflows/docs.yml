@@ -35,7 +35,7 @@ jobs:
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           # The generators import the package's TypeScript directly, which needs Node 24.
           node-version: 24
