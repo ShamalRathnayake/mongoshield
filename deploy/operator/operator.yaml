@@ -29,7 +29,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
 
@@ -42,7 +42,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
 rules:
@@ -107,7 +107,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
     rbac.authorization.k8s.io/aggregate-to-view: "true"
@@ -126,7 +126,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
     rbac.authorization.k8s.io/aggregate-to-edit: "true"
@@ -146,7 +146,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
 roleRef:
@@ -169,7 +169,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
 rules:
@@ -187,7 +187,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
 roleRef:
@@ -209,7 +209,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
 spec:
@@ -233,7 +233,7 @@ metadata:
   labels:
     app.kubernetes.io/name: mongoshield-operator
     app.kubernetes.io/instance: mongoshield-operator
-    app.kubernetes.io/version: "next"
+    app.kubernetes.io/version: "2.0.0"
     app.kubernetes.io/managed-by: kubectl
     app.kubernetes.io/part-of: mongoshield
 spec:
@@ -261,7 +261,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: operator
-          image: "ghcr.io/shamalrathnayake/mongoshield-operator:2"
+          image: "ghcr.io/shamalrathnayake/mongoshield-operator:2.0.0"
           imagePullPolicy: IfNotPresent
           env:
             # Identity for leader election and events, and where the Lease lives.
