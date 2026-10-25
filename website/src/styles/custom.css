@@ -1,23 +1,365 @@
 /*
- * Site colours: a calm teal accent instead of Starlight's default purple.
- * Starlight derives every other shade from these variables, in both themes.
+ * The documentation site's look, matching the web console: Geist type, a deep navy dark
+ * theme with the brand gradient (emerald → cyan → indigo → violet), coloured cards and a
+ * glowing landing page. Starlight derives most shades from the variables below; the rest
+ * styles its components by their public class names.
  */
 
-/* Dark theme (Starlight's default). */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400..800&family=Geist+Mono:wght@400..600&display=swap");
+
+/* ---------------------------------------------------------------- Tokens */
+
+/* Dark theme (the default). */
 :root {
-  --sl-color-accent-low: #0f2f2c;
-  --sl-color-accent: #14857a;
-  --sl-color-accent-high: #a6e3da;
+  /* The brand gradient, used for headings, buttons and borders. */
+  --ms-emerald: #34d399;
+  --ms-cyan: #22d3ee;
+  --ms-indigo: #818cf8;
+  --ms-violet: #c084fc;
+  --ms-pink: #f472b6;
+  --ms-amber: #fbbf24;
+  --ms-gradient: linear-gradient(
+    120deg,
+    var(--ms-emerald),
+    var(--ms-cyan) 35%,
+    var(--ms-indigo) 70%,
+    var(--ms-violet)
+  );
+
+  --sl-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  --sl-color-accent-low: #0b2a3a;
+  --sl-color-accent: #22d3ee;
+  --sl-color-accent-high: #a5f3fc;
+
+  /* Navy greys instead of neutral ones: deeper, with a hint of blue. */
+  --sl-color-white: #f1f5ff;
+  --sl-color-gray-1: #dbe3f4;
+  --sl-color-gray-2: #b4c0da;
+  --sl-color-gray-3: #8592b3;
+  --sl-color-gray-4: #4d587a;
+  --sl-color-gray-5: #2a3352;
+  --sl-color-gray-6: #161d33;
+  --sl-color-black: #0a0f1e;
+
+  --sl-color-bg: #070b16;
+  --sl-color-bg-nav: rgb(7 11 22 / 0.72);
+  --sl-color-bg-sidebar: #080d1a;
+  --sl-color-hairline: #1b2440;
+  --sl-color-hairline-light: #26304f;
+
+  /* Card and panel surfaces. */
+  --ms-surface: rgb(22 29 51 / 0.55);
+  --ms-surface-hover: rgb(30 40 70 / 0.7);
+  --ms-glow: 0 20px 60px -20px rgb(34 211 238 / 0.35);
 }
 
-/* Light theme. */
+/* Light theme: soft blue-grey paper rather than bright white. */
 :root[data-theme="light"] {
-  --sl-color-accent-low: #cdeee9;
-  --sl-color-accent: #0f766e;
-  --sl-color-accent-high: #0b3d38;
+  --sl-color-accent-low: #cff4fb;
+  --sl-color-accent: #0e7490;
+  --sl-color-accent-high: #083344;
+
+  --sl-color-white: #0b1222;
+  --sl-color-gray-1: #1c2742;
+  --sl-color-gray-2: #34405f;
+  --sl-color-gray-3: #56627f;
+  --sl-color-gray-4: #8a95b0;
+  --sl-color-gray-5: #c9d1e3;
+  --sl-color-gray-6: #e3e8f3;
+  --sl-color-gray-7: #eef1f8;
+  --sl-color-black: #f4f6fb;
+
+  --sl-color-bg: #eef2f9;
+  --sl-color-bg-nav: rgb(238 242 249 / 0.78);
+  --sl-color-bg-sidebar: #e8edf6;
+  --sl-color-hairline: #d3dbea;
+  --sl-color-hairline-light: #c4cee2;
+
+  --ms-surface: rgb(255 255 255 / 0.7);
+  --ms-surface-hover: #ffffff;
+  --ms-glow: 0 20px 50px -24px rgb(14 116 144 / 0.35);
 }
 
-/* Feature cards on the landing page: no oversized icons, text first. */
-.sl-markdown-content .card .title {
+/* ---------------------------------------------------------------- Page */
+
+body {
+  background: var(--sl-color-bg);
+}
+
+::selection {
+  background: rgb(34 211 238 / 0.3);
+}
+
+/* A faint aurora behind every page, stronger on the landing page (below). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(60rem 30rem at 85% -10%, rgb(129 140 248 / 0.12), transparent 60%),
+    radial-gradient(50rem 28rem at -10% 10%, rgb(52 211 153 / 0.08), transparent 60%);
+}
+
+:root[data-theme="light"] body::before {
+  background:
+    radial-gradient(60rem 30rem at 85% -10%, rgb(129 140 248 / 0.14), transparent 60%),
+    radial-gradient(50rem 28rem at -10% 10%, rgb(52 211 153 / 0.12), transparent 60%);
+}
+
+/* Frosted header with a thin gradient line under it. */
+header.header {
+  backdrop-filter: blur(14px) saturate(1.4);
+  border-bottom: 1px solid transparent;
+  border-image: var(--ms-gradient) 1;
+}
+
+.site-title {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.site-title img {
+  height: 1.9rem;
+  width: auto;
+}
+
+/* ---------------------------------------------------------------- Landing page */
+
+/* Larger aurora on the splash page. */
+:root[data-has-hero] body::before {
+  background:
+    radial-gradient(48rem 26rem at 78% 8%, rgb(129 140 248 / 0.28), transparent 62%),
+    radial-gradient(42rem 24rem at 12% 22%, rgb(52 211 153 / 0.2), transparent 62%),
+    radial-gradient(36rem 22rem at 55% 48%, rgb(34 211 238 / 0.14), transparent 62%),
+    radial-gradient(30rem 20rem at 95% 60%, rgb(244 114 182 / 0.1), transparent 62%);
+}
+
+.hero {
+  padding-block: 3rem 2rem;
+}
+
+/* The title in the brand gradient. */
+.hero h1 {
+  background: var(--ms-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
+.hero .tagline {
+  color: var(--sl-color-gray-2);
+  font-size: clamp(1.1rem, 1rem + 0.6vw, 1.35rem);
+  line-height: 1.55;
+}
+
+/* The console screenshot: tilted slightly back, with a coloured glow. */
+.hero img {
+  border-radius: 1rem;
+  box-shadow:
+    0 0 0 1px rgb(129 140 248 / 0.25),
+    0 30px 80px -20px rgb(34 211 238 / 0.45),
+    0 10px 40px -10px rgb(192 132 252 / 0.35);
+  transform: perspective(1400px) rotateY(-6deg) rotateX(2deg);
+  transition: transform 400ms ease;
+}
+
+.hero img:hover {
+  transform: perspective(1400px) rotateY(0) rotateX(0);
+}
+
+/* ---------------------------------------------------------------- Buttons */
+
+.sl-link-button {
+  border-radius: 999px;
+  font-weight: 600;
+  padding-inline: 1.4rem;
+  transition:
+    transform 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.sl-link-button.primary {
+  background: var(--ms-gradient);
+  border: none;
+  color: #06121f;
+  box-shadow: 0 10px 30px -10px rgb(34 211 238 / 0.6);
+}
+
+.sl-link-button.primary:hover {
+  color: #06121f;
+  transform: translateY(-1px);
+  box-shadow: 0 14px 36px -10px rgb(129 140 248 / 0.7);
+}
+
+.sl-link-button.minimal {
+  border: 1px solid var(--sl-color-hairline-light);
+  background: var(--ms-surface);
+}
+
+/* ---------------------------------------------------------------- Content */
+
+.sl-markdown-content h2 {
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+
+/* A short gradient bar above each section heading. */
+.sl-markdown-content h2::before {
+  content: "";
+  display: block;
+  width: 2.5rem;
+  height: 0.25rem;
+  margin-bottom: 0.6rem;
+  border-radius: 999px;
+  background: var(--ms-gradient);
+}
+
+.sl-markdown-content :not(pre) > code {
+  border-radius: 0.35rem;
+  padding: 0.1em 0.35em;
+  background: var(--sl-color-accent-low);
+  color: var(--sl-color-accent-high);
+}
+
+:root[data-theme="light"] .sl-markdown-content :not(pre) > code {
+  color: var(--sl-color-accent);
+}
+
+/* Code blocks: rounded, with a soft coloured glow. */
+.expressive-code .frame {
+  border-radius: 0.75rem;
+  box-shadow: var(--ms-glow);
+}
+
+/* Tables: a tinted header row. */
+.sl-markdown-content table th {
+  background: var(--sl-color-accent-low);
+}
+
+/* ---------------------------------------------------------------- Cards */
+
+/*
+ * Feature cards: glassy panels with an icon in its own colour. Each card in a grid gets
+ * the next hue, so a grid reads as a set of colours.
+ */
+.card {
+  --ms-card-hue: var(--ms-cyan);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 1rem;
+  background: var(--ms-surface);
+  backdrop-filter: blur(8px);
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--ms-card-hue) 55%, transparent);
+  background: var(--ms-surface-hover);
+  box-shadow: 0 18px 40px -18px color-mix(in srgb, var(--ms-card-hue) 60%, transparent);
+}
+
+.card .title {
   font-size: var(--sl-text-lg);
+  font-weight: 650;
+}
+
+.card .icon {
+  /* Padding outside the icon's own size, so the tile grows instead of the icon shrinking. */
+  box-sizing: content-box;
+  width: 1.35rem;
+  height: 1.35rem;
+  color: var(--ms-card-hue);
+  background: color-mix(in srgb, var(--ms-card-hue) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ms-card-hue) 35%, transparent);
+  border-radius: 0.7rem;
+  padding: 0.45rem;
+}
+
+.card-grid > :nth-child(6n + 1) {
+  --ms-card-hue: var(--ms-emerald);
+}
+.card-grid > :nth-child(6n + 2) {
+  --ms-card-hue: var(--ms-cyan);
+}
+.card-grid > :nth-child(6n + 3) {
+  --ms-card-hue: var(--ms-indigo);
+}
+.card-grid > :nth-child(6n + 4) {
+  --ms-card-hue: var(--ms-violet);
+}
+.card-grid > :nth-child(6n + 5) {
+  --ms-card-hue: var(--ms-pink);
+}
+.card-grid > :nth-child(6n + 6) {
+  --ms-card-hue: var(--ms-amber);
+}
+
+/* Link cards: the same panels, with a coloured glow on hover. */
+.sl-link-card {
+  border-radius: 1rem;
+  border: 1px solid var(--sl-color-hairline);
+  background: var(--ms-surface);
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    border-color 180ms ease;
+}
+
+.sl-link-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--ms-indigo);
+  background: var(--ms-surface-hover);
+  box-shadow: var(--ms-glow);
+}
+
+.sl-link-card .title {
+  font-weight: 650;
+}
+
+/* ---------------------------------------------------------------- Sidebar */
+
+/* The current page: a soft gradient pill instead of a solid block. */
+nav.sidebar a[aria-current="page"],
+nav.sidebar a[aria-current="page"]:hover,
+nav.sidebar a[aria-current="page"]:focus {
+  background: linear-gradient(
+    90deg,
+    rgb(52 211 153 / 0.22),
+    rgb(34 211 238 / 0.18),
+    rgb(129 140 248 / 0.18)
+  );
+  color: var(--sl-color-white);
+  border-radius: 0.5rem;
+  box-shadow: inset 2px 0 0 var(--ms-cyan);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- Asides */
+
+.starlight-aside {
+  border-radius: 0.75rem;
+  border-inline-start-width: 4px;
+}
+
+/* ---------------------------------------------------------------- Reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .sl-link-card,
+  .sl-link-button,
+  .hero img {
+    transition: none;
+    transform: none;
+  }
 }

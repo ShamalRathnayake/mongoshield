@@ -4,6 +4,9 @@ description: Back up, restore and copy MongoDB from Node.js, without mongodump. 
 template: splash
 editUrl: false
 hero:
+  image:
+    file: ../../assets/console-overview.png
+    alt: The MongoShield web console, showing the last backup, stored backups, verification and jobs
   tagline: Back up, restore and copy MongoDB from Node.js. No mongodump required. Backups stay readable with standard tools.
   actions:
     - text: Get started
@@ -46,40 +49,40 @@ The [backup format](/specs/format/) is a public, versioned specification.
 ## What it does
 
 <CardGrid>
-  <Card title="Safe restores">
+  <Card title="Safe restores" icon="approve-check">
     Nothing is overwritten unless you ask. Rename on restore, dry runs, and every
     collection type: capped, clustered, time series, views, validators, collations and
     every index type.
   </Card>
-  <Card title="Encrypted with keys you hold">
+  <Card title="Encrypted with keys you hold" icon="seti:lock">
     Per-file age encryption to public keys, cloud KMS keys or a passphrase. The machine
     taking backups does not need the secret key.
   </Card>
-  <Card title="Verifiable">
+  <Card title="Verifiable" icon="magnifier">
     Every file's SHA-256 is in the manifest. Verify without a key, decrypt and parse
     everything with `--deep`, or run a restore drill that measures your RTO.
   </Card>
-  <Card title="Consistent">
+  <Card title="Consistent" icon="random">
     On replica sets and sharded clusters, backups converge to a single moment using
     change streams, the equivalent of `mongodump --oplog`.
   </Card>
-  <Card title="Point-in-time recovery">
+  <Card title="Point-in-time recovery" icon="rocket">
     A change journal records every change between backups, so a restore can stop at any
     second.
   </Card>
-  <Card title="Retention with safety floors">
+  <Card title="Retention with safety floors" icon="list-format">
     Keep the last N plus hourly, daily, weekly, monthly and yearly backups. The newest and
     held backups are never deleted.
   </Card>
-  <Card title="Runs unattended">
+  <Card title="Runs unattended" icon="setting">
     Cron scheduling, locks, retries, a guard against suspicious backups, notifications and
     heartbeats.
   </Card>
-  <Card title="Your storage">
+  <Card title="Your storage" icon="cloud-download">
     Local disk, S3 and compatible services, Google Cloud Storage, Azure Blob Storage or
     SFTP, with optional write-once retention.
   </Card>
-  <Card title="Flat memory">
+  <Card title="Flat memory" icon="star">
     Everything streams. Memory use does not grow with the size of the database.
   </Card>
 </CardGrid>
