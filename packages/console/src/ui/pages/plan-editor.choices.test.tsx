@@ -6,7 +6,7 @@
  * test opens the step (tab) whose fields it uses, or links to it with `?step=`.
  */
 
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { DatabaseNode } from "../../shared/api.ts";
 import { NamespacePicker } from "../components/namespace-picker.tsx";
@@ -319,14 +319,19 @@ describe("choosing databases and collections", () => {
     // plan-hourly backs up shop.orders of the staging connection.
     const { user } = renderApp({ signedInAs: "admin", hash: "#/plans/plan-hourly?step=what" });
     await screen.findByRole("heading", { name: "Staging hourly" });
-    expect(
-      (screen.getByRole("radio", { name: "Choose databases and collections" }) as HTMLInputElement)
-        .checked,
-    ).toBe(true);
-    expect((await screen.findByRole("checkbox", { name: "shop.orders" })).matches(":checked")).toBe(
-      true,
-    );
-    expect(checkbox("shop").indeterminate).toBe(true);
+    // The plan and the connection's databases load separately; wait until both have
+    // reached the tree instead of reading it in between (that raced on slow runners).
+    await waitFor(() => {
+      expect(
+        (
+          screen.getByRole("radio", {
+            name: "Choose databases and collections",
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(true);
+      expect(checkbox("shop.orders").checked).toBe(true);
+      expect(checkbox("shop").indeterminate).toBe(true);
+    });
 
     // Small trees open fully; a database can be folded away.
     await user.click(screen.getByRole("button", { name: "Hide collections in shop" }));

@@ -83,7 +83,11 @@ describe("createGcpKmsClient", () => {
   it("maps a ciphertext GCP cannot decrypt to invalid-ciphertext", async () => {
     const kms = createGcpKmsClient(GCP_KEY, { client: fakeGcpSdkClient(new FakeKms()) });
     const wrapped = await kms.encryptDataKey(DATA_KEY);
-    const tampered = { ...wrapped, ciphertext: Buffer.from(wrapped.ciphertext).fill(0, 14, 15) };
+    // Flip every bit of one byte: zeroing it would change nothing when the (random)
+    // ciphertext already has a 0 there, about once in 256 runs.
+    const ciphertext = Uint8Array.from(wrapped.ciphertext);
+    ciphertext[14] = (ciphertext[14] ?? 0) ^ 0xff;
+    const tampered = { ...wrapped, ciphertext };
     const error = await failure(kms.decryptDataKey(tampered));
     expect(error.details?.kmsFailure).toBe("invalid-ciphertext");
   });
