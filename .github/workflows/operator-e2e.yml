@@ -51,7 +51,7 @@ jobs:
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
-      - uses: azure/setup-helm@v4 # v4: current major
+      - uses: azure/setup-helm@v5 # v4: current major
       # The cluster name must match scripts/e2e.ts (CLUSTER), so the script reuses it.
       - uses: helm/kind-action@v1 # v1: current major
         with:
