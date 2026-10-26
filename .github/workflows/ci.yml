@@ -60,7 +60,7 @@ jobs:
         working-directory: packages/mongoshield
         run: echo "MONGO_TOOLS_BIN=$(node scripts/fetch-mongo-tools.ts | tail -1)" >> "$GITHUB_ENV"
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-${{ matrix.mongodb }}
@@ -91,7 +91,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
@@ -120,7 +120,7 @@ jobs:
         working-directory: packages/console
         run: pnpm exec playwright install --with-deps chromium
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
