@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5 # v5: current major
-      - uses: azure/setup-helm@v4 # v4: current major
+      - uses: azure/setup-helm@v5 # v4: current major
 
       # Lint, then render with defaults and with every optional feature switched on,
       # so template branches that are off by default are exercised too.
