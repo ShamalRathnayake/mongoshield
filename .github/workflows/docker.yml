@@ -165,7 +165,7 @@ jobs:
       # 1. Build for the runner's platform and load it into the local Docker daemon,
       #    so it can be run and scanned before anything is published.
       - name: Build (linux/amd64, local)
-        uses: docker/build-push-action@v6 # v6: current major
+        uses: docker/build-push-action@v7 # v6: current major
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -254,7 +254,7 @@ jobs:
       - name: Build and push (linux/amd64, linux/arm64)
         id: push
         if: steps.release.outputs.push == 'true'
-        uses: docker/build-push-action@v6 # v6: current major
+        uses: docker/build-push-action@v7 # v6: current major
         with:
           context: .
           file: ${{ matrix.dockerfile }}
