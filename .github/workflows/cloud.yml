@@ -71,7 +71,7 @@ jobs:
           key: mongodb-${{ runner.os }}-8.0.13
       # Exchanges the GitHub OIDC token for temporary credentials of the test role
       # (exported as AWS_* environment variables for the SDK's default chain).
-      - uses: aws-actions/configure-aws-credentials@v5
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.MONGOSHIELD_CLOUD_AWS_ROLE_ARN }}
           aws-region: ${{ vars.MONGOSHIELD_CLOUD_AWS_REGION }}
