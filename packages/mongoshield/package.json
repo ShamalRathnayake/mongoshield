@@ -129,7 +129,7 @@
     "@aws-sdk/client-kms": "^3.1155.0",
     "@aws-sdk/client-s3": "^3.1155.0",
     "@aws-sdk/lib-storage": "^3.1155.0",
-    "@testcontainers/minio": "^11.14.0",
+    "@testcontainers/minio": "^12.2.1",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^5.0.5",
     "aws-sdk-client-mock": "^4.1.0",
