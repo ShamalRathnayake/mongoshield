@@ -56,7 +56,7 @@ jobs:
           deno-version: ${{ matrix.version }}
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13

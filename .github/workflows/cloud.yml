@@ -65,7 +65,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
@@ -114,7 +114,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
@@ -145,7 +145,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
@@ -182,7 +182,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
@@ -229,7 +229,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
