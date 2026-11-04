@@ -84,6 +84,11 @@ runs:
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
       with:
         node-version: ${{ inputs.node-version }}
+        # setup-node v5 caches the caller's package manager when their package.json has a
+        # "packageManager" field, and fails if that tool (pnpm, yarn) isn't installed yet.
+        # The Action installs mongoshield with npm into its own temp folder, so it needs
+        # no cache from the caller's project: off, or any pnpm/yarn repo would break.
+        package-manager-cache: false
 
     # Inputs are passed as environment variables, never pasted into the script text:
     # `${{ inputs.x }}` inside `run:` would let a crafted value inject shell commands.

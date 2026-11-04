@@ -21,6 +21,7 @@ import {
 import { STATE_KEY } from "../../src/journal/layout.ts";
 import { JOURNAL_FORMAT_VERSION, type JournalState } from "../../src/journal/records.ts";
 import { type MemoryStorage, memoryStorage } from "../../src/storage/memory.ts";
+import { TEST_EXTENSION } from "../helpers/compression.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import { backupContext, readObject } from "./backup-test-utils.ts";
 import {
@@ -178,7 +179,9 @@ describe("journal writer", () => {
     await journal.stop();
 
     const coverage = await loadJournalCoverage(storage);
-    expect(coverage.segments.every((segment) => segment.key.endsWith(".bson.zst.age"))).toBe(true);
+    expect(
+      coverage.segments.every((segment) => segment.key.endsWith(`.bson${TEST_EXTENSION}.age`)),
+    ).toBe(true);
     const to = coverage.state?.recoveryPoint ?? { t: 0, i: 0 };
     const from = coverage.segments[0]?.from ?? to;
     const withoutKey = async () => {

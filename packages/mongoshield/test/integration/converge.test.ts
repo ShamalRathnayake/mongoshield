@@ -17,6 +17,7 @@ import { silentLogger } from "../../src/logger.ts";
 import { type MemoryStorage, memoryStorage } from "../../src/storage/memory.ts";
 import type { BackupOptions, EncryptionOptions, RestoreOptions } from "../../src/types.ts";
 import { flipByte, replaceStoredFile } from "../helpers/backup-fixtures.ts";
+import { TEST_EXTENSION } from "../helpers/compression.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import { backupContext } from "./backup-test-utils.ts";
 import {
@@ -141,7 +142,7 @@ describe("consistency converge", () => {
     const { from, to } = manifest.consistency;
     expect(from).toBeDefined();
     expect(to).toBeDefined();
-    expect(manifest.changes?.key).toBe("_changes/window.bson.zst");
+    expect(manifest.changes?.key).toBe(`_changes/window.bson${TEST_EXTENSION}`);
     expect(manifest.changes?.events).toBeGreaterThanOrEqual(100);
     expect(manifest.totals.bytesStored).toBeGreaterThan(manifest.changes?.size ?? 0);
 
@@ -246,7 +247,7 @@ describe("consistency converge", () => {
         .updateMany({ n: { $lt: 30 } }, { $set: { secret: 1 } });
     });
     const manifest = await backup(storage, source, {}, { recipients: [recipient] });
-    expect(manifest.changes?.key).toBe("_changes/window.bson.zst.age");
+    expect(manifest.changes?.key).toBe(`_changes/window.bson${TEST_EXTENSION}.age`);
 
     await restore(storage, {
       backup: manifest.id,

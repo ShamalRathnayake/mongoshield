@@ -207,8 +207,11 @@ remember_session
 log "Checking and saving the connection"
 URI="mongodb://mongo:27017/?replicaSet=rs0"
 CHECK="$(api POST /api/connections/check "$(jq -n --arg uri "${URI}" '{uri: $uri}')")"
-expect_json "${CHECK}" '.ok == true and .topology == "replicaSet" and .production.suggested == false' \
-  "the connection check should succeed and call a Docker host a test database"
+# A container name such as "mongo" can be any server, so the console suggests treating it
+# as production (only loopback names count as test databases); the smoke test then saves
+# it as a test database itself, the way a user who knows better would.
+expect_json "${CHECK}" '.ok == true and .topology == "replicaSet" and .production.suggested == true' \
+  "the connection check should succeed and suggest production for a container name"
 NAME="$(jq -r .suggestedName <<<"${CHECK}")"
 CONNECTION="$(api POST /api/connections "$(jq -n --arg n "${NAME}" --arg uri "${URI}" '{name: $n, uri: $uri, production: false}')")"
 CONNECTION_ID="$(jq -r .id <<<"${CONNECTION}")"

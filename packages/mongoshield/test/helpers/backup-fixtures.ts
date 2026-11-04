@@ -6,7 +6,7 @@
  *
  *   const manifest = await writeTestBackup(storage, {
  *     namespaces: [{ ns: "app.users", documents: [{ _id: 1, name: "Ada" }] }],
- *     compression: "zstd",
+ *     compression: "gzip",
  *   });
  *
  * `backupDatabaseForTest()` snapshots real collections (options and indexes from
@@ -38,6 +38,7 @@ import {
 } from "../../src/format/metadata.ts";
 import { discoverNamespaces } from "../../src/mongo/index.ts";
 import type { StorageAdapter } from "../../src/storage/types.ts";
+import { TEST_COMPRESSION } from "./compression.ts";
 
 /** One namespace of a test backup. */
 export interface FixtureNamespace {
@@ -62,7 +63,7 @@ export interface FixtureNamespace {
 /** Options for `writeTestBackup`. */
 export interface WriteTestBackupOptions {
   readonly namespaces: readonly FixtureNamespace[];
-  /** Defaults to `"zstd"`. */
+  /** Defaults to `TEST_COMPRESSION` (zstd, or gzip on a Node.js without zstd). */
   readonly compression?: Compression;
   /** Encrypt to these age recipients. */
   readonly recipients?: readonly string[];
@@ -94,7 +95,7 @@ export async function writeTestBackup(
 ): Promise<Manifest> {
   const startedAt = options.startedAt ?? new Date();
   const id = newBackupId(startedAt);
-  const compression = options.compression ?? "zstd";
+  const compression = options.compression ?? TEST_COMPRESSION;
   const encrypted = options.recipients !== undefined || options.passphrase !== undefined;
   const writer: FileWriter = { storage, id, compression, encrypted, options };
 

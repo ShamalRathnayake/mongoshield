@@ -15,6 +15,7 @@ import { runRestore } from "../../src/engine/restore.ts";
 import type { LogFields, Logger } from "../../src/logger.ts";
 import { silentLogger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import type { AnyDocument } from "./converge-test-utils.ts";
 
@@ -84,7 +85,7 @@ describe("backing up and restoring a Queryable Encryption collection", () => {
     const storage = memoryStorage();
     const logger = warningLogger();
     const result = await runBackup(
-      { client: client(), storage, logger, compression: "zstd", encryption: undefined },
+      { client: client(), storage, logger, compression: TEST_COMPRESSION, encryption: undefined },
       { include: [`${database}.*`] },
     );
     expect(result.warnings ?? []).toEqual([]);
@@ -114,7 +115,7 @@ describe("backing up and restoring a Queryable Encryption collection", () => {
     const storage = memoryStorage();
     const logger = warningLogger();
     const result = await runBackup(
-      { client: client(), storage, logger, compression: "zstd", encryption: undefined },
+      { client: client(), storage, logger, compression: TEST_COMPRESSION, encryption: undefined },
       { include: [`${database}.patients`] },
     );
     const warning = `${database}.patients uses Queryable Encryption`;

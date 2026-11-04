@@ -208,8 +208,11 @@ export function fullBackupLabel(days: string): string {
   }
 }
 
-/** A blank form for a new plan. */
-export function emptyPlanForm(): PlanForm {
+/**
+ * A blank form for a new plan. `zstdAvailable` is the server's answer (its Node.js may be
+ * older than 22.15, which has no zstd): then the form starts on gzip.
+ */
+export function emptyPlanForm(zstdAvailable = true): PlanForm {
   return {
     name: "",
     connectionId: "",
@@ -218,7 +221,7 @@ export function emptyPlanForm(): PlanForm {
     picks: [],
     include: "",
     exclude: "",
-    compression: "zstd",
+    compression: zstdAvailable ? "zstd" : "gzip",
     encryptionKind: "recipients",
     recipients: "",
     passphrase: "",
@@ -689,6 +692,21 @@ const COMPRESSION_OPTIONS: readonly SelectOption<PlanInput["compression"]>[] = [
   { value: "none", label: "None" },
 ];
 
+/**
+ * The compression choices this server can run: without zstd (Node.js before 22.15) the
+ * zstd choice stays visible, so an existing plan still shows its value, but disabled.
+ */
+function compressionOptions(
+  zstdAvailable: boolean,
+): readonly SelectOption<PlanInput["compression"]>[] {
+  if (zstdAvailable) return COMPRESSION_OPTIONS;
+  return COMPRESSION_OPTIONS.map((option) =>
+    option.value === "zstd"
+      ? { ...option, label: "zstd (needs Node.js 22.15+ on the server)", disabled: true }
+      : option,
+  );
+}
+
 /** The consistency choices. */
 const CONSISTENCY_OPTIONS: readonly SelectOption<PlanInput["consistency"]>[] = [
   { value: "auto", label: "Auto (best available)" },
@@ -1039,14 +1057,14 @@ interface PlanEditorFormProps {
 function PlanEditorForm(props: PlanEditorFormProps) {
   const client = useApi();
   const toast = useToast();
-  const { hasRole } = useSession();
+  const { hasRole, session } = useSession();
   const { plan } = props;
   const isNew = plan === undefined;
   const canEdit = hasRole("admin");
   const [form, setForm] = useState<PlanForm>(() =>
     plan === undefined
       ? {
-          ...emptyPlanForm(),
+          ...emptyPlanForm(session.zstdAvailable !== false),
           connectionId: props.connections[0]?.id ?? "",
           storageId: props.storage[0]?.id ?? "",
         }
@@ -1576,7 +1594,8 @@ function SecurityStep(
   },
 ) {
   const { form, errors, update } = props;
-  const isAdmin = useSession().hasRole("admin");
+  const { hasRole, session } = useSession();
+  const isAdmin = hasRole("admin");
   // The saved plan already has a console-kept key: its recovery key can be downloaded.
   const storedWithKey =
     props.storedPlan !== undefined && hasRecoveryKey(props.storedPlan)
@@ -1589,7 +1608,7 @@ function SecurityStep(
           <SelectField
             label="Compression"
             value={form.compression}
-            options={COMPRESSION_OPTIONS}
+            options={compressionOptions(session.zstdAvailable !== false)}
             onValue={(value) => update("compression", value)}
           />
           <SelectField

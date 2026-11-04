@@ -6,6 +6,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { isZstdAvailable } from "../compression/index.ts";
 import { isMongoShieldError } from "../errors.ts";
 import { ATLAS_SHARED_TIER_TUNING } from "../mongo/atlas.ts";
 import { loadConfig, validateConfig } from "./load.ts";
@@ -25,8 +26,9 @@ describe("config presets", () => {
   it("fills in the Atlas Free defaults under a config that names the preset", () => {
     const config = validateConfig({ preset: "atlas-free", storage: "./backups" });
     expect(config.preset).toBe("atlas-free");
-    // zstd on the Node.js versions that have it (see zstd-unavailable.test.ts for the rest).
-    expect(config.compression).toBe("zstd");
+    // zstd on the Node.js versions that have it, gzip on 22.12 to 22.14 (see also
+    // zstd-unavailable.test.ts, which simulates the latter on any version).
+    expect(config.compression).toBe(isZstdAvailable() ? "zstd" : "gzip");
     expect(config.backup).toEqual({
       consistency: "auto",
       parallelism: ATLAS_SHARED_TIER_TUNING.parallelism,

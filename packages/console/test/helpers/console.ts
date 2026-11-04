@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hono } from "hono";
 import { MongoClient } from "mongodb";
+import { defaultCompression } from "mongoshield";
 import { inject } from "vitest";
 import { type ConsoleAppOptions, createConsoleApp } from "../../src/server/app.ts";
 import type { AppEnv, ConsoleServices, ConsoleSettings } from "../../src/server/context.ts";
@@ -29,6 +30,13 @@ declare module "vitest" {
     mongoUri: string;
   }
 }
+
+/**
+ * Compression for plans whose backups really run: the library's default, zstd where
+ * this Node.js has it and gzip on 22.12 to 22.14, whose `node:zlib` has no zstd (an
+ * explicit zstd request is refused there, so every such backup would fail).
+ */
+export const TEST_COMPRESSION = defaultCompression();
 
 /** A secret long enough for MONGOSHIELD_SECRET. */
 export const TEST_SECRET = "test-secret-0123456789abcdef0123456789abcdef";

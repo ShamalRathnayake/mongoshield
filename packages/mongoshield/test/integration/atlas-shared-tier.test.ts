@@ -17,6 +17,7 @@ import { runRestore } from "../../src/engine/restore.ts";
 import { isMongoShieldError } from "../../src/errors.ts";
 import type { LogFields, Logger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import { startTestJournal, waitForJournalToCatchUp } from "./journal-test-utils.ts";
 
@@ -84,7 +85,7 @@ describe("backups of an Atlas Free/Flex cluster", () => {
     const logger = recordingLogger();
     const storage = memoryStorage();
     const result = await runBackup(
-      { client: client(), storage, logger, compression: "zstd", encryption: undefined },
+      { client: client(), storage, logger, compression: TEST_COMPRESSION, encryption: undefined },
       own,
     );
     expect(result.manifest.totals.documents).toBe(DOCUMENTS + 1);
@@ -102,7 +103,7 @@ describe("backups of an Atlas Free/Flex cluster", () => {
         client: client(),
         storage,
         logger: recordingLogger(),
-        compression: "zstd",
+        compression: TEST_COMPRESSION,
         encryption: undefined,
       },
       {
@@ -138,7 +139,7 @@ describe("backups of an Atlas Free/Flex cluster", () => {
         client: client(),
         storage,
         logger: recordingLogger(),
-        compression: "zstd",
+        compression: TEST_COMPRESSION,
         encryption: undefined,
       },
       { ...own, includeUsersAndRoles: true },
@@ -156,7 +157,7 @@ describe("restores into an Atlas Free/Flex cluster", () => {
         client: client(),
         storage,
         logger: recordingLogger(),
-        compression: "zstd",
+        compression: TEST_COMPRESSION,
         encryption: undefined,
       },
       own,
@@ -180,7 +181,7 @@ describe("restores into an Atlas Free/Flex cluster", () => {
         client: client(),
         storage,
         logger: recordingLogger(),
-        compression: "zstd",
+        compression: TEST_COMPRESSION,
         encryption: undefined,
       },
       own,
@@ -239,7 +240,7 @@ describe("incremental backups and the journal on an Atlas Free/Flex cluster", ()
     client: watching,
     storage,
     logger,
-    compression: "zstd" as const,
+    compression: TEST_COMPRESSION,
     encryption: undefined,
   });
 

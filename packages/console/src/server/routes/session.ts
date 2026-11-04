@@ -19,6 +19,7 @@
  */
 
 import type { Context, Hono } from "hono";
+import { isZstdAvailable } from "mongoshield";
 import type { SessionInfo } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
 import {
@@ -229,6 +230,8 @@ function sessionInfo(services: ConsoleServices, principal: Principal | undefined
     authMethods,
     // Lets the sign-in and setup pages warn that plain HTTP loses the Secure cookie.
     cookieSecure: services.settings.cookieSecure,
+    // Lets the plan editor default to gzip on a Node.js without zstd (before 22.15).
+    zstdAvailable: isZstdAvailable(),
     ...(setupComplete
       ? {}
       : {

@@ -75,6 +75,12 @@ export interface SessionInfo {
    */
   readonly cookieSecure?: boolean;
   /**
+   * Whether the server's Node.js has zstd (22.15+ / 23.8+). Without it the plan editor
+   * offers gzip instead, and the server refuses zstd plans it could not run. Absent from
+   * older servers, which means available.
+   */
+  readonly zstdAvailable?: boolean;
+  /**
    * Signed in only: where the console runs (Docker, Podman, Kubernetes, …) and whether
    * the name for "the machine the container runs on" resolves there. Pages use it to
    * suggest `host.docker.internal` instead of `localhost`, or to explain how to make

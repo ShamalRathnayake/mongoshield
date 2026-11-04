@@ -38,6 +38,7 @@ import { storedDocuments } from "../../src/interop/test-fixtures.ts";
 import { silentLogger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
 import type { StorageAdapter } from "../../src/storage/types.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import { tool, toolsMissing } from "../helpers/mongo-tools.ts";
 
@@ -339,7 +340,7 @@ describe.skipIf(toolsMissing)("time-series collections with mongodump and mongor
           client: client(),
           storage,
           logger: silentLogger,
-          compression: "zstd",
+          compression: TEST_COMPRESSION,
           encryption: undefined,
         },
         { include: [`${source}.*`] },

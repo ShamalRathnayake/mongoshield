@@ -27,6 +27,7 @@ import { MongoShield } from "../../src/shield.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
 import type { StorageAdapter } from "../../src/storage/types.ts";
 import type { KmsKeyRef } from "../../src/types.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 import { mongoUri, uniqueDb } from "../helpers/mongo.ts";
 import type { StorageConformanceFixture } from "../helpers/storage-conformance.ts";
 
@@ -173,7 +174,7 @@ export interface RoundTripOptions {
 
 /**
  * Registers an end-to-end test: back up a seeded database through `makeStorage()`
- * with zstd and age encryption, verify fast and deep, list it, restore it under a
+ * with `TEST_COMPRESSION` (zstd, or gzip on a Node.js without it) and age encryption, verify fast and deep, list it, restore it under a
  * new name and compare every document. `makeStorage` is called once, inside
  * `beforeAll`, and must point at a unique, empty prefix.
  */
@@ -208,7 +209,7 @@ export function describeEncryptedRoundTrip(
     }, CLOUD_TEST_TIMEOUT_MS);
 
     it(
-      "backs up with zstd and age, verifies deeply, and restores every document byte for byte",
+      "backs up compressed and age-encrypted, verifies deeply, and restores every document byte for byte",
       async () => {
         if (!client || !storage) throw new Error("beforeAll did not finish");
         const { identity, recipient } = generateIdentity();
@@ -216,7 +217,7 @@ export function describeEncryptedRoundTrip(
         const shield = new MongoShield({
           source: { client },
           storage,
-          compression: "zstd",
+          compression: TEST_COMPRESSION,
           encryption: { recipients: [recipient] },
         });
 

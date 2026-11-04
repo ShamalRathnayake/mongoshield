@@ -15,7 +15,8 @@
 
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+// Types only: the module is loaded lazily in `beforeAll` (see ../helpers/docker.ts).
+import type { StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../../src/errors.ts";
 import { sftpStorage } from "../../src/storage/sftp.ts";
@@ -35,6 +36,7 @@ const ssh2: { utils: { generateKeyPairSync(type: "ed25519"): KeyPair } } = creat
   import.meta.url,
 )("ssh2");
 
+// False without Docker, and below Node.js 22.22, which Testcontainers 12 needs.
 const dockerAvailable = await isDockerAvailable();
 
 describe.skipIf(!dockerAvailable)("sftpStorage against OpenSSH", () => {
@@ -45,6 +47,7 @@ describe.skipIf(!dockerAvailable)("sftpStorage against OpenSSH", () => {
   let hostPublicKeys: string[];
 
   beforeAll(async () => {
+    const { GenericContainer, Wait } = await import("testcontainers");
     container = await new GenericContainer(SFTP_IMAGE)
       .withExposedPorts(22)
       // user:password:uid:gid:dirs. No password; "upload" is the writable

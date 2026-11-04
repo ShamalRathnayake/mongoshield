@@ -7,6 +7,10 @@
  * the same way. Without the guard, the throw below would be an uncaught
  * exception (Vitest fails the run on those); with it, the pipeline must reject
  * with MS_INTEGRITY_FAILED like a real Node.js zstd error.
+ *
+ * Nothing here runs the real zstd codec, so the test also runs on Node.js 22.12 to
+ * 22.14, whose `node:zlib` has no zstd at all: the mock then supplies a stand-in
+ * `createZstdCompress` too, because `isZstdAvailable()` checks for both factories.
  */
 
 import { Readable, type TransformCallback, Writable } from "node:stream";
@@ -67,11 +71,39 @@ vi.mock("node:zlib", async (importOriginal) => {
     }
   }
 
-  return { ...original, createZstdDecompress: () => new DenoLikeZstdDecompress() };
+  /** Stand-in for Node versions without zstd; these tests never compress. */
+  function missingZstdCompress(): never {
+    throw new Error("createZstdCompress is not used by these tests");
+  }
+
+  return {
+    ...original,
+    createZstdCompress: original.createZstdCompress ?? missingZstdCompress,
+    createZstdDecompress: () => new DenoLikeZstdDecompress(),
+  };
 });
 
-const { zstdCompressSync } = await import("node:zlib");
 const { createDecompressor } = await import("./index.ts");
+
+/** zstd frames start with the magic number 0xFD2FB528, stored little-endian. */
+const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
+
+/**
+ * A minimal valid zstd frame, built by hand so no zstd codec is needed: single
+ * segment with a 1-byte content size (descriptor 0x20), then one last raw block
+ * (3-byte header: bit 0 last block, bits 1-2 type 0 = raw, bits 3-23 size) holding
+ * "hello zstd". The frame guard in ./index.ts walks it like any real frame.
+ */
+const HELLO_FRAME = Buffer.from([
+  ...ZSTD_MAGIC,
+  0x20, // Single_Segment_flag set, so no Window_Descriptor and a 1-byte FCS
+  10, // Frame_Content_Size: "hello zstd" is 10 bytes
+  // Block header, little-endian: 1 (last block) | 0 << 1 (raw) | 10 << 3 (size) = 0x51.
+  0x51,
+  0x00,
+  0x00,
+  ...Buffer.from("hello zstd"),
+]);
 
 /** Runs `input` through a zstd decompressor and returns the output bytes. */
 async function decompress(input: Buffer): Promise<Buffer> {
@@ -90,8 +122,8 @@ async function decompress(input: Buffer): Promise<Buffer> {
 }
 
 describe("zstd codec errors thrown outside the stream (Deno)", () => {
-  // Real zstd bytes, so the frame guard in front of the codec accepts them.
-  const frame = zstdCompressSync(Buffer.from("hello zstd"));
+  // Valid zstd framing, so the frame guard in front of the codec accepts it.
+  const frame = HELLO_FRAME;
 
   it("passes data through untouched when the codec does not throw", async () => {
     codec.mode = "ok";

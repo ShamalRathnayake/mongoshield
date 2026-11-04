@@ -19,6 +19,7 @@ import type { Manifest } from "../../src/format/manifest.ts";
 import { exportBackup } from "../../src/interop/export.ts";
 import { silentLogger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
+import { TEST_EXTENSION } from "../helpers/compression.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import { backupContext, decodeDataFile, entryFor, sourceDocuments } from "./backup-test-utils.ts";
 
@@ -102,7 +103,9 @@ describe("split collections", () => {
     const orders = entryFor(manifest, `${database}.orders`);
     expect(orders.files.length).toBeGreaterThan(3);
     orders.files.forEach((file, index) => {
-      expect(file.key).toBe(`${database}/orders.${String(index).padStart(3, "0")}.bson.zst`);
+      expect(file.key).toBe(
+        `${database}/orders.${String(index).padStart(3, "0")}.bson${TEST_EXTENSION}`,
+      );
       expect(file.range).toBeDefined();
     });
     expect(orders.files[0]?.range?.from).toEqual({ $minKey: 1 });
@@ -116,11 +119,13 @@ describe("split collections", () => {
 
   it("keeps small collections and time series in one unsplit, mongodump-named file", () => {
     const small = entryFor(manifest, `${database}.small`);
-    expect(small.files.map((file) => file.key)).toEqual([`${database}/small.bson.zst`]);
+    expect(small.files.map((file) => file.key)).toEqual([
+      `${database}/small.bson${TEST_EXTENSION}`,
+    ]);
     expect(small.files[0]?.range).toBeUndefined();
     const metrics = entryFor(manifest, `${database}.metrics`);
     expect(metrics.files).toHaveLength(1);
-    expect(metrics.files[0]?.key).toBe(`${database}/metrics.bson.zst`);
+    expect(metrics.files[0]?.key).toBe(`${database}/metrics.bson${TEST_EXTENSION}`);
   });
 
   it("stores every document exactly once across the parts, byte for byte", async () => {

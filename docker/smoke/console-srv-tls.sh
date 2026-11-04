@@ -205,8 +205,8 @@ log "1-2. SRV + TXT + TLS with the mounted CA (raw password with @ : /)"
 RESULT="$(check "${SRV_URI}")"
 expect_json "${RESULT}" '.ok == true and .topology == "replicaSet"' \
   "the SRV connection string should connect to the replica set"
-# The name comes from the cluster's DNS name. (`.test` is a reserved testing domain, so the
-# console proposes "not production" here; for Atlas and other real domains it proposes production.)
+# The name comes from the cluster's DNS name. (Only loopback names count as test databases,
+# so the console proposes production here, as it does for Atlas and every other remote host.)
 expect_json "${RESULT}" '.suggestedName == "cluster0"' "the name should come from the SRV host"
 printf '    ok: %s\n' "$(jq -c '{ok, topology, serverVersion, suggestedName}' <<<"${RESULT}")"
 

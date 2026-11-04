@@ -1,6 +1,8 @@
-import { zstdCompressSync } from "node:zlib";
+// A namespace import: `zstdCompressSync` is missing (undefined) before Node 22.15 / 23.8.
+import * as zlib from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../errors.ts";
+import { isZstdAvailable } from "./index.ts";
 import { ZstdFrameWalker } from "./zstd-frames.ts";
 
 const MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
@@ -49,11 +51,25 @@ function expectCorrupt(action: () => void): void {
 }
 
 describe("ZstdFrameWalker", () => {
-  it("reports where each frame ends, however the input is chunked", () => {
-    const first = zstdCompressSync(Buffer.from("hello"));
-    const second = zstdCompressSync(Buffer.alloc(10_000, 7));
-    const data = Buffer.concat([first, HAND_BUILT_FRAME, second]);
-    const expected = [first.length, first.length + HAND_BUILT_FRAME.length, data.length];
+  // Needs Node's zstd compressor to produce real frames; the hand-built test below
+  // covers the same chunking on a Node.js without zstd.
+  it.skipIf(!isZstdAvailable())(
+    "reports where each frame ends, however the input is chunked",
+    () => {
+      const first = zlib.zstdCompressSync(Buffer.from("hello"));
+      const second = zlib.zstdCompressSync(Buffer.alloc(10_000, 7));
+      const data = Buffer.concat([first, HAND_BUILT_FRAME, second]);
+      const expected = [first.length, first.length + HAND_BUILT_FRAME.length, data.length];
+      for (const pieceSize of [1, 2, 3, 7, 64, data.length]) {
+        expect(walkInPieces(data, pieceSize)).toEqual(expected);
+      }
+    },
+  );
+
+  it("reports where each hand-built frame ends, however the input is chunked", () => {
+    const data = Buffer.concat([HAND_BUILT_FRAME, HAND_BUILT_FRAME, HAND_BUILT_FRAME]);
+    const size = HAND_BUILT_FRAME.length;
+    const expected = [size, 2 * size, 3 * size];
     for (const pieceSize of [1, 2, 3, 7, 64, data.length]) {
       expect(walkInPieces(data, pieceSize)).toEqual(expected);
     }

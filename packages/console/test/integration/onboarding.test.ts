@@ -17,6 +17,7 @@ import {
   seed,
   setupAdmin,
   startConsole,
+  TEST_COMPRESSION,
   type TestClient,
   type TestConsole,
   uniqueDb,
@@ -205,7 +206,8 @@ describe("Back up now", () => {
       name: "Back up local test",
       origin: "quick",
       include: [`${db}.*`],
-      compression: "zstd",
+      // The library's default: zstd, or gzip on a Node.js without zstd (22.12 to 22.14).
+      compression: TEST_COMPRESSION,
       consistency: "auto",
       verify: "fast",
       encryption: { kind: "managed", recoveryKeySaved: false },

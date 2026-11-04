@@ -4,6 +4,7 @@
  * security headers and body handling.
  */
 
+import { isZstdAvailable } from "mongoshield";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   removeDataDir,
@@ -43,6 +44,8 @@ describe("setup token", () => {
       cookieSecure: false,
       // Tests open consoles without a setup window: the token is required.
       setup: { tokenRequired: true },
+      // Whether this Node.js has zstd, which decides the plan editor's default.
+      zstdAvailable: isZstdAvailable(),
     });
 
     const setup = await client.request("POST", "/api/setup", {

@@ -84,10 +84,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       # `pnpm coverage` minus its build step, which already ran above.
+      # The 22.12.0 cell skips the operator: undici 8, which it and @kubernetes/client-node need, requires Node.js 22.19.
       - name: Test with coverage
+        env:
+          MATRIX_NODE: ${{ matrix.node }}
         run: |
           node --version
-          pnpm --filter "./packages/*" coverage
+          if [ "$MATRIX_NODE" = "22.12.0" ]; then
+            pnpm --filter mongoshield --filter @mongoshield/console coverage
+          else
+            pnpm --filter "./packages/*" coverage
+          fi
       # Smoke test of the benchmark harness (bench/compare.ts) on a tiny dataset: it
       # only proves the harness still runs end to end; the numbers mean nothing here.
       # Once per workflow run is enough, so only one cell of the matrix runs it.
