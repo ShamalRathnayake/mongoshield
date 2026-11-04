@@ -1,0 +1,17 @@
+{
+  "name": "mongoshield-flat-folder",
+  "private": true,
+  "type": "module",
+  "description": "Example community storage adapter for MongoShield: flatdir:// keeps every object as one file in one folder.",
+  "exports": "./index.mjs",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "mongoshield": "^2.1.0"
+  },
+  "devDependencies": {
+    "mongoshield": "^2.1.0",
+    "vitest": "^5.0.0"
+  }
+}

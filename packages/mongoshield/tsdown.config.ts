@@ -12,6 +12,8 @@ export default defineConfig({
     "storage/sftp": "src/storage/sftp.ts",
     kms: "src/crypto/kms/index.ts",
     testing: "src/testing/index.ts",
+    // The storage adapter contract test kit, for community adapters.
+    "testing/storage": "src/testing/storage-conformance.ts",
   },
   format: "esm",
   platform: "node",
