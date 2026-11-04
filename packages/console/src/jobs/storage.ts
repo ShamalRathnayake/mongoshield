@@ -17,6 +17,10 @@
  *   <path> or file:///<path>      a directory INSIDE the data directory (see below)
  *   s3://bucket/prefix?region=&endpoint=&forcePathStyle=
  *       credentials AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+ *   b2://bucket/prefix?region=us-west-004       Backblaze B2 (the library's S3 preset)
+ *       credentials AWS_ACCESS_KEY_ID (the application key's keyID), AWS_SECRET_ACCESS_KEY
+ *   r2://accountId/bucket/prefix?jurisdiction=  Cloudflare R2 (the library's S3 preset)
+ *       credentials AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (an R2 API token's keys)
  *   gs://bucket/prefix?projectId=
  *       credentials GOOGLE_CREDENTIALS_JSON (a service account key, as JSON)
  *   az://account/container/prefix?endpoint=
@@ -68,6 +72,8 @@ import type { StorageRecord } from "../state/types.ts";
 /** Credential names accepted per scheme. Anything else is refused (catches typos). */
 export const CREDENTIAL_NAMES: Readonly<Record<string, readonly string[]>> = {
   s3: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
+  b2: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+  r2: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
   gs: ["GOOGLE_CREDENTIALS_JSON"],
   az: ["AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_SAS_TOKEN"],
   sftp: ["SFTP_PRIVATE_KEY", "SFTP_PASSPHRASE"],
@@ -86,7 +92,7 @@ export function storageSchemeOf(url: string): StorageScheme {
   const known = SUPPORTED_STORAGE_SCHEMES.find((candidate) => candidate === scheme);
   if (known !== undefined) return known;
   throw configError(`Unsupported storage URL scheme "${scheme}://".`, {
-    hint: "Use s3://, gs://, az://, sftp://, memory:// or a directory inside the data volume.",
+    hint: "Use s3://, b2://, r2://, gs://, az://, sftp://, memory:// or a directory inside the data volume.",
   });
 }
 
@@ -288,6 +294,9 @@ async function createAdapter(
       return resolveStorage(url);
     case "s3":
       return s3Adapter(url, credentials);
+    case "b2":
+    case "r2":
+      return s3PresetAdapter(scheme, url, credentials);
     case "gs":
       return gcsAdapter(url, credentials);
     case "az":
@@ -369,6 +378,44 @@ async function s3Adapter(
           },
         }
       : {}),
+  });
+}
+
+/**
+ * A `b2://` or `r2://` location with stored keys: the library's B2 / R2 preset (the
+ * right endpoint, region and checksum settings) with those keys. The URL is parsed the
+ * same way as the library's resolver does.
+ */
+async function s3PresetAdapter(
+  scheme: "b2" | "r2",
+  url: string,
+  credentials: Readonly<Record<string, string>>,
+): Promise<StorageAdapter> {
+  const parsed = parseUrl(url);
+  const { b2Storage, r2Storage } = await import("mongoshield/storage/s3");
+  const accessKeyId = credentials.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = credentials.AWS_SECRET_ACCESS_KEY;
+  const keys =
+    accessKeyId && secretAccessKey ? { credentials: { accessKeyId, secretAccessKey } } : {};
+  const segments = decodeURIComponent(parsed.pathname)
+    .split("/")
+    .filter((segment) => segment !== "");
+  if (scheme === "b2") {
+    return b2Storage({
+      bucket: parsed.hostname,
+      prefix: segments.join("/"),
+      region: parsed.searchParams.get("region") ?? "",
+      ...keys,
+    });
+  }
+  const [bucket = "", ...prefix] = segments;
+  const jurisdiction = parsed.searchParams.get("jurisdiction");
+  return r2Storage({
+    accountId: parsed.hostname,
+    bucket,
+    prefix: prefix.join("/"),
+    ...(jurisdiction === "eu" || jurisdiction === "fedramp" ? { jurisdiction } : {}),
+    ...keys,
   });
 }
 

@@ -15,7 +15,8 @@ restore round trip, and KMS round trips against real services:
 | AWS S3 | conformance + encrypted round trip |
 | AWS S3 with Object Lock | conformance with retention + round trip with `retainDays: 1` |
 | AWS KMS | wrap/unwrap, tampered ciphertext refused, KMS backup restored via KMS and via recovery key |
-| Cloudflare R2 | conformance + round trip (S3 adapter with R2's endpoint) |
+| Cloudflare R2 | conformance + round trip (the `r2Storage` preset) |
+| Backblaze B2 | conformance + round trip (the `b2Storage` preset) |
 | Google Cloud Storage | conformance + round trip |
 | GCS with object retention | conformance with retention + round trip with `retainDays: 1` |
 | Google Cloud KMS | as AWS KMS |
@@ -77,13 +78,13 @@ pnpm --filter mongoshield test:cloud test/cloud/aws.test.ts  # one provider
 
 Credentials are found by each SDK's normal chain, so locally you use your own login:
 `aws sso login` / a profile, `gcloud auth application-default login`, `az login`.
-R2 and SFTP take their keys from the variables below.
+R2, B2 and SFTP take their keys from the variables below.
 
 ## Names
 
 Variables are not secret (bucket names, key ids, URLs); in GitHub they are
 **repository variables** (Settings → Secrets and variables → Actions → *Variables*).
-Only R2 and SFTP need **secrets**. Locally, everything is an environment variable
+Only R2, B2 and SFTP need **secrets**. Locally, everything is an environment variable
 with the same name.
 
 The jobs in `cloud.yml` decide whether to run with a job-level `if:` on a variable.
@@ -102,6 +103,10 @@ must be **repository** variables, not `cloud-tests` environment variables.
 | `MONGOSHIELD_TEST_R2_BUCKET` | variable | R2 | bucket name; enables the R2 job |
 | `MONGOSHIELD_TEST_R2_ACCESS_KEY_ID` | **secret** | R2 | R2 API token access key id |
 | `MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY` | **secret** | R2 | R2 API token secret |
+| `MONGOSHIELD_TEST_B2_BUCKET` | variable | B2 | bucket name; enables the B2 job |
+| `MONGOSHIELD_TEST_B2_REGION` | variable | B2 | the bucket's region, e.g. `us-west-004` |
+| `MONGOSHIELD_TEST_B2_KEY_ID` | **secret** | B2 | application key keyID |
+| `MONGOSHIELD_TEST_B2_APPLICATION_KEY` | **secret** | B2 | application key applicationKey |
 | `MONGOSHIELD_CLOUD_GCP_WORKLOAD_IDENTITY_PROVIDER` | variable (CI only) | GCP job | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github`; enables the GCP job |
 | `MONGOSHIELD_CLOUD_GCP_SERVICE_ACCOUNT` | variable (CI only) | GCP job | `mongoshield-cloud-tests@PROJECT.iam.gserviceaccount.com` |
 | `MONGOSHIELD_TEST_GCS_BUCKET` | variable | GCS | plain bucket |
@@ -323,10 +328,25 @@ delegates to IAM, so the role policy below is enough.
    page) and `MONGOSHIELD_TEST_R2_BUCKET`; secrets
    `MONGOSHIELD_TEST_R2_ACCESS_KEY_ID` and `MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY`.
 
-The tests use the S3 adapter exactly as the docs recommend for R2:
+The tests use the `r2Storage` preset that `r2://` URLs use:
 `endpoint: https://<account>.r2.cloudflarestorage.com`, `region: "auto"`,
 `requestChecksumCalculation: "WHEN_REQUIRED"`. R2's bucket locks are not the S3
 Object Lock API, so the R2 target checks that retained writes are refused.
+
+## Backblaze B2
+
+1. Buckets → *Create a Bucket* → private, `mongoshield-cloud-tests`, *Object Lock*
+   disabled. Note the region from its endpoint `s3.<region>.backblazeb2.com`.
+2. Bucket → *Lifecycle Settings* → custom: prefix `mongoshield-ci/`, hide after 1
+   day, delete 1 day after hiding.
+3. Application Keys → *Add a New Application Key*: allow access to the test bucket
+   only, **Read and Write**. Copy the keyID and the applicationKey (shown once).
+4. Variables `MONGOSHIELD_TEST_B2_BUCKET` and `MONGOSHIELD_TEST_B2_REGION`; secrets
+   `MONGOSHIELD_TEST_B2_KEY_ID` and `MONGOSHIELD_TEST_B2_APPLICATION_KEY`.
+
+The tests use the `b2Storage` preset that `b2://` URLs use (path-style requests,
+`WHEN_REQUIRED` checksums). Conditional writes go through the adapter's one-time
+probe, so this target is where a change in B2's `If-None-Match` support shows.
 
 ## Google Cloud: GCS, object retention and Cloud KMS
 

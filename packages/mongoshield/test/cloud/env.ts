@@ -13,7 +13,7 @@
  * DefaultAzureCredential), which is what lets CI use short-lived OIDC credentials
  * instead of stored keys. A target whose variables are set but whose credentials
  * are missing therefore fails loudly instead of skipping: that is a broken setup,
- * not an opted-out one. The only exceptions are R2 and SFTP, whose credentials
+ * not an opted-out one. The only exceptions are R2, B2 and SFTP, whose credentials
  * cannot come from a default chain and so are listed as required variables.
  *
  * This file never prints a variable's *value*, only names. See
@@ -94,6 +94,12 @@ export const CLOUD_TARGET_VARIABLES = {
     "MONGOSHIELD_TEST_R2_BUCKET",
     "MONGOSHIELD_TEST_R2_ACCESS_KEY_ID",
     "MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY",
+  ],
+  b2: [
+    "MONGOSHIELD_TEST_B2_BUCKET",
+    "MONGOSHIELD_TEST_B2_REGION",
+    "MONGOSHIELD_TEST_B2_KEY_ID",
+    "MONGOSHIELD_TEST_B2_APPLICATION_KEY",
   ],
   gcs: ["MONGOSHIELD_TEST_GCS_BUCKET"],
   gcsRetention: ["MONGOSHIELD_TEST_GCS_LOCK_BUCKET"],
