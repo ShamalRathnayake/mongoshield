@@ -56,9 +56,12 @@ jobs:
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      # The build tools (tsdown loading its TypeScript config, the .ts helper scripts)
+      # need a Node.js that runs TypeScript files. 22.12.0 cannot, and it only has to run
+      # the tests: that cell builds on 24 and switches to 22.12.0 just before testing.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ matrix.node == '22.12.0' && '24' || matrix.node }}
       - run: pnpm install --frozen-lockfile
       # The official age CLI and zstd let the integration tests prove that backups can be
       # decrypted and decompressed with standard tools, without MongoShield.
@@ -73,7 +76,18 @@ jobs:
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-${{ matrix.mongodb }}
-      - run: pnpm coverage
+      - name: Build the library
+        run: pnpm build:lib
+      - name: Switch to Node.js ${{ matrix.node }} for the tests
+        if: matrix.node == '22.12.0'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      # `pnpm coverage` minus its build step, which already ran above.
+      - name: Test with coverage
+        run: |
+          node --version
+          pnpm --filter "./packages/*" coverage
       # Smoke test of the benchmark harness (bench/compare.ts) on a tiny dataset: it
       # only proves the harness still runs end to end; the numbers mean nothing here.
       # Once per workflow run is enough, so only one cell of the matrix runs it.
@@ -88,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # mongodb-memory-server downloads this server version for the replica sets; the
-      # sharded cluster uses the official mongo:8.0 image (Docker is on ubuntu runners).
+      # sharded cluster uses the official mongo:8.0.13 image (Docker is on ubuntu runners).
       MONGOMS_VERSION: "8.0.13"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -193,7 +207,8 @@ jobs:
       - name: Start MongoDB and S3Mock
         run: |
           set -euo pipefail
-          docker run -d --name mongo -p 127.0.0.1:27017:27017 mongo:8.0
+          # A fixed server version, the 8.0.13 the rest of CI uses.
+          docker run -d --name mongo -p 127.0.0.1:27017:27017 mongo:8.0.13
           docker run -d --name s3 -p 127.0.0.1:9090:9090 adobe/s3mock:5.2
           for _ in $(seq 1 60); do
             if docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' > /dev/null 2>&1 \
@@ -202,7 +217,11 @@ jobs:
             fi
             sleep 1
           done
-          docker exec mongo mongosh --quiet --eval 'db.getSiblingDB("shop").orders.insertMany([{ _id: 1 }, { _id: 2 }])'
+          if ! docker exec mongo mongosh --quiet --eval 'db.getSiblingDB("shop").orders.insertMany([{ _id: 1 }, { _id: 2 }])'; then
+            # MongoDB's own log says why it is not running.
+            docker logs --tail 40 mongo
+            exit 1
+          fi
           aws --endpoint-url http://127.0.0.1:9090 s3 mb s3://action-test
       # Storage only in the config file: no `storage` input, no MONGOSHIELD_STORAGE.
       - name: Write the config file

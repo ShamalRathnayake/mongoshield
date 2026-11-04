@@ -209,7 +209,12 @@ describe("encodeNameSegment", () => {
   it("can be reversed by decoding the percent escapes, for names short enough to stay whole", () => {
     fc.assert(
       fc.property(fc.string({ unit: "grapheme", minLength: 1, maxLength: 20 }), (name) => {
-        expect(decodeURIComponent(encodeNameSegment(name))).toBe(name);
+        const encoded = encodeNameSegment(name);
+        // A grapheme can be several UTF-8 bytes and every byte becomes "%XX", so even 20
+        // graphemes can pass the 180-character limit. Those names are cut and given a
+        // hash suffix instead (next test), which is not meant to be reversible: skip them.
+        fc.pre(encoded.length < 180);
+        expect(decodeURIComponent(encoded)).toBe(name);
       }),
       { numRuns: 500 },
     );

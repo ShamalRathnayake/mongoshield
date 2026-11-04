@@ -66,7 +66,7 @@ export const backupCommand: CommandSpec = {
     compression: {
       type: "string",
       choices: ["zstd", "gzip", "none"],
-      defaultText: "zstd",
+      defaultText: "zstd (gzip on Node.js without zstd)",
       description: "Compression algorithm",
     },
     recipient: {

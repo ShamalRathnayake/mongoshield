@@ -43,6 +43,9 @@ BASE="http://127.0.0.1:${PORT}"
 RUN_ID="smoke$$"
 NETWORK="ms-${RUN_ID}"
 MONGO="ms-${RUN_ID}-mongo"
+# A fixed server version, the same 8.0.13 the rest of CI uses: the floating mongo:8.0 tag
+# moved on 26 Oct 2026, and a new image must not change what CI tests overnight.
+MONGO_IMAGE="${MONGO_IMAGE:-mongo:8.0.13}"
 CONSOLE="ms-${RUN_ID}-console"
 VOLUME="ms-${RUN_ID}-data"
 VOLUME_EXPLICIT="ms-${RUN_ID}-explicit"
@@ -61,6 +64,12 @@ fail() {
 }
 
 cleanup() {
+  local status=$?
+  # On failure, MongoDB's own log says why it stopped (the error otherwise only says
+  # "container is not running").
+  if [[ "${status}" -ne 0 ]]; then
+    docker logs --tail 40 "${MONGO}" 2>&1 | sed 's/^/  mongo| /' >&2 || true
+  fi
   docker rm -f "${CONSOLE}" "${CONSOLE}-explicit" "${MONGO}" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUME}" "${VOLUME_EXPLICIT}" >/dev/null 2>&1 || true
   docker network rm "${NETWORK}" >/dev/null 2>&1 || true
@@ -149,7 +158,7 @@ secret_key_fingerprint() {
 log "Starting MongoDB 8 (single-node replica set) on network ${NETWORK}"
 docker network create "${NETWORK}" >/dev/null
 docker run -d --name "${MONGO}" --network "${NETWORK}" --network-alias mongo \
-  mongo:8.0 --replSet rs0 --bind_ip_all >/dev/null
+  "${MONGO_IMAGE}" --replSet rs0 --bind_ip_all >/dev/null
 for _ in $(seq 1 60); do
   docker exec "${MONGO}" mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1 && break
   sleep 1

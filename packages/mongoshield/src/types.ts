@@ -46,7 +46,7 @@ export interface DecryptionOptions {
 export interface MongoShieldOptions {
   readonly source?: SourceOptions;
   readonly storage: StorageAdapter;
-  /** Defaults to `"zstd"`. */
+  /** Defaults to `"zstd"`, or `"gzip"` on a Node.js without zstd (before 22.15 / 23.8). */
   readonly compression?: Compression;
   readonly encryption?: EncryptionOptions;
   readonly logger?: Logger;

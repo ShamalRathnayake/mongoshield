@@ -48,6 +48,9 @@ MONGO_IP="${SUBNET_PREFIX}.10"
 CONSOLE_IP="${SUBNET_PREFIX}.20"
 DNS="ms-${RUN_ID}-dns"
 MONGO="ms-${RUN_ID}-mongo"
+# A fixed server version, the same 8.0.13 the rest of CI uses: the floating mongo:8.0 tag
+# moved on 26 Oct 2026, and a new image must not change what CI tests overnight.
+MONGO_IMAGE="${MONGO_IMAGE:-mongo:8.0.13}"
 CONSOLE="ms-${RUN_ID}-console"
 VOLUME="ms-${RUN_ID}-data"
 # Pinned: a moving tag could change the resolver's behaviour under the test.
@@ -67,6 +70,11 @@ fail() {
   exit 1
 }
 cleanup() {
+  local status=$?
+  # On failure, MongoDB's own log says why it stopped.
+  if [[ "${status}" -ne 0 ]]; then
+    docker logs --tail 40 "${MONGO}" 2>&1 | sed 's/^/  mongo| /' >&2 || true
+  fi
   docker rm -f "${CONSOLE}" "${MONGO}" "${DNS}" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUME}" >/dev/null 2>&1 || true
   docker network rm "${NETWORK}" >/dev/null 2>&1 || true
@@ -151,7 +159,7 @@ log "Starting mongod 8 with requireTLS, replica set rs0 and a user in admin"
 # A replica set with access control needs a key file for its members (one member here);
 # it is generated inside the container with the strict mode mongod insists on.
 docker run -d --name "${MONGO}" --network "${NETWORK}" --ip "${MONGO_IP}" \
-  --hostname mongo-tls.example.test -v "${WORK}/certs:/certs:ro,z" --entrypoint bash mongo:8.0 -c '
+  --hostname mongo-tls.example.test -v "${WORK}/certs:/certs:ro,z" --entrypoint bash "${MONGO_IMAGE}" -c '
     head -c 756 /dev/urandom | base64 > /tmp/keyfile && chmod 400 /tmp/keyfile
     exec mongod --replSet rs0 --bind_ip_all --keyFile /tmp/keyfile \
       --tlsMode requireTLS --tlsCertificateKeyFile /certs/server.pem \

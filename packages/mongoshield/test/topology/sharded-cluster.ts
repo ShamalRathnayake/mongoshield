@@ -24,7 +24,9 @@ import {
 } from "testcontainers";
 
 /** The official image; MONGO_IMAGE overrides it (e.g. `mongo:7.0`). */
-export const MONGO_IMAGE = process.env.MONGO_IMAGE ?? "mongo:8.0";
+// A fixed version, the 8.0.13 the rest of CI tests: the floating mongo:8.0 tag moved on
+// 26 Oct 2026, and a new image must not change what these tests run against overnight.
+export const MONGO_IMAGE = process.env.MONGO_IMAGE ?? "mongo:8.0.13";
 
 /** Every member listens on the default port inside its own container. */
 const PORT = 27017;
