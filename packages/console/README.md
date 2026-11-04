@@ -66,7 +66,10 @@ Everything is set with environment variables, and none is required:
 | `MONGOSHIELD_ADMIN_USERNAME` (or `_EMAIL`), `MONGOSHIELD_ADMIN_PASSWORD` / `_PASSWORD_FILE` | Create the first admin at start (headless installs). Ignored once any user exists. |
 | `MONGOSHIELD_DEFAULT_STORAGE` | `false`: do not create the "Local backups" location on a fresh volume. |
 | `PORT` / `HOST` | Listen address (default `8080` / `::`, which accepts IPv6 and IPv4; `0.0.0.0` where IPv6 is unavailable). |
-| `MONGOSHIELD_PUBLIC_URL` | The console's public URL, e.g. `https://backups.example.com`. |
+| `MONGOSHIELD_PUBLIC_URL` | The console's public URL, e.g. `https://backups.example.com`. Its host is allowed by the Host check. |
+| `MONGOSHIELD_ALLOWED_HOSTS` | More host names the console answers to, comma-separated (`*.example.com` for subdomains, `*` to turn the check off). Public names not listed get `421 CONSOLE_UNKNOWN_HOST`; IPs, `localhost` and private names (`.local`, `.internal`, …) always work. |
+| `MONGOSHIELD_TRUSTED_PROXIES` | IPs or CIDR ranges of reverse proxies whose `X-Forwarded-*` headers are believed. |
+| `MONGOSHIELD_ALLOW_UNSAFE_TARGETS` | `true` allows webhooks and storage endpoints on cloud metadata and link-local addresses. |
 | `MONGOSHIELD_COOKIE_SECURE` | `false` allows sign-in over plain HTTP from other machines (evaluation only; on localhost it works without). |
 | `MONGOSHIELD_OIDC_ISSUER`, `MONGOSHIELD_OIDC_CLIENT_ID`, … | OIDC single sign-on. |
 | `MONGOSHIELD_TRUST_PROXY_SECRET` | Single sign-on through a trusted reverse proxy. |

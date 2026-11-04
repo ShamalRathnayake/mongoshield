@@ -309,6 +309,11 @@ Each backup plan chooses how its backups are encrypted:
 - Put an HTTPS reverse proxy (Caddy, nginx, Traefik, an ingress) in front and set
   `MONGOSHIELD_PUBLIC_URL=https://backups.example.com`. Sign-in cookies are `Secure`, so plain
   `http://` only works on `localhost`.
+- The console only answers to host names it knows: IP addresses, `localhost`, private names
+  (`.local`, `.internal`, `.lan`, …) and the host of `MONGOSHIELD_PUBLIC_URL`. Any other name
+  gets `421 CONSOLE_UNKNOWN_HOST` (this stops DNS rebinding); list extra names in
+  `MONGOSHIELD_ALLOWED_HOSTS`. Behind a proxy, set `MONGOSHIELD_TRUSTED_PROXIES` so its
+  `X-Forwarded-*` headers are believed.
 - Generating key pairs in the browser also needs HTTPS (or `localhost`).
 - A Compose file with MongoDB and the console: [`examples/console-compose`](./examples/console-compose).
 - Use `docker stop -t 70` while a backup may be running; jobs get 60 seconds to finish.
@@ -316,7 +321,7 @@ Each backup plan chooses how its backups are encrypted:
 ### ⚙️ Settings (environment variables)
 
 <details>
-<summary><b>&nbsp;👉&nbsp; Show all 10 settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
+<summary><b>&nbsp;👉&nbsp; Show all 13 settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
 <br>
 
 All optional; the defaults suit a single machine.
@@ -327,6 +332,9 @@ All optional; the defaults suit a single machine.
 | `MONGOSHIELD_ADMIN_USERNAME` · `MONGOSHIELD_ADMIN_PASSWORD` | Create the first admin at start (`…_PASSWORD_FILE` for a file) |
 | `MONGOSHIELD_SETUP_WINDOW_MINUTES` | How long the first visitor may create the admin (default `15`; `0` always needs the link) |
 | `MONGOSHIELD_PUBLIC_URL` | The HTTPS address behind a proxy |
+| `MONGOSHIELD_ALLOWED_HOSTS` | More host names it answers to, comma-separated (`*.example.com`; `*` turns the check off) |
+| `MONGOSHIELD_TRUSTED_PROXIES` | IPs or CIDR ranges of the proxies whose `X-Forwarded-*` headers are believed |
+| `MONGOSHIELD_ALLOW_UNSAFE_TARGETS=true` | Allow webhooks and storage endpoints on cloud metadata and link-local addresses |
 | `MONGOSHIELD_COOKIE_SECURE=false` | Allow sign-in over plain HTTP on a trusted network (evaluation only) |
 | `MONGOSHIELD_DEFAULT_STORAGE=false` | Don't create the "Local backups" folder |
 | `MONGOSHIELD_SHUTDOWN_GRACE_SECONDS` | How long running jobs may finish on stop (default `60`) |
@@ -399,7 +407,7 @@ No config file? The same settings work as environment variables:
 | `MONGOSHIELD_RECIPIENTS` | Public keys to encrypt for (`age1…`, comma-separated) |
 | `MONGOSHIELD_IDENTITY` · `MONGOSHIELD_IDENTITY_FILE` | The private key, for restores and deep verification |
 | `MONGOSHIELD_PASSPHRASE` | A passphrase instead of keys |
-| `MONGOSHIELD_COMPRESSION` | `zstd` (default), `gzip` or `none` |
+| `MONGOSHIELD_COMPRESSION` | `zstd` (default; `gzip` on Node.js without zstd, before 22.15), `gzip` or `none` |
 
 ### 🍳 Recipes
 
@@ -776,7 +784,7 @@ The CLI builds one configuration from four layers. A higher layer wins, key by k
 
 | Key | `atlas-free` | `atlas-flex` |
 |:--|:--|:--|
-| `compression` | `zstd` | `zstd` |
+| `compression` | `zstd` (`gzip` without zstd) | `zstd` (`gzip` without zstd) |
 | `backup.consistency` | `auto` | `auto` |
 | `backup.parallelism` | `2` | `2` |
 | `backup.maxBytesPerSecond` | 4 MiB/s | 8 MiB/s |
@@ -1005,7 +1013,7 @@ Durations take `ms` `s` `m` `h`, e.g. `90s` or `1h30m`. Flags marked "repeatable
 | `--uri` | `<mongodb-uri>` | Connection string (default: config, `MONGOSHIELD_URI` or `MONGODB_URI`) |
 | `--to` | `<storage-url>` | Where to store the backup |
 | `--include` · `--exclude` | `<pattern>` | See shared flags |
-| `--compression` | `zstd` · `gzip` · `none` | Compression (default `zstd`) |
+| `--compression` | `zstd` · `gzip` · `none` | Compression (default `zstd`; `gzip` on Node.js without zstd) |
 | `--recipient` | `<age1…>`, repeatable | Encrypt for this public key |
 | `--passphrase-env` | `<VAR>` | Encrypt with the passphrase in this variable |
 | `--consistency` | `auto` · `none` · `snapshot` · `converge` | Consistency across collections (default `auto`) |
@@ -1537,7 +1545,7 @@ Write your own by implementing `StorageAdapter` ([`src/storage/types.ts`](./pack
 Every environment variable.
 
 <details>
-<summary><b>&nbsp;👉&nbsp; Show all 22 console settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
+<summary><b>&nbsp;👉&nbsp; Show all 25 console settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
 <br>
 
 | Variable | Default | What it does |
@@ -1545,7 +1553,10 @@ Every environment variable.
 | `MONGOSHIELD_SECRET` · `MONGOSHIELD_SECRET_FILE` | generated into the data folder | Your own secret, 32+ characters (set one, not both) |
 | `MONGOSHIELD_DATA_DIR` | `/data` | Where the console keeps its data |
 | `PORT` · `HOST` | `8080` · `::` (`0.0.0.0` without IPv6) | Where it listens |
-| `MONGOSHIELD_PUBLIC_URL` | none | Its public address: setup link, origin check, HSTS on https |
+| `MONGOSHIELD_PUBLIC_URL` | none | Its public address: setup link, origin and Host checks, HSTS on https |
+| `MONGOSHIELD_ALLOWED_HOSTS` | none | More host names it answers to, comma-separated: `backups.example.com`, `*.example.com`, or `*` (no Host check). Other public names get `421` |
+| `MONGOSHIELD_TRUSTED_PROXIES` | none | IPs or CIDR ranges of proxies whose `X-Forwarded-For` / `-Host` / `-Proto` are believed |
+| `MONGOSHIELD_ALLOW_UNSAFE_TARGETS` | `false` | `true`: allow metadata/link-local webhooks and storage endpoints |
 | `MONGOSHIELD_SETUP_WINDOW_MINUTES` | `15` | How long the first visitor may create the admin without the link (0–1440) |
 | `MONGOSHIELD_ADMIN_USERNAME` (or `MONGOSHIELD_ADMIN_EMAIL`) | none | Create this admin at start, while no user exists |
 | `MONGOSHIELD_ADMIN_PASSWORD` · `MONGOSHIELD_ADMIN_PASSWORD_FILE` | none | Its password, 12+ characters |
