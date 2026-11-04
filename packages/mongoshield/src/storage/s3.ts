@@ -15,7 +15,12 @@
  *   // Cloudflare R2 (region must be "auto")
  *   s3Storage({ bucket: "b", endpoint: "https://<account>.r2.cloudflarestorage.com", region: "auto" });
  *   // Backblaze B2
- *   s3Storage({ bucket: "b", endpoint: "https://s3.us-west-004.backblazeb2.com", region: "us-west-004" });
+ *   s3Storage({ bucket: "b", endpoint: "https://s3.us-west-004.backblazeb2.com", region: "us-west-004" })
+ *
+ * or, with the settings already chosen (s3-presets.ts; also the `b2://` and `r2://` URLs):
+ *
+ *   b2Storage({ bucket: "b", region: "us-west-004" })
+ *   r2Storage({ accountId: "<32 hex>", bucket: "b" });
  *
  * Checksums and S3-compatible services: since early 2025 the AWS SDK sends a
  * CRC32 checksum with every upload by default (`requestChecksumCalculation:
@@ -128,6 +133,15 @@ import type {
   StorageAdapter,
   StorageCapabilities,
 } from "./types.ts";
+
+// Backblaze B2 and Cloudflare R2 presets: s3Storage with the settings each service needs.
+export {
+  type B2StorageOptions,
+  b2Storage,
+  type R2Jurisdiction,
+  type R2StorageOptions,
+  r2Storage,
+} from "./s3-presets.ts";
 
 /** Options for {@link s3Storage}. */
 export interface S3StorageOptions {
