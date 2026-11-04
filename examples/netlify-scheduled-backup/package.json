@@ -1,0 +1,17 @@
+{
+  "name": "mongoshield-netlify-scheduled-backup",
+  "private": true,
+  "type": "module",
+  "description": "Nightly MongoDB backups to Google Drive from Netlify Functions with MongoShield (small databases only).",
+  "dependencies": {
+    "mongodb": "^7.0.0",
+    "mongoshield": "next"
+  },
+  "devDependencies": {
+    "@netlify/functions": "^4.0.0",
+    "@types/node": "^24.0.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

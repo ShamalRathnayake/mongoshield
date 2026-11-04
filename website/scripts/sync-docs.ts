@@ -61,6 +61,8 @@ const COLLECTIONS: readonly Collection[] = [
       "vercel",
       "atlas",
       "atlas-free-tier",
+      "atlas-free-netlify",
+      "google-drive",
       "bun-and-deno",
       // Operating them.
       "observability",

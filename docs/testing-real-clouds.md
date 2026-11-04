@@ -23,6 +23,7 @@ restore round trip, and KMS round trips against real services:
 | Azure Blob with version-level immutability | conformance with retention + round trip with `retainDays: 1` |
 | Azure Key Vault | as AWS KMS |
 | SFTP (a remote server) | conformance + round trip |
+| Google Drive | conformance + round trip (`gdrive://`, a real Google account) |
 
 The tests live in `packages/mongoshield/test/cloud/` (one file per provider) and
 the workflow in `.github/workflows/cloud.yml`.
@@ -83,7 +84,7 @@ R2 and SFTP take their keys from the variables below.
 
 Variables are not secret (bucket names, key ids, URLs); in GitHub they are
 **repository variables** (Settings → Secrets and variables → Actions → *Variables*).
-Only R2 and SFTP need **secrets**. Locally, everything is an environment variable
+Only R2, SFTP and Google Drive need **secrets**. Locally, everything is an environment variable
 with the same name.
 
 The jobs in `cloud.yml` decide whether to run with a job-level `if:` on a variable.
@@ -119,6 +120,9 @@ must be **repository** variables, not `cloud-tests` environment variables.
 | `MONGOSHIELD_TEST_SFTP_HOST_FINGERPRINT` | variable | SFTP | `SHA256:…` of the host key (comma-separated for several) |
 | `MONGOSHIELD_TEST_SFTP_PATH` | variable | SFTP | writable directory, e.g. `/upload` |
 | `MONGOSHIELD_TEST_SFTP_PRIVATE_KEY` | **secret** | SFTP | the user's unencrypted private key (OpenSSH/PEM text) |
+| `MONGOSHIELD_TEST_GDRIVE_CLIENT_ID` | variable | Google Drive | OAuth client id (type "TVs and Limited Input devices"); enables the Google Drive job |
+| `MONGOSHIELD_TEST_GDRIVE_CLIENT_SECRET` | **secret** | Google Drive | that client's secret |
+| `MONGOSHIELD_TEST_GDRIVE_TOKEN` | **secret** | Google Drive | refresh token from `mongoshield login gdrive` with that client |
 | `MONGOSHIELD_TEST_PREFIX` | variable (optional) | all | top-level prefix, default `mongoshield-ci` |
 
 In the tables and commands below, replace `ShamalRathnayake/mongoshield` with your
@@ -130,7 +134,7 @@ fork if you run this elsewhere.
    Every job in `cloud.yml` uses it, and the cloud trust policies below accept only
    tokens issued for it, so no other workflow (and no pull request) can assume the
    test roles. Optionally add a required reviewer or restrict it to `main`.
-2. **Secrets** (R2 and SFTP only): add them as environment secrets of `cloud-tests`
+2. **Secrets** (R2, SFTP and Google Drive only): add them as environment secrets of `cloud-tests`
    (or repository secrets).
 3. **Variables:** add the repository variables from the table for the providers you
    set up. A provider without its gate variable shows up as *skipped*.
@@ -575,6 +579,40 @@ the server:
 ```sh
 find /srv/sftp/upload/mongoshield-ci -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} +
 ```
+
+## Google Drive
+
+Use a **dedicated Google account** for the tests, never a personal one: the tests write
+and delete files in its drive, and its refresh token is stored as a CI secret.
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create a project
+   (e.g. `mongoshield-cloud-tests`) and enable the **Google Drive API**.
+2. **Google Auth Platform**: fill in the branding, Audience **External**, add the test
+   account as a test user, and add the scope
+   `https://www.googleapis.com/auth/drive.file`. Then set the publishing status to
+   **In production**: while an app is in Testing, Google expires its refresh tokens after
+   7 days and the weekly job would fail every other run. (`drive.file` is non-sensitive,
+   so an unverified app in production only shows a warning on the consent screen, which
+   is fine for a test account.)
+3. **Clients → Create client**, type **TVs and Limited Input devices**. Note the client
+   id and secret.
+4. Log in once as the test account with that client:
+
+   ```sh
+   export MONGOSHIELD_GDRIVE_CLIENT_ID=….apps.googleusercontent.com
+   export MONGOSHIELD_GDRIVE_CLIENT_SECRET=…
+   npx mongoshield login gdrive
+   ```
+
+5. Variable `MONGOSHIELD_TEST_GDRIVE_CLIENT_ID`; secrets
+   `MONGOSHIELD_TEST_GDRIVE_CLIENT_SECRET` and `MONGOSHIELD_TEST_GDRIVE_TOKEN` (the token
+   login printed). The job runs when the variable is set.
+
+Each run writes into its own folder, `MongoShield/mongoshield-ci/<yyyymmdd>-<random>/`
+in the account's My Drive, and deletes the files it wrote. Drive has no lifecycle
+rules; empty per-run folders can be left behind by a killed run, so delete old ones
+from drive.google.com now and then. The token is used weekly, so it never reaches
+Google's six-month expiry for unused tokens.
 
 ## When a cloud test fails
 

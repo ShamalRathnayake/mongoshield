@@ -266,6 +266,63 @@ domain. The key file is protected by the manifest's checksum, but the manifest i
 signed: someone with write access to the bucket could swap both, and must not be able
 to make MongoShield send cloud credentials to a host of their choosing.
 
+## Recovery kit
+
+The recovery kit is an **optional, additive object**: a passphrase-protected copy of the
+secret key, stored next to the backups. It is not part of any backup and changes nothing
+in the backup format: backups written with or without it are identical, and readers that
+don't know it ignore it.
+
+Why it exists: with recipients, the machine that takes backups holds only the public
+key, which is the point. But the one copy of the secret key then usually sits on a
+laptop. When the laptop is gone, every backup is unreadable. The kit lets a passphrase
+the owner remembers (or keeps in a password manager) stand in for the lost key file.
+
+**Where.** At the storage root, under the fixed key `_state/recovery-kit.age`. `_state/`
+holds MongoShield's own objects outside `backups/` (see
+[FORMAT.md](FORMAT.md#objects-next-to-backups)), so catalogs and retention never see it.
+
+**What.** An ordinary age file with a single scrypt (passphrase) stanza, work factor 18
+(as the `age` CLI). Its plaintext is an age identity file:
+
+```
+# MongoShield recovery kit
+# created: 2026-11-14T03:00:04Z
+# public key: age1…
+AGE-SECRET-KEY-1…
+```
+
+It holds every identity that `mongoshield init --github` generated for this storage
+location, one `AGE-SECRET-KEY-1…` line each, so backups encrypted to an earlier key stay
+recoverable after a re-run. Adding a key needs the existing kit's passphrase: the kit is
+decrypted, the new identity appended, and the whole file encrypted again.
+
+**Who writes it.** `mongoshield init --github` asks for a passphrase (or reads
+`MONGOSHIELD_RECOVERY_PASSPHRASE`) and writes the kit, except for GitHub-artifacts
+storage, which is deleted after 90 days at most. The backup runs never read or write it.
+
+**Who reads it.** `mongoshield restore`, when the backup is encrypted and no identity,
+identity file or passphrase was given (flags, config or environment). It asks for the
+kit's passphrase on a terminal, or reads `MONGOSHIELD_RECOVERY_PASSPHRASE`, decrypts the
+kit and uses the identities inside, exactly as if they had been passed with
+`--identity-file`. Without a terminal and without the variable, it fails with
+`MS_NO_IDENTITY`. A wrong passphrase fails with `MS_DECRYPTION_FAILED`. No kit at all is
+not an error: restore behaves as before.
+
+**Without MongoShield.** Download `_state/recovery-kit.age` from the storage and decrypt
+it with the `age` CLI; the result is a normal key file:
+
+```sh
+age -d -o mongoshield.key recovery-kit.age     # asks for the passphrase
+```
+
+**Security.** Anyone who can read the storage can try to guess the passphrase offline,
+at the cost of one scrypt (N = 2^18, about 256 MiB of memory) per guess. The kit is
+therefore only as strong as its passphrase: MongoShield requires at least 12 characters,
+and a few random words are better. Whoever can read the storage *and* knows the
+passphrase can decrypt every backup there, which is the purpose of the kit. If that is
+not acceptable, don't create one, and keep the key file offline instead.
+
 ## Rekeying
 
 Keys change: an administrator leaves, a key is suspected stolen, a KMS key is

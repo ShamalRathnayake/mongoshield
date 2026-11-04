@@ -1,0 +1,9 @@
+# Netlify settings for the MongoShield backup functions.
+# The schedule itself is in netlify/functions/backup-schedule.mts (`config.schedule`).
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  # Load MongoShield and the MongoDB driver from node_modules instead of bundling them:
+  # they load optional packages with dynamic imports, which bundlers handle poorly.
+  external_node_modules = ["mongoshield", "mongodb"]

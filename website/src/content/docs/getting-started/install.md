@@ -50,7 +50,8 @@ them lazily and tells you which package is missing if one is needed.
 | Azure Key Vault | `@azure/keyvault-keys @azure/identity` |
 | OpenTelemetry traces and metrics | `@opentelemetry/api` |
 
-Local directories (and the in-memory storage used in tests) need nothing extra.
+Local directories, Google Drive (`gdrive://`, plain `fetch`) and the in-memory storage
+used in tests need nothing extra.
 
 ## Storage URLs
 
@@ -65,6 +66,7 @@ Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or a
 | `gs://bucket/prefix` | Google Cloud Storage |
 | `az://account/container/prefix` | Azure Blob Storage |
 | `sftp://user@host:port/path?fingerprint=SHA256:…` | SFTP |
+| `gdrive://folder` | Google Drive (token in `MONGOSHIELD_GDRIVE_TOKEN`, from `mongoshield login gdrive`) |
 
 An `endpoint=…` parameter is a plain `https://host[:port]`: one with user info or a query
 string (an Azure SAS token, presigned S3 parameters) is refused, because those are

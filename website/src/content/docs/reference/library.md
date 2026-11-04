@@ -18,6 +18,7 @@ page is a map of the main pieces. The source of truth is
 | `mongoshield/storage/gcs` | `gcsStorage(…)`: Google Cloud Storage |
 | `mongoshield/storage/azure` | `azureStorage(…)`: Azure Blob Storage |
 | `mongoshield/storage/sftp` | `sftpStorage(…)`: SFTP |
+| `mongoshield/storage/gdrive` | `gdriveStorage(…)`: Google Drive |
 | `mongoshield/storage/memory` | `memoryStorage()`: in-process, for tests |
 | `mongoshield/kms` | KMS clients for AWS, Google Cloud and Azure, and the KMS stanza helpers |
 | `mongoshield/testing` | `useMongoSnapshot`, `createDatabaseSnapshot`: fast test database resets |

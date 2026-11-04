@@ -560,6 +560,7 @@ mongodump-layout directory. Readers that ignore them can still restore every bac
 annotations/<id>/rekey/<time>.json    rekey records: new digests and recipients after a rekey
 annotations/<id>/leases/<purpose>-<random>.json   use leases: the backup is being read or written
 erasures/<time>-<random>.json         the GDPR erasure ledger (append-only)
+_state/recovery-kit.age               the recovery kit: the secret key, locked with a passphrase
 ```
 
 - **Use leases** (`{ backupId, purpose, owner, host, pid, acquiredAt, expiresAt }`,
@@ -573,6 +574,10 @@ erasures/<time>-<random>.json         the GDPR erasure ledger (append-only)
   `chain: "links"` (its own files only). Retention counts it as verified only when every
   earlier member of its chain passed a verification or drill of its own.
 
+- **The recovery kit** (`_state/recovery-kit.age`, optional) is an age file encrypted with a
+  passphrase whose plaintext is an age identity file. `mongoshield init --github` writes it
+  so that a lost key file does not lose the backups; `restore` uses it when no identity is
+  given. See [ENCRYPTION.md](ENCRYPTION.md#recovery-kit). Readers that ignore it lose nothing.
 - **Rekey records** (see [ENCRYPTION.md](ENCRYPTION.md#rekeying)) list, per rewritten
   file, its previous and new size and SHA-256, and the backup's `encryption.recipients`
   after the rekey. Readers apply `complete` records in time order over the manifest and
