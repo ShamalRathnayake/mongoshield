@@ -10,6 +10,7 @@
  */
 
 import type { MongoShieldError } from "../errors.ts";
+import { oauthSecretEnvNames } from "../storage/oauth/apps.ts";
 import {
   closestMatch,
   GLOBAL_OPTIONS,
@@ -27,7 +28,11 @@ import { reportError, scrubSecrets } from "./report-error.ts";
 export async function runCli(argv: readonly string[], io: CliIo): Promise<number> {
   // Decided from the raw arguments first, so even a parse error honours
   // --json and --no-color.
-  const secrets: string[] = [];
+  // Drive refresh tokens and OAuth client secrets from the environment are secrets
+  // from the start, whichever command runs.
+  const secrets: string[] = oauthSecretEnvNames()
+    .map((name) => io.env[name]?.trim() ?? "")
+    .filter((value) => value !== "");
   // Every status, warning and --verbose line is scrubbed of the secrets the run learns
   // (addSecret below) and of passwords in connection strings.
   const scrub = (text: string): string => scrubSecrets(text, secrets);
