@@ -134,6 +134,32 @@ describe("mongoshield export", () => {
     expect((await stat(output)).size).toBeGreaterThan(0);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "creates every exported file for its owner only (0600, directories 0700)",
+    async () => {
+      const { url } = await twoDatabaseBackup();
+      const directory = join(workDir, "dump-private");
+      const archive = join(workDir, "private.archive");
+      const toDirectory = await runTestCli(["export", "--from", url, "--output", directory]);
+      expect(toDirectory.code, toDirectory.stderr).toBe(0);
+      const toArchive = await runTestCli([
+        "export",
+        "--from",
+        url,
+        "--format",
+        "archive",
+        "--output",
+        archive,
+      ]);
+      expect(toArchive.code, toArchive.stderr).toBe(0);
+
+      const permissions = async (path: string) => (await stat(path)).mode & 0o777;
+      expect(await permissions(archive)).toBe(0o600);
+      expect(await permissions(join(directory, "app"))).toBe(0o700);
+      expect(await permissions(join(directory, "app", "users.bson"))).toBe(0o600);
+    },
+  );
+
   it("streams an archive to stdout and keeps every message on stderr", async () => {
     const { url } = await twoDatabaseBackup();
     const run = await runTestCli([

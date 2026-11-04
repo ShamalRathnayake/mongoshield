@@ -108,13 +108,16 @@ function claimValues(value: unknown): string[] {
  * does (non-ASCII names, very long subjects), a stable `oidc-<hash>` name derived
  * from issuer and subject is used, so every identity can still get an account.
  *
- * The username is only a label and a first-sign-in link to an account an admin
- * created for SSO; accounts are bound to issuer + subject afterwards.
+ * The username is only a label for a NEW account. It never links an identity to an
+ * existing account: `preferred_username` is often editable by the user at the provider
+ * (see {@link linkableNamesOf} for what does link). Accounts are bound to issuer +
+ * subject afterwards.
  */
 export function usernameFromClaims(claims: IdTokenClaims, issuer: string): string {
   const candidates: unknown[] = [claims.preferred_username];
   // An unverified email may belong to someone else; never derive a name from it.
-  if (claims.email_verified !== false) candidates.push(claims.email);
+  const email = verifiedEmailOf(claims);
+  if (email !== undefined) candidates.push(email);
   candidates.push(claims.sub);
   for (const candidate of candidates) {
     if (typeof candidate === "string" && USERNAME.test(candidate)) return candidate;
@@ -123,4 +126,29 @@ export function usernameFromClaims(claims: IdTokenClaims, issuer: string): strin
     .update(`${issuer}\n${String(claims.sub)}`)
     .digest("hex");
   return `oidc-${digest.slice(0, 16)}`;
+}
+
+/**
+ * The `email` claim, only when the provider says it is verified (`email_verified` is
+ * exactly `true`; a missing claim counts as unverified: many providers let users type
+ * any address, and some leave the claim out instead of sending `false`).
+ */
+export function verifiedEmailOf(claims: IdTokenClaims): string | undefined {
+  if (claims.email_verified !== true) return undefined;
+  return typeof claims.email === "string" && claims.email !== "" ? claims.email : undefined;
+}
+
+/**
+ * The account names an identity may claim at its first sign-in: an SSO-only account an
+ * admin prepared is linked when its username is the identity's verified email (compared
+ * case-insensitively) or its exact subject (`sub`, stable and assigned by the provider).
+ * Never `preferred_username`, which many providers let users change to anything,
+ * including the name of an account prepared for someone else.
+ */
+export function linkableNamesOf(claims: IdTokenClaims): {
+  readonly email?: string;
+  readonly subject: string;
+} {
+  const email = verifiedEmailOf(claims)?.toLowerCase();
+  return { subject: String(claims.sub), ...(email === undefined ? {} : { email }) };
 }

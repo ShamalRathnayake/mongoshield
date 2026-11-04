@@ -10,7 +10,8 @@
  * The rules, in order (see {@link loadOrCreateSecretKey}):
  *
  *   1. `secret.key` exists        → read it; refuse if it is malformed, not a regular
- *                                   file, or readable/writable by other users.
+ *                                   file, or readable/writable by every user ("other"
+ *                                   bits; group bits are fine, see OTHER_BITS).
  *   2. `console.json` exists      → refuse: this data directory was created with a
  *      but no `secret.key`          secret passed in by the operator; generating a new
  *                                   one could never open its stored secrets.
@@ -38,8 +39,16 @@ const SECRET_BYTES = 32;
 /** What a generated secret file contains: exactly 64 hex characters (a newline may follow). */
 const SECRET_KEY_PATTERN = /^[0-9a-f]{64}$/;
 
-/** Permission bits for "group or others may read, write or run this" (`----rwxrwx`). */
-const GROUP_OR_OTHER_BITS = 0o077;
+/**
+ * Permission bits for "any other user may read, write or run this" (`-------rwx`).
+ *
+ * Group bits are allowed on purpose: Kubernetes volumes with `fsGroup` (the usual way
+ * to make a PVC writable by a non-root pod) give every file the pod's group and add
+ * group read/write on each mount, so a key created as 0600 is 0660 after a restart.
+ * The group is then the pod's own fsGroup, not other users of the machine. Refusing it
+ * would crash-loop the pod in a distroless image that has no shell to chmod with.
+ */
+const OTHER_BITS = 0o007;
 
 /** Why the secret file could not be used, in words an operator can act on. */
 export class SecretKeyError extends Error {
@@ -98,8 +107,8 @@ export async function loadOrCreateSecretKey(dataDir: string): Promise<LoadedSecr
  * Reads and checks an existing secret file; `undefined` when there is none.
  * The checks protect the one thing that guards every stored secret:
  *   - a regular file, not a symlink (which could point anywhere, e.g. outside the volume),
- *   - not accessible to group or others (mode 0600 as created; skipped on Windows,
- *     which has no POSIX modes),
+ *   - not accessible to others (mode 0600 as created, 0660 after a Kubernetes fsGroup
+ *     mount; skipped on Windows, which has no POSIX modes),
  *   - exactly 64 hex characters (a truncated or edited file fails loudly at startup
  *     instead of deriving a different key).
  */
@@ -116,10 +125,10 @@ async function readSecretKey(path: string): Promise<string | undefined> {
       `${path} must be a regular file (it is a symlink or a directory). Remove it, or pass your own secret with MONGOSHIELD_SECRET_FILE.`,
     );
   }
-  if (process.platform !== "win32" && (info.mode & GROUP_OR_OTHER_BITS) !== 0) {
+  if (process.platform !== "win32" && (info.mode & OTHER_BITS) !== 0) {
     const mode = (info.mode & 0o777).toString(8).padStart(3, "0");
     throw new SecretKeyError(
-      `${path} is readable or writable by other users (mode ${mode}). It protects every stored secret: run \`chmod 600 ${path}\` and start again.`,
+      `${path} is readable or writable by every user of this machine (mode ${mode}). It protects every stored secret: run \`chmod 600 ${path}\` (or 660 to keep a Kubernetes fsGroup's access) and start again.`,
     );
   }
   const text = (await readFile(path, "utf8")).replace(/\r?\n$/, "");

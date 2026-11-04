@@ -40,6 +40,7 @@
 import { z } from "zod";
 import { isMongoShieldError, MongoShieldError } from "../errors.ts";
 import { type Logger, silentLogger } from "../logger.ts";
+import { isConditionalWritesUnsupported } from "../storage/conditional-writes.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import { readStreamToBuffer } from "../util/streams.ts";
 import type { AcquireResult, JobLock, Lease, LeaseInfo, LockOwner } from "./lock.ts";
@@ -92,15 +93,19 @@ export function storageLock(options: StorageLockOptions): JobLock {
   const logger = options.logger ?? silentLogger;
   const now = options.now ?? (() => new Date());
 
-  if (!storage.capabilities.conditionalWrites) {
-    throw new MongoShieldError(
+  /** The error for a store without conditional writes, found up front or at the first write. */
+  function lockUnsupportedError(cause?: unknown): MongoShieldError {
+    return new MongoShieldError(
       "MS_CONFIG_INVALID",
       `The ${storage.kind} storage adapter cannot do conditional writes, so it cannot hold a backup lock.`,
       {
+        ...(cause === undefined ? {} : { cause }),
         hint: 'Set schedule.lock to "mongo" (a lock document in the source database) or "none" if only one runner can ever start.',
       },
     );
   }
+
+  if (!storage.capabilities.conditionalWrites) throw lockUnsupportedError();
   if (!/^[a-z0-9-]+$/.test(name)) {
     throw new MongoShieldError("MS_CONFIG_INVALID", `Invalid lock name "${name}".`, {
       hint: "Use lowercase letters, digits and dashes.",
@@ -233,13 +238,27 @@ export function storageLock(options: StorageLockOptions): JobLock {
       try {
         await writeRecord(record, true);
       } catch (error) {
+        // The store claimed conditional writes but turned out not to honour them
+        // (an S3-compatible service answering 501, or failing the adapter's probe).
+        // Writing the lock without the condition would let two runners both win.
+        if (isConditionalWritesUnsupported(error)) throw lockUnsupportedError(error);
         if (!isMongoShieldError(error, "MS_STORAGE_PRECONDITION_FAILED")) throw error;
-        // Another runner created this generation first.
         const winner = await readRecord(generation, signal);
-        return {
-          acquired: false,
-          holder: typeof winner === "object" ? toLeaseInfo(winner) : undefined,
-        };
+        // "Already exists" can also mean our own write landed: a retried request
+        // whose first attempt succeeded but whose reply was lost (NFSv3, an SDK
+        // retry after a timeout) finds the object it created itself. The record
+        // then is exactly ours, down to the owner id and the acquisition time, and
+        // we hold the lock; otherwise this run would wait out its own lease.
+        if (typeof winner !== "object" || !isSameRecord(winner, record)) {
+          // Another runner created this generation first.
+          return {
+            acquired: false,
+            holder: typeof winner === "object" ? toLeaseInfo(winner) : undefined,
+          };
+        }
+        logger.debug("The storage lock write was retried and had already succeeded", {
+          key: keyOf(generation),
+        });
       }
 
       // Our listing may have been stale (see the file header): back off if a
@@ -260,6 +279,23 @@ export function storageLock(options: StorageLockOptions): JobLock {
       return { acquired: true, lease: leaseFor(record) };
     },
   };
+}
+
+/**
+ * True when two lock records are the same write: every field matches. The owner id
+ * holds a random part per process, and `acquiredAt` is taken once per attempt, so
+ * another runner (or an earlier attempt of ours) never matches by accident.
+ */
+function isSameRecord(left: LockRecord, right: LockRecord): boolean {
+  return (
+    left.owner === right.owner &&
+    left.host === right.host &&
+    left.pid === right.pid &&
+    left.generation === right.generation &&
+    left.acquiredAt === right.acquiredAt &&
+    left.expiresAt === right.expiresAt &&
+    left.released === right.released
+  );
 }
 
 function toLeaseInfo(record: LockRecord): LeaseInfo {

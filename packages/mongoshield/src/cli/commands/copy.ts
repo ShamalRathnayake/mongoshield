@@ -14,14 +14,20 @@
  *   5. Progress is checkpointed in a local file (`.mongoshield/copy-<id>.json` in the
  *      working directory, or --checkpoint <file>), so an interrupted copy continues
  *      with the same command plus --resume. The file is deleted when the copy completes.
+ *      When the working directory is not writable, it goes to a private (0700) folder
+ *      in the system temp directory instead (see privateTempDirectory: one created by
+ *      another user is refused); and it is written once before the target is changed, so a
+ *      checkpoint that cannot be written stops the copy before anything is dropped.
  *
  * Copying needs no backup storage, so unlike most commands it works without one
  * configured.
  */
 
 import { createHash } from "node:crypto";
-import { access } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { constants, type Stats } from "node:fs";
+import { access, chmod, lstat, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { MongoShieldConfigInput } from "../../config/schema.ts";
 import { assertNoCopyConflicts, planCopy, runCopy } from "../../copy/index.ts";
 import { loadMaskFile, loadSubsetFile } from "../../copy/load-file.ts";
@@ -194,7 +200,7 @@ export async function runCopyFlow(
   settings: CopyFlowSettings,
 ): Promise<number> {
   rememberUriPassword(context, settings.targetUri);
-  const options = copyOptions(context, settings);
+  const options = await copyOptions(context, settings);
   const logger = createCliLogger(context.out);
   const source = await openConnection({ uri: settings.sourceUri }, { logger });
   try {
@@ -266,7 +272,10 @@ export async function subsetFromFlags(context: CommandContext): Promise<SubsetCo
 }
 
 /** The engine options shared by the plan and the real run. */
-function copyOptions(context: CommandContext, settings: CopyFlowSettings): Omit<CopyOptions, "to"> {
+async function copyOptions(
+  context: CommandContext,
+  settings: CopyFlowSettings,
+): Promise<Omit<CopyOptions, "to">> {
   const { flags } = context;
   const include = listOrUndefined(context, "include");
   const exclude = listOrUndefined(context, "exclude");
@@ -277,7 +286,7 @@ function copyOptions(context: CommandContext, settings: CopyFlowSettings): Omit<
     dryRun: flags.boolean("dry-run"),
     skipIndexes: flags.boolean("skip-indexes"),
     skipSearchIndexes: flags.boolean("skip-search-indexes"),
-    checkpoint: checkpointPath(context, settings),
+    checkpoint: await checkpointPath(context, settings),
     resume: flags.boolean("resume"),
     signal: context.signal,
     ...(include ? { include } : {}),
@@ -295,8 +304,19 @@ function copyOptions(context: CommandContext, settings: CopyFlowSettings): Omit<
  * (rotating a password does not lose the checkpoint, and the name reveals no host
  * names) and the namespaces it copies (--include, --exclude, --rename), so two
  * different copies between the same deployments never share a file.
+ *
+ * The working directory is not always writable: the CLI Docker image runs as a
+ * non-root user in a root-owned /app, Kubernetes manifests set
+ * readOnlyRootFilesystem, serverless functions only allow writing to /tmp. Then
+ * the default file goes to a per-user, private folder in the system temp directory
+ * instead (`privateTempDirectory`), under the same name, with a warning saying where (a temp folder may not
+ * survive a reboot or a new container, which --checkpoint on a volume does). A
+ * checkpoint left by an earlier run is found in either place, so --resume works.
  */
-export function checkpointPath(context: CommandContext, settings: CopyFlowSettings): string {
+export async function checkpointPath(
+  context: CommandContext,
+  settings: CopyFlowSettings,
+): Promise<string> {
   const explicit = context.flags.string("checkpoint");
   if (explicit !== undefined) return resolve(context.io.cwd, explicit);
   const identity = JSON.stringify([
@@ -307,7 +327,150 @@ export function checkpointPath(context: CommandContext, settings: CopyFlowSettin
     parseKeyValues(context, settings.name, "rename") ?? {},
   ]);
   const id = createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 16);
-  return join(context.io.cwd, CHECKPOINT_DIRECTORY, `copy-${id}.json`);
+  const fileName = `copy-${id}.json`;
+  const inWorkingDirectory = join(context.io.cwd, CHECKPOINT_DIRECTORY, fileName);
+  const tempDirectory = join(tmpdir(), tempCheckpointDirectoryName());
+  const inTempDirectory = join(tempDirectory, fileName);
+
+  // An earlier, interrupted run's file wins wherever it is, so --resume finds it. The
+  // temp folder is trusted for that only once it proved to be ours and private (see
+  // privateTempDirectory): anyone can create names in the shared temp directory.
+  if (await pathExists(inWorkingDirectory)) return inWorkingDirectory;
+  if (
+    (await privateTempDirectory(tempDirectory, { create: false })) &&
+    (await pathExists(inTempDirectory))
+  ) {
+    return inTempDirectory;
+  }
+  if (await canCreateIn(join(context.io.cwd, CHECKPOINT_DIRECTORY))) return inWorkingDirectory;
+  // Created now (mode 0700), so the copy engine never creates it with default permissions.
+  await privateTempDirectory(tempDirectory, { create: true });
+  context.out.warn(
+    `The working directory ${context.io.cwd} is not writable; the copy checkpoint goes to ${inTempDirectory}. Use --checkpoint <file> on a persistent volume to resume after a restart.`,
+  );
+  return inTempDirectory;
+}
+
+/** Group and other permission bits of a POSIX file mode (`rwx` for each). */
+const GROUP_AND_OTHER_BITS = 0o077;
+
+/** Group and other WRITE bits: with these, someone else may have planted files. */
+const GROUP_AND_OTHER_WRITE_BITS = 0o022;
+
+/**
+ * Makes sure the per-user checkpoint folder in the system temp directory is safe to use.
+ * Returns whether it exists (after creating it, with `create`).
+ *
+ * The temp directory is shared and `mongoshield-<uid>` is predictable, so another local
+ * user could create it first, or a symlink by that name, and then plant a checkpoint that
+ * --resume would trust or read the ones written there. So a missing folder is created
+ * with mode 0700, and an existing one is used only when it is a real directory (not a
+ * symlink), owned by the current user, that nobody else can write to. One that others
+ * can only read or enter (0755, as earlier versions created it) cannot hold planted
+ * files, so it is tightened to 0700 and used. On Windows there are no uids or POSIX
+ * modes (the temp directory is per user there), so only the first part applies.
+ *
+ * @throws MongoShieldError `MS_CONFIG_INVALID` when the folder exists but is not private.
+ */
+export async function privateTempDirectory(
+  directory: string,
+  options: { readonly create: boolean },
+): Promise<boolean> {
+  if (options.create) {
+    try {
+      // Not recursive: the system temp directory itself always exists.
+      await mkdir(directory, { mode: 0o700 });
+    } catch (error) {
+      if (errorCodeOf(error) !== "EEXIST") {
+        throw new MongoShieldError(
+          "MS_CONFIG_INVALID",
+          `Cannot create the copy checkpoint folder ${directory}.`,
+          { hint: "Use --checkpoint <file> on a writable volume.", cause: error },
+        );
+      }
+    }
+  }
+  let stats: Stats;
+  try {
+    stats = await lstat(directory);
+  } catch (error) {
+    if (errorCodeOf(error) === "ENOENT") return false;
+    throw error;
+  }
+  const problem = privacyProblemOf(stats);
+  if (problem !== undefined) {
+    throw new MongoShieldError(
+      "MS_CONFIG_INVALID",
+      `Refusing to use the copy checkpoint folder ${directory}: ${problem}.`,
+      {
+        hint: "Another user may have created it to read or plant checkpoints. Check and remove it, or use --checkpoint <file> in a directory only you can write to.",
+      },
+    );
+  }
+  if (onPosix() && (stats.mode & GROUP_AND_OTHER_BITS) !== 0) await chmod(directory, 0o700);
+  return true;
+}
+
+/** True where uids and POSIX permission bits exist (everywhere but Windows). */
+function onPosix(): boolean {
+  return process.platform !== "win32" && typeof process.getuid === "function";
+}
+
+/** Why an existing temp folder cannot be trusted by the current user, or `undefined`. */
+function privacyProblemOf(stats: Stats): string | undefined {
+  if (stats.isSymbolicLink()) return "it is a symbolic link";
+  if (!stats.isDirectory()) return "it is not a directory";
+  if (!onPosix()) return undefined;
+  const uid = process.getuid?.();
+  if (stats.uid !== uid) return `it belongs to another user (uid ${stats.uid})`;
+  if ((stats.mode & GROUP_AND_OTHER_WRITE_BITS) !== 0) {
+    return `other users can write to it (mode ${(stats.mode & 0o777).toString(8)})`;
+  }
+  return undefined;
+}
+
+/** The `code` of a Node.js system error (`ENOENT`, `EEXIST`…), or "" for anything else. */
+function errorCodeOf(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("code" in error)) return "";
+  return typeof error.code === "string" ? error.code : "";
+}
+
+/**
+ * `mongoshield-<uid>`: the folder for checkpoints in the system temp directory. Per
+ * user, because /tmp is shared and the files are only readable by their owner.
+ */
+function tempCheckpointDirectoryName(): string {
+  const uid = typeof process.getuid === "function" ? String(process.getuid()) : "user";
+  return `mongoshield-${uid}`;
+}
+
+/** True when something exists at `path`. */
+async function pathExists(path: string): Promise<boolean> {
+  return access(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+/**
+ * True when files can be created in `directory`: it is writable, or it does not exist
+ * yet and its nearest existing parent is. Only a check; the copy engine still writes
+ * the checkpoint once before it changes the target, and stops if that fails.
+ */
+async function canCreateIn(directory: string): Promise<boolean> {
+  let current = directory;
+  for (;;) {
+    try {
+      await access(current, constants.W_OK);
+      return true;
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error ? error.code : "";
+      const parent = dirname(current);
+      // Missing: whether it can be created depends on its parent.
+      if (code !== "ENOENT" || parent === current) return false;
+      current = parent;
+    }
+  }
 }
 
 /**

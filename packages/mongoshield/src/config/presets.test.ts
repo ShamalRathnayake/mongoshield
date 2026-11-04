@@ -25,6 +25,7 @@ describe("config presets", () => {
   it("fills in the Atlas Free defaults under a config that names the preset", () => {
     const config = validateConfig({ preset: "atlas-free", storage: "./backups" });
     expect(config.preset).toBe("atlas-free");
+    // zstd on the Node.js versions that have it (see zstd-unavailable.test.ts for the rest).
     expect(config.compression).toBe("zstd");
     expect(config.backup).toEqual({
       consistency: "auto",

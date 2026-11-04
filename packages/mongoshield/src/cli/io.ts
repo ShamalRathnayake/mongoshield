@@ -68,10 +68,19 @@ export class Output {
   readonly #io: CliIo;
   /** The progress line currently drawn at the bottom of the terminal, if any. */
   #liveLine: string | undefined;
+  /** Removes secrets from status, warning and debug lines (see the constructor). */
+  readonly #scrub: (text: string) => string;
 
-  constructor(io: CliIo, settings: OutputSettings) {
+  /**
+   * `scrub` removes secrets from every status, warning and debug line before it is
+   * printed: library warnings and `--verbose` logs can quote driver messages that
+   * hold a password the run knows about (runCli passes its secret list). Results on
+   * stdout are data and are never changed.
+   */
+  constructor(io: CliIo, settings: OutputSettings, scrub: (text: string) => string = (t) => t) {
     this.#io = io;
     this.settings = settings;
+    this.#scrub = scrub;
   }
 
   /** Applies a style when colors are on; returns the text unchanged otherwise. */
@@ -97,7 +106,7 @@ export class Output {
   /** A status line on stderr ("Connecting…", "Wrote …"). Hidden by --quiet. */
   info(text: string): void {
     if (this.settings.quiet) return;
-    this.#writeStderr(`${text}\n`);
+    this.#writeStderr(`${this.#scrub(text)}\n`);
   }
 
   /** A success line on stderr, with a green check mark. Hidden by --quiet. */
@@ -107,13 +116,13 @@ export class Output {
 
   /** A warning on stderr. Shown even with --quiet: warnings need attention. */
   warn(text: string): void {
-    this.#writeStderr(`${this.style("yellow", "▲")} ${text}\n`);
+    this.#writeStderr(`${this.style("yellow", "▲")} ${this.#scrub(text)}\n`);
   }
 
   /** A debug line on stderr, only with --verbose. */
   debug(text: string): void {
     if (!this.settings.verbose) return;
-    this.#writeStderr(`${this.style("gray", `debug ${text}`)}\n`);
+    this.#writeStderr(`${this.style("gray", `debug ${this.#scrub(text)}`)}\n`);
   }
 
   /** Raw text on stderr (error reports). Never suppressed. */

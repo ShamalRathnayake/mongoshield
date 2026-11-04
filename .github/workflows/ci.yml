@@ -20,11 +20,13 @@ jobs:
     name: Lint and typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
@@ -39,15 +41,22 @@ jobs:
       matrix:
         node: [22, 24]
         mongodb: ["7.0.24", "8.0.13"]
+        include:
+          # The oldest Node.js that package.json "engines" allows, exactly: "22" alone
+          # always resolves to the newest 22.x and would hide anything 22.12 lacks.
+          - node: "22.12.0"
+            mongodb: "8.0.13"
     env:
       # mongodb-memory-server downloads this server version for the integration tests.
       MONGOMS_VERSION: ${{ matrix.mongodb }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
       - run: pnpm install --frozen-lockfile
@@ -60,7 +69,7 @@ jobs:
         working-directory: packages/mongoshield
         run: echo "MONGO_TOOLS_BIN=$(node scripts/fetch-mongo-tools.ts | tail -1)" >> "$GITHUB_ENV"
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-${{ matrix.mongodb }}
@@ -82,16 +91,18 @@ jobs:
       # sharded cluster uses the official mongo:8.0 image (Docker is on ubuntu runners).
       MONGOMS_VERSION: "8.0.13"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
@@ -104,11 +115,13 @@ jobs:
       # mongodb-memory-server downloads this server version for the console under test.
       MONGOMS_VERSION: "8.0.13"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
@@ -120,7 +133,7 @@ jobs:
         working-directory: packages/console
         run: pnpm exec playwright install --with-deps chromium
       - name: Cache MongoDB binaries
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-${{ runner.os }}-8.0.13
@@ -128,7 +141,7 @@ jobs:
       # Screenshots and traces of failed tests are in the HTML report.
       - name: Upload the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: playwright-report
           path: packages/console/playwright-report/
@@ -138,11 +151,13 @@ jobs:
     name: Package checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
@@ -155,3 +170,72 @@ jobs:
           cd packages/mongoshield
           node --input-type=module -e "const m = await import('mongoshield'); if (!m.version) process.exit(1)"
           node -e "const m = require('mongoshield'); if (!m.version) process.exit(1)"
+
+  # The GitHub Action (action/), actually run with `uses: ./action`, the way the GitHub
+  # Actions guide recommends: storage set only in a committed config file (so the Action
+  # must find the s3:// URL there and install the AWS SDK itself) and `version: ""` (so it
+  # must fall back to the release this ref belongs to, never a prerelease). The S3 API is
+  # Adobe S3Mock, the same emulator as the S3 integration tests (MinIO no longer publishes
+  # community images). It runs the mongoshield release from npm named in
+  # packages/mongoshield/package.json: this job tests the Action, not this commit's library.
+  action:
+    name: GitHub Action (uses ./action, S3 storage from the config file)
+    runs-on: ubuntu-latest
+    env:
+      # S3Mock accepts any credentials; the AWS SDK just needs some.
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Start MongoDB and S3Mock
+        run: |
+          set -euo pipefail
+          docker run -d --name mongo -p 127.0.0.1:27017:27017 mongo:8.0
+          docker run -d --name s3 -p 127.0.0.1:9090:9090 adobe/s3mock:5.2
+          for _ in $(seq 1 60); do
+            if docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' > /dev/null 2>&1 \
+              && curl -s -o /dev/null http://127.0.0.1:9090/; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec mongo mongosh --quiet --eval 'db.getSiblingDB("shop").orders.insertMany([{ _id: 1 }, { _id: 2 }])'
+          aws --endpoint-url http://127.0.0.1:9090 s3 mb s3://action-test
+      # Storage only in the config file: no `storage` input, no MONGOSHIELD_STORAGE.
+      - name: Write the config file
+        run: |
+          mkdir -p "${RUNNER_TEMP}/project"
+          echo '{ "storage": "s3://action-test/ci?region=us-east-1&endpoint=http://127.0.0.1:9090&forcePathStyle=true" }' \
+            > "${RUNNER_TEMP}/project/mongoshield.config.json"
+      - name: Back up with the Action
+        id: backup
+        uses: ./action
+        with:
+          uri: mongodb://127.0.0.1:27017/?directConnection=true
+          version: ""
+          working-directory: ${{ runner.temp }}/project
+      - name: Verify with the Action
+        id: verify
+        uses: ./action
+        with:
+          command: verify
+          uri: mongodb://127.0.0.1:27017/?directConnection=true
+          version: ""
+          args: ${{ steps.backup.outputs.backup-id }}
+          working-directory: ${{ runner.temp }}/project
+      - name: Check the outputs
+        env:
+          BACKUP_ID: ${{ steps.backup.outputs.backup-id }}
+          VERIFIED_ID: ${{ steps.verify.outputs.backup-id }}
+          VERIFY_JSON: ${{ steps.verify.outputs.json }}
+        run: |
+          set -euo pipefail
+          test -n "${BACKUP_ID}"
+          test "${VERIFIED_ID}" = "${BACKUP_ID}"
+          jq -e '.ok == true' <<< "${VERIFY_JSON}"
+          # The backup really is in the bucket that only the config file names.
+          aws --endpoint-url http://127.0.0.1:9090 s3 ls --recursive s3://action-test/ci/ > listing.txt
+          grep -q "${BACKUP_ID}" listing.txt

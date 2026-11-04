@@ -62,6 +62,24 @@ spec:
             - name: MONGOSHIELD_IMAGE_PULL_POLICY
               value: {{ . | quote }}
             {{- end }}
+            # What plans may set in spec.job (values.yaml: jobPolicy). Empty: the default.
+            - name: MONGOSHIELD_ALLOWED_IMAGES
+              value: {{ join "," .Values.jobPolicy.allowedImages | quote }}
+            - name: MONGOSHIELD_ALLOWED_SERVICE_ACCOUNTS
+              value: {{ join "," .Values.jobPolicy.allowedServiceAccounts | quote }}
+            - name: MONGOSHIELD_ALLOW_JOB_ENV_FROM
+              value: {{ .Values.jobPolicy.allowEnvFrom | default false | toString | quote }}
+            {{- if .Values.metrics.auth.enabled }}
+            # /metrics requires this bearer token (values.yaml: metrics.auth).
+            - name: METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mongoshield-operator.metricsSecretName" . }}
+                  key: {{ .Values.metrics.auth.secretKey }}
+                  {{- if .Values.metrics.auth.optional }}
+                  optional: true
+                  {{- end }}
+            {{- end }}
             - name: LEADER_ELECTION
               value: {{ .Values.leaderElection.enabled | quote }}
             - name: LEADER_ELECTION_LEASE

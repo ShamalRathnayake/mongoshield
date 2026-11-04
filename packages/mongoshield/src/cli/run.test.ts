@@ -338,6 +338,33 @@ describe("output modes", () => {
   });
 });
 
+describe("passwords on the command line", () => {
+  it("warns about a connection string with a password, and never repeats the password", async () => {
+    // --all-sources with --uri is refused before anything connects.
+    const run = await runTestCli(
+      [
+        "prune",
+        "--from",
+        memoryUrl(),
+        "--all-sources",
+        "--uri",
+        "mongodb://app:pa55word@127.0.0.1:1/",
+      ],
+      { cwd },
+    );
+    expect(run.stderr).toContain(
+      "A connection string with a password was passed on the command line",
+    );
+    expect(run.stderr).toContain("MONGOSHIELD_URI_FILE");
+    expect(run.stderr).not.toContain("pa55word");
+  });
+
+  it("says nothing for connection strings without a password", async () => {
+    const run = await runTestCli(["list", "--from", memoryUrl()], { cwd });
+    expect(run.stderr).not.toContain("password was passed");
+  });
+});
+
 describe("cancellation", () => {
   it("an already aborted signal stops a command with MS_ABORTED (exit code 60)", async () => {
     const controller = new AbortController();

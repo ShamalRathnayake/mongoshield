@@ -30,9 +30,9 @@ import {
   type MongoClient,
   MongoServerError,
   type WriteConcernSettings,
-  type WriteError,
 } from "mongodb";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
+import type { ApplyErasuresResult } from "../extras/erasure.ts";
 import { documentId, inStoredOrderAnywhere, valueInStoredOrder } from "../format/field-order.ts";
 import { splitNamespace } from "../mongo/index.ts";
 import type { BackupSelector, DecryptionOptions, SourceOptions } from "../types.ts";
@@ -47,7 +47,11 @@ import {
 } from "./find.ts";
 import { readMetadataFile } from "./read-pipeline.ts";
 import { createNamespace, createOptionsFrom } from "./restore-collections.ts";
-import { type BatchLimits, DEFAULT_BATCH_LIMITS } from "./restore-documents.ts";
+import {
+  type BatchLimits,
+  DEFAULT_BATCH_LIMITS,
+  duplicateIdErrorsOnly,
+} from "./restore-documents.ts";
 import { prepareIndexSpecs, restoreIndexes } from "./restore-indexes.ts";
 import { assertValidTargetNamespace } from "./restore-rename.ts";
 
@@ -108,10 +112,12 @@ export interface RestoreDocumentsResult {
   /** True when the target collection did not exist and was created (never in a dry run). */
   readonly createdCollection: boolean;
   readonly durationMs: number;
+  /**
+   * Documents deleted afterwards because the erasure ledger lists them
+   * (`shield.restoreDocuments()`; absent in a dry run or when the ledger is empty).
+   */
+  readonly erasures?: ApplyErasuresResult;
 }
-
-/** Duplicate key error: a document with this `_id` (or unique key) already exists. */
-const DUPLICATE_KEY_CODE = 11000;
 
 /** Server error code for "not authorized". */
 const UNAUTHORIZED_CODE = 13;
@@ -391,9 +397,12 @@ async function insertBatch(
     });
     counts.inserted += result.insertedCount;
   } catch (error) {
-    if (error instanceof MongoBulkWriteError && onlyDuplicates(error)) {
+    // Only duplicate `_id`s mean "already there": a collision on another unique index
+    // is a document that is NOT in the target, and must fail rather than vanish.
+    const duplicates = duplicateIdErrorsOnly(error);
+    if (duplicates !== undefined && error instanceof MongoBulkWriteError) {
       counts.inserted += error.insertedCount;
-      counts.skipped += documents.length - error.insertedCount;
+      counts.skipped += duplicates.length;
       return;
     }
     throw error;
@@ -426,15 +435,6 @@ async function upsertBatch(
   const result = await writer.collection.bulkWrite(operations, writeOptions(writer));
   counts.replaced += result.matchedCount;
   counts.inserted += result.upsertedCount + result.insertedCount;
-}
-
-/** True when every write error is a duplicate key and the write concern was met. */
-function onlyDuplicates(error: MongoBulkWriteError): boolean {
-  if (error.result.getWriteConcernError() !== undefined) return false;
-  const writeErrors: readonly WriteError[] = Array.isArray(error.writeErrors)
-    ? error.writeErrors
-    : [error.writeErrors];
-  return writeErrors.length > 0 && writeErrors.every((item) => item.code === DUPLICATE_KEY_CODE);
 }
 
 /** Turns driver errors into MongoShieldErrors that name the target. */

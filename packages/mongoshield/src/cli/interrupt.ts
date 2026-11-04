@@ -11,8 +11,26 @@
  * tested without sending signals.
  */
 
+import { splitCommand } from "./args.ts";
+
 /** Exit code for "terminated by SIGINT" (128 + signal number 2). */
 export const SIGINT_EXIT_CODE = 130;
+
+/**
+ * Commands that handle SIGTERM themselves: a scheduler finishes its current job within
+ * a grace period instead of aborting it, and must keep its lock until then.
+ */
+const COMMANDS_WITH_OWN_TERMINATION = new Set(["run", "schedule"]);
+
+/**
+ * True when the CLI should treat SIGTERM like Ctrl-C for this command line (argv
+ * without `node` and the script). The command is found the way the parser finds it,
+ * so global flags before it (`mongoshield --config f schedule`) do not hide it.
+ */
+export function cliHandlesTermination(argv: readonly string[]): boolean {
+  const { command } = splitCommand(argv);
+  return command === undefined || !COMMANDS_WITH_OWN_TERMINATION.has(command);
+}
 
 /** The message printed on the first press. */
 export const CANCELLING_MESSAGE = "\nCancelling… (press Ctrl-C again to exit immediately)\n";

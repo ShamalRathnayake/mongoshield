@@ -292,7 +292,10 @@ export interface ApiClientOptions {
   readonly fetch?: FetchLike;
   /** Defaults to the browser's `EventSource`. */
   readonly openEventSource?: EventSourceFactory;
-  /** Prefix for every URL; empty when the UI is served by the console itself. */
+  /**
+   * Prefix for every URL. Defaults to the directory of the page ({@link pageBasePath}):
+   * empty when the console is served at the root, `/mongoshield` under a sub-path.
+   */
   readonly baseUrl?: string;
   /** Called when a request fails with 401 so the app can show the login page. */
   readonly onUnauthorized?: () => void;
@@ -300,6 +303,24 @@ export interface ApiClientOptions {
 
 /** Methods that never change state and therefore need no CSRF token. */
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * The path the UI is served under, without the trailing slash: `""` for
+ * `https://backups.example.com/`, `/mongoshield` for `https://example.com/mongoshield/`
+ * (or `…/mongoshield/setup?token=…`). The UI routes with the hash, so the page's own
+ * directory is always the console's root, and the API lives right under it.
+ */
+export function pageBasePath(
+  location: Pick<Location, "href"> | undefined = globalLocation(),
+): string {
+  if (location === undefined) return "";
+  return new URL(".", location.href).pathname.replace(/\/+$/, "");
+}
+
+/** `window.location`, or `undefined` outside a browser (server-side tests). */
+function globalLocation(): Location | undefined {
+  return typeof window === "undefined" ? undefined : window.location;
+}
 
 /** Typed access to every console endpoint. One instance per page load. */
 export class ApiClient {
@@ -316,7 +337,7 @@ export class ApiClient {
     // `fetch` must be called with `window` as `this`, hence the wrapper.
     this.fetchImpl = options.fetch ?? ((url, init) => window.fetch(url, init));
     this.openEventSource = options.openEventSource ?? browserEventSource;
-    this.baseUrl = options.baseUrl ?? "";
+    this.baseUrl = options.baseUrl ?? pageBasePath();
     this.onUnauthorized = options.onUnauthorized;
   }
 

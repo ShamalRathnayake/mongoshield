@@ -329,7 +329,7 @@ describe("the add connection dialog in Docker", () => {
     await user.type(field, "mongodb://localhost:27017");
     expect(within(dialog).getByText("localhost is the console's own container here")).toBeTruthy();
     await user.click(within(dialog).getByRole("button", { name: "Use host.docker.internal" }));
-    expect(field.value).toBe("mongodb://host.docker.internal:27017");
+    expect(field.value).toBe("mongodb://host.docker.internal:27017/?directConnection=true");
     expect(within(dialog).queryByText("localhost is the console's own container here")).toBeNull();
   });
 
@@ -349,6 +349,33 @@ describe("the add connection dialog in Docker", () => {
     const report = await screen.findByRole("dialog", { name: /Connection test/ });
     expect(await within(report).findByText("Connected through host.docker.internal")).toBeTruthy();
     // The stored connection now points at the host machine.
-    expect(backend.data.connections.at(-1)?.uri).toBe("mongodb://host.docker.internal:27017");
+    expect(backend.data.connections.at(-1)?.uri).toBe(
+      "mongodb://host.docker.internal:27017/?directConnection=true",
+    );
+  });
+});
+
+describe("the add connection dialog on Linux Docker Engine without --add-host", () => {
+  it("does not offer host.docker.internal and explains how to create it", async () => {
+    const { user } = renderApp({
+      signedInAs: "admin",
+      hash: "#/connections",
+      container: {
+        kind: "docker-engine",
+        hostAlias: "host.docker.internal",
+        hostAliasResolves: false,
+      },
+    });
+    await user.click(await screen.findByRole("button", { name: "Add connection" }));
+    const dialog = screen.getByRole("dialog", { name: "Add connection" });
+    const strings = within(dialog).getByRole("group", {
+      name: "Suggestions for Connection string",
+    });
+    expect(within(strings).queryByRole("button", { name: /This computer/ })).toBeNull();
+    expect(within(strings).queryByRole("button", { name: "localhost:27017" })).toBeNull();
+    expect(
+      within(dialog).getByText("host.docker.internal does not exist in this container"),
+    ).toBeTruthy();
+    expect(within(dialog).getByText("--add-host=host.docker.internal:host-gateway")).toBeTruthy();
   });
 });

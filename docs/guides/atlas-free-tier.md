@@ -58,7 +58,7 @@ this; the preset just writes the same values into your config.
 | On a Free/Flex cluster | What MongoShield does |
 |---|---|
 | Operations per second are capped and throttled | Backups default to `parallelism: 2` and `maxBytesPerSecond: 4 MiB`. Restores into the cluster default to `parallelism: 2` with 1 insert worker per collection. Any value you set yourself wins. |
-| Change stream filters on `ns.db` may use only strings and regexes, no `$in` | The `converge` change stream uses regex filters instead. |
+| Change stream filters on `ns.db` may use only strings and regexes, no `$in` | The change streams of `converge` backups, incremental backups and the point-in-time journal use regex filters instead. Incrementals also read at the gentler pace above. |
 | `usersInfo` and every read of the `admin` database are refused | `--users-and-roles` fails before anything is read, with a hint to use the Atlas CLI. |
 | Users and roles can only be changed through Atlas (true on every Atlas tier) | Restores with `--users-and-roles create` or `replace` into any Atlas cluster fail before anything is written. |
 | Search index commands may be refused | MongoShield warns once and backs up everything else. |
@@ -88,7 +88,11 @@ back to `none` and records why in the manifest's `consistency.warning`. The
 moments if the application writes during the backup.
 
 `consistency: "snapshot"` is not documented as unsupported on these tiers, but MongoShield
-has not been run against a real Free cluster in snapshot mode. Prefer the default.
+has not been run against a real Free cluster in snapshot mode. Prefer the default. If the
+tier refuses snapshot reads, the backup fails before reading any collection with
+`MS_UNSUPPORTED_TOPOLOGY` and a hint to use `auto`. Incremental backups read time series
+collections in a snapshot too; with a refusal there, scheduled incrementals take full
+backups instead.
 
 ## Atlas limits that matter for backups
 
@@ -171,8 +175,8 @@ role.
 - The Atlas triggers documentation says Flex clusters don't support change streams. The
   Flex limits page says they do, with the `ns.db` filter restriction. If change streams
   are refused on your cluster, `auto` falls back to `none` and says so.
-- The [point-in-time recovery journal](./point-in-time-recovery.md) has not been adapted
-  to these tiers yet.
+- The [point-in-time recovery journal](./point-in-time-recovery.md) detects these tiers and
+  uses the regex filter, but has not been run against a real Free or Flex cluster.
 
 ## Sources
 

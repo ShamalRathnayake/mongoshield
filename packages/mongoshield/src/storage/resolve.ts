@@ -9,10 +9,12 @@
  * - `./backups`, `/var/backups`, `C:\b` bare paths, relative to the working directory
  * - `s3://bucket/prefix?region=…&endpoint=…&forcePathStyle=true`
  *   (also `requestChecksumCalculation=WHEN_REQUIRED` for S3-compatible services
- *   that fail multipart uploads with the SDK's default checksums, and
- *   `exactLastModified=true`; see the s3Storage options)
- * - `gs://bucket/prefix?projectId=…`   Google Cloud Storage
- * - `az://account/container/prefix?endpoint=…`   Azure Blob Storage
+ *   that fail multipart uploads with the SDK's default checksums, the default with
+ *   an `endpoint`; `responseChecksumValidation`; `exactLastModified=true`;
+ *   `conditionalWrites=true|false|probe`; and `partSizeMiB` / `queueSize`, which
+ *   bound upload memory; see the s3Storage options)
+ * - `gs://bucket/prefix?projectId=…&chunkSizeMiB=…`   Google Cloud Storage
+ * - `az://account/container/prefix?endpoint=…&blockSizeMiB=…&uploadConcurrency=…`   Azure Blob Storage
  * - `sftp://user@host:port/path?fingerprint=SHA256:…`   SFTP (`/~/path` = relative to the login directory)
  * - `memory://name`                    in-process store, shared by every URL with the same name
  *
@@ -25,7 +27,12 @@
  *   it is set (its AccountName must match the URL), and otherwise
  *   `DefaultAzureCredential` (`AZURE_CLIENT_ID`/`AZURE_TENANT_ID`/…, managed or
  *   workload identity, `az login`) against `https://<account>.blob.core.windows.net`
- *   or the `endpoint` parameter.
+ *   or the `endpoint` parameter. That credential sends a bearer token to the
+ *   endpoint, so an `endpoint` outside Azure's own domains is refused unless the URL
+ *   also says `allowCustomEndpoint=true`.
+ * - An `endpoint` parameter must be a plain `scheme://host[:port][/path]`: user
+ *   info or a query string (an Azure SAS token's `sig=…`, presigned S3 parameters)
+ *   would put a credential in the URL, and is rejected like a password.
  * - SFTP authenticates with the private key file in `MONGOSHIELD_SFTP_KEY_FILE`
  *   (passphrase in `MONGOSHIELD_SFTP_KEY_PASSPHRASE`) and/or the SSH agent in
  *   `SSH_AUTH_SOCK`. The host key must match `fingerprint` (repeatable) or
@@ -59,12 +66,39 @@ const S3_QUERY_PARAMETERS = new Set([
   "forcePathStyle",
   "retention",
   "requestChecksumCalculation",
+  "responseChecksumValidation",
   "exactLastModified",
+  "conditionalWrites",
+  "partSizeMiB",
+  "queueSize",
 ]);
 /** Query parameters accepted on `gs://` URLs. */
-const GCS_QUERY_PARAMETERS = new Set(["projectId", "retention"]);
+const GCS_QUERY_PARAMETERS = new Set(["projectId", "retention", "chunkSizeMiB"]);
 /** Query parameters accepted on `az://` URLs. */
-const AZURE_QUERY_PARAMETERS = new Set(["endpoint", "retention"]);
+const AZURE_QUERY_PARAMETERS = new Set([
+  "endpoint",
+  "retention",
+  "allowCustomEndpoint",
+  "blockSizeMiB",
+  "uploadConcurrency",
+]);
+
+/** Bytes in one MiB, for the `…SizeMiB` URL parameters. */
+const MIB = 1024 * 1024;
+
+/**
+ * Host name suffixes of Azure's storage endpoints, in the public cloud and the
+ * sovereign clouds (China, US Government, the retired Germany cloud). Private Link
+ * hosts (`<account>.privatelink.blob.core.windows.net`) end the same way.
+ * `DefaultAzureCredential` attaches a bearer token for the storage account to every
+ * request, so it must only go to hosts like these unless the user says otherwise.
+ */
+const AZURE_STORAGE_HOST_SUFFIXES = [
+  ".core.windows.net",
+  ".core.chinacloudapi.cn",
+  ".core.usgovcloudapi.net",
+  ".core.cloudapi.de",
+] as const;
 /** Query parameters accepted on `sftp://` URLs. */
 const SFTP_QUERY_PARAMETERS = new Set(["fingerprint", "allowUnknownHostKey"]);
 
@@ -156,7 +190,9 @@ function s3StorageOf(url: string): StorageAdapter {
   const endpoint = parsed.searchParams.get("endpoint");
   const forcePathStyle = parsed.searchParams.get("forcePathStyle");
   const exactLastModified = parsed.searchParams.get("exactLastModified");
-  if (endpoint !== null) parseUrl(endpoint);
+  // Only checked, not restricted to AWS hosts: SigV4 signs requests and never sends
+  // the secret key, and a custom endpoint (MinIO, R2, B2, …) is the normal case for S3.
+  if (endpoint !== null) checkEndpoint(endpoint, "S3");
 
   return s3Storage({
     bucket,
@@ -165,24 +201,60 @@ function s3StorageOf(url: string): StorageAdapter {
     ...(endpoint ? { endpoint } : {}),
     ...(forcePathStyle === null ? {} : { forcePathStyle: parseBoolean(forcePathStyle) }),
     ...(exactLastModified === null ? {} : { exactLastModified: parseBoolean(exactLastModified) }),
-    ...checksumParameter(parsed),
+    ...checksumParameter(parsed, "requestChecksumCalculation"),
+    ...checksumParameter(parsed, "responseChecksumValidation"),
+    ...conditionalWritesParameter(parsed),
+    ...sizeParameter(parsed, "partSizeMiB", "partSize", MIB),
+    ...sizeParameter(parsed, "queueSize", "queueSize", 1),
     ...retentionParameter(parsed),
   });
 }
 
-/** `?requestChecksumCalculation=WHEN_REQUIRED` (case-insensitive) → the s3Storage option. */
-function checksumParameter(parsed: URL): {
-  requestChecksumCalculation?: "WHEN_SUPPORTED" | "WHEN_REQUIRED";
-} {
-  const value = parsed.searchParams.get("requestChecksumCalculation");
+/**
+ * `?requestChecksumCalculation=WHEN_REQUIRED` or `?responseChecksumValidation=…`
+ * (values case-insensitive) → the s3Storage option of the same name.
+ */
+function checksumParameter<
+  Name extends "requestChecksumCalculation" | "responseChecksumValidation",
+>(parsed: URL, name: Name): { [Key in Name]?: "WHEN_SUPPORTED" | "WHEN_REQUIRED" } {
+  const value = parsed.searchParams.get(name);
   if (value === null) return {};
   const normalized = value.toUpperCase();
   if (normalized === "WHEN_SUPPORTED" || normalized === "WHEN_REQUIRED") {
-    return { requestChecksumCalculation: normalized };
+    return { [name]: normalized } as { [Key in Name]?: "WHEN_SUPPORTED" | "WHEN_REQUIRED" };
   }
-  throw configError(`Invalid requestChecksumCalculation "${value}" in storage URL.`, {
-    hint: "Use requestChecksumCalculation=WHEN_REQUIRED or WHEN_SUPPORTED.",
+  throw configError(`Invalid ${name} "${value}" in storage URL.`, {
+    hint: `Use ${name}=WHEN_REQUIRED or WHEN_SUPPORTED.`,
   });
+}
+
+/** `?conditionalWrites=true|false|probe` → the s3Storage option (see its docs). */
+function conditionalWritesParameter(parsed: URL): { conditionalWrites?: boolean | "probe" } {
+  const value = parsed.searchParams.get("conditionalWrites");
+  if (value === null) return {};
+  if (value.toLowerCase() === "probe") return { conditionalWrites: "probe" };
+  return { conditionalWrites: parseBoolean(value) };
+}
+
+/**
+ * A positive whole-number URL parameter, multiplied by `unit` (`MIB` for sizes given
+ * in MiB, 1 for counts), as the adapter option `option`. The adapter checks its own
+ * limits (S3's 5 MiB minimum part size, GCS's 256 KiB chunk granularity).
+ */
+function sizeParameter<Option extends string>(
+  parsed: URL,
+  name: string,
+  option: Option,
+  unit: number,
+): { [Key in Option]?: number } {
+  const value = parsed.searchParams.get(name);
+  if (value === null) return {};
+  if (!/^[1-9]\d{0,5}$/.test(value)) {
+    throw configError(`Invalid ${name} "${value}" in storage URL.`, {
+      hint: `Use a positive whole number, e.g. ${name}=${unit === MIB ? 8 : 2}.`,
+    });
+  }
+  return { [option]: Number(value) * unit } as { [Key in Option]?: number };
 }
 
 /** `gs://bucket/some/prefix?projectId=…` → `gcsStorage({ bucket, prefix, … })`. */
@@ -205,6 +277,7 @@ function gcsStorageOf(url: string): StorageAdapter {
     bucket,
     prefix: decodeURIComponent(parsed.pathname),
     ...(projectId ? { projectId } : {}),
+    ...sizeParameter(parsed, "chunkSizeMiB", "chunkSize", MIB),
     ...retentionParameter(parsed),
   });
 }
@@ -238,6 +311,7 @@ function azureStorageOf(url: string): StorageAdapter {
       connectionString,
       container,
       prefix,
+      ...azureUploadParameters(parsed),
       ...retentionParameter(parsed),
     });
     // A connection string for another account would silently send backups elsewhere.
@@ -252,13 +326,22 @@ function azureStorageOf(url: string): StorageAdapter {
     return storage;
   }
   const endpoint = parsed.searchParams.get("endpoint");
-  if (endpoint !== null) parseUrl(endpoint);
+  if (endpoint !== null) checkAzureEndpoint(endpoint, parsed);
   return azureStorage({
     accountUrl: endpoint ?? `https://${account}.blob.core.windows.net`,
     container,
     prefix,
+    ...azureUploadParameters(parsed),
     ...retentionParameter(parsed),
   });
+}
+
+/** `?blockSizeMiB=…&uploadConcurrency=…` → the azureStorage options bounding upload memory. */
+function azureUploadParameters(parsed: URL): { blockSize?: number; uploadConcurrency?: number } {
+  return {
+    ...sizeParameter(parsed, "blockSizeMiB", "blockSize", MIB),
+    ...sizeParameter(parsed, "uploadConcurrency", "uploadConcurrency", 1),
+  };
 }
 
 /**
@@ -329,6 +412,62 @@ function sftpStorageOf(url: string): StorageAdapter {
     ...(knownHostsPath === undefined ? {} : { knownHostsPath }),
     ...(allowUnknownHostKey === undefined ? {} : { allowUnknownHostKey }),
   });
+}
+
+/**
+ * Checks an `endpoint` parameter and returns it parsed. Neither the error message
+ * nor its cause repeats the endpoint text, which may hold the very secret it refuses.
+ *
+ * @throws MS_CONFIG_INVALID when it is not a URL, or carries user info, a query
+ *   string or a fragment (where SAS tokens and presigned parameters live).
+ */
+function checkEndpoint(endpoint: string, label: "S3" | "Azure"): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw configError(`The ${label} endpoint parameter is not a valid URL.`, {
+      hint: "Use endpoint=https://host[:port], percent-encoded inside the storage URL.",
+    });
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw configError(`The ${label} endpoint must not contain credentials or a query string.`, {
+      hint:
+        label === "Azure"
+          ? `A SAS token (sv=…&sig=…) is a credential: put it in ${ENV.azureConnectionString} ` +
+            "(BlobEndpoint=…;SharedAccessSignature=…) instead of the storage URL."
+          : "Use endpoint=https://host[:port]; credentials come from the environment.",
+    });
+  }
+  return parsed;
+}
+
+/**
+ * Checks the `endpoint` of an `az://` URL that will use `DefaultAzureCredential`.
+ * That credential attaches a bearer token for the storage account to every request,
+ * so a host outside Azure Storage's domains could collect it (managed identity,
+ * workload identity). Such hosts need an explicit `allowCustomEndpoint=true`.
+ */
+function checkAzureEndpoint(endpoint: string, azureUrl: URL): void {
+  const endpointUrl = checkEndpoint(endpoint, "Azure");
+  const allowCustom = azureUrl.searchParams.get("allowCustomEndpoint");
+  const allowed = allowCustom !== null && parseBoolean(allowCustom);
+  if (allowed || isAzureStorageHost(endpointUrl.hostname)) return;
+  throw configError(
+    `The Azure endpoint host "${endpointUrl.hostname}" is not an Azure Storage domain.`,
+    {
+      hint:
+        "DefaultAzureCredential would send it a bearer token for your storage account. " +
+        "If you trust this host (Azurite, a proxy you run), add allowCustomEndpoint=true " +
+        `to the storage URL, or set ${ENV.azureConnectionString} instead.`,
+    },
+  );
+}
+
+/** True when `hostname` is one of Azure Storage's own hosts (see the suffix list). */
+function isAzureStorageHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return AZURE_STORAGE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
 function rejectCredentials(parsed: URL, label: string, hint: string): void {

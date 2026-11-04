@@ -21,7 +21,11 @@
  *
  * Pending logins live in memory: a restart in the middle of a sign-in only means
  * signing in again. They expire after 10 minutes and are capped in number, so
- * anonymous requests to the login endpoint cannot exhaust memory.
+ * anonymous requests to the login endpoint cannot exhaust memory. Each one belongs to
+ * the client address that started it, and making room never evicts someone else's
+ * first: an address over its own cap loses its own oldest, and when the total is full
+ * the address holding the most loses one. A loop on the login endpoint therefore only
+ * pushes out the looping client's sign-ins, not those of people signing in meanwhile.
  */
 
 import { createHash } from "node:crypto";
@@ -33,8 +37,14 @@ import type { IdTokenClaims, OidcSettings } from "./settings.ts";
 
 /** How long a sign-in may take between leaving for the provider and coming back. */
 export const PENDING_LOGIN_TTL_MS = 10 * 60 * 1000;
-/** Most sign-ins pending at once; the oldest is dropped beyond this. */
-const MAX_PENDING_LOGINS = 1000;
+/** Most sign-ins pending at once (see the file header for which one is dropped beyond it). */
+export const MAX_PENDING_LOGINS = 1000;
+/**
+ * Most sign-ins pending at once for one client address. Generous, because everyone
+ * behind a NAT (or a reverse proxy that is not in MONGOSHIELD_TRUSTED_PROXIES) shares
+ * one address; small enough that one address cannot fill the whole table.
+ */
+export const MAX_PENDING_LOGINS_PER_ADDRESS = 100;
 /** Longest `sub` accepted (OIDC Core §2: at most 255 ASCII characters). */
 const MAX_SUBJECT_LENGTH = 255;
 
@@ -44,6 +54,8 @@ interface PendingLogin {
   readonly nonce: string;
   readonly codeVerifier: string;
   readonly startedAt: number;
+  /** The client address that started it (see the file header). */
+  readonly owner: string;
 }
 
 /** What the callback received in its query string. */
@@ -88,12 +100,14 @@ export class OidcClient {
   }
 
   /**
-   * Starts a sign-in. Returns the transaction id (for the cookie) and the URL to
-   * send the browser to.
+   * Starts a sign-in for the client at `owner` (its address). Returns the transaction id
+   * (for the cookie) and the URL to send the browser to.
    *
    * @throws OidcError `CONSOLE_OIDC_UNAVAILABLE` when discovery fails.
    */
-  async begin(): Promise<{ readonly transactionId: string; readonly url: string }> {
+  async begin(
+    owner = "unknown",
+  ): Promise<{ readonly transactionId: string; readonly url: string }> {
     const metadata = await this.provider.metadata();
     this.#dropExpired();
     const login: PendingLogin = {
@@ -102,13 +116,11 @@ export class OidcClient {
       // 32 random bytes as base64url: 43 characters, within RFC 7636's 43-128.
       codeVerifier: randomToken(),
       startedAt: this.#now(),
+      owner,
     };
     const transactionId = randomToken();
     this.#pending.set(transactionId, login);
-    for (const oldest of this.#pending.keys()) {
-      if (this.#pending.size <= MAX_PENDING_LOGINS) break;
-      this.#pending.delete(oldest);
-    }
+    this.#makeRoom(owner);
 
     const url = new URL(metadata.authorizationEndpoint);
     url.searchParams.set("response_type", "code");
@@ -278,6 +290,36 @@ export class OidcClient {
       claims.sub.length > MAX_SUBJECT_LENGTH
     ) {
       throw invalidToken("The ID token has no valid subject.");
+    }
+  }
+
+  /**
+   * Enforces both caps after `owner` added a pending login: first the per-address cap
+   * (the owner's own oldest goes), then the total (the oldest login of an address that
+   * holds the most goes; when every address holds as many, simply the oldest). See the
+   * file header.
+   */
+  #makeRoom(owner: string): void {
+    const counts = new Map<string, number>();
+    for (const login of this.#pending.values()) {
+      counts.set(login.owner, (counts.get(login.owner) ?? 0) + 1);
+    }
+    while ((counts.get(owner) ?? 0) > MAX_PENDING_LOGINS_PER_ADDRESS) {
+      this.#dropOldest(counts, (candidate) => candidate === owner);
+    }
+    while (this.#pending.size > MAX_PENDING_LOGINS) {
+      const most = Math.max(...counts.values());
+      this.#dropOldest(counts, (candidate) => counts.get(candidate) === most);
+    }
+  }
+
+  /** Drops the oldest pending login whose owner `matches` (Map order is insertion order). */
+  #dropOldest(counts: Map<string, number>, matches: (owner: string) => boolean): void {
+    for (const [id, login] of this.#pending) {
+      if (!matches(login.owner)) continue;
+      this.#pending.delete(id);
+      counts.set(login.owner, (counts.get(login.owner) ?? 1) - 1);
+      return;
     }
   }
 

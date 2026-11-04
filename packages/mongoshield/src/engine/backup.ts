@@ -38,8 +38,10 @@
  *   backup-authz.ts        users and roles (includeUsersAndRoles)
  *   backup-errors.ts       translating driver errors
  *   backup-incremental.ts  `incremental`: only the changes since a parent backup
+ *   backup-qe.ts           Queryable Encryption collections and their state collections
  */
 
+import { type HeldUseLease, holdUseLease } from "../catalog/use-leases.ts";
 import { isZstdAvailable } from "../compression/index.ts";
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import {
@@ -54,6 +56,7 @@ import type { Logger } from "../logger.ts";
 import {
   assertPrivileges,
   type CollectionSpec,
+  deploymentIdentityWarning,
   describeDeployment,
   discoverNamespaces,
   isAtlasSharedTier,
@@ -109,6 +112,7 @@ import {
   validateRunSettings,
 } from "./backup-options.ts";
 import { deleteOrphans } from "./backup-orphans.ts";
+import { queryableEncryptionWarnings } from "./backup-qe.ts";
 import { resolveReadPreference } from "./backup-reads.ts";
 import { CheckpointSaver, findCheckpointToResume, resumeFileEncryption } from "./backup-resume.ts";
 import type { BackupContext } from "./context.ts";
@@ -186,6 +190,8 @@ export async function runBackup(
   assertUsersAndRolesBackupSupported(options, deployment);
   const reads = adaptBackupReads(options, requestedParallelism, deployment);
   logBackupAdaptation(logger, reads, deployment);
+  const identityWarning = deploymentIdentityWarning(deployment);
+  if (identityWarning !== undefined) logger.warn(identityWarning);
   const { parallelism } = reads;
   const choice = settings.resumable
     ? resumableConsistency(options)
@@ -217,6 +223,9 @@ export async function runBackup(
     mode === "converge" ? await readClusterTime(client).catch(rethrowTyped) : undefined;
   const specs = checkpoint === undefined ? await selectNamespaces(context, options) : [];
   throwIfAborted(signal);
+  // Queryable Encryption collections selected without their state collections.
+  const encryptionWarnings = queryableEncryptionWarnings(specs);
+  for (const warning of encryptionWarnings) logger.warn(warning);
 
   logger.info(checkpoint === undefined ? "Starting backup" : "Resuming backup", {
     id,
@@ -260,7 +269,17 @@ export async function runBackup(
     : undefined;
   if (checkpoint !== undefined) saver?.markExisting();
 
+  // Set at the top of the `try` below, so that a lease failure still closes the
+  // snapshot session in `finally` (it is opened above and must never leak).
+  let heartbeat: HeldUseLease | undefined;
+
   try {
+    // A heartbeat for this run's directory: until the manifest is committed the backup
+    // reads as incomplete, and one large collection can upload as a single object for
+    // hours without a visible write. The renewed lease tells prune it is still running
+    // (catalog/use-leases.ts), so it is never mistaken for an abandoned run.
+    heartbeat = await holdUseLease(storage, id, "backup", { logger });
+
     // 4. Passphrase backups store their key envelope first (the run's only scrypt);
     //    a resumed run reuses the envelope of its first invocation.
     encryption =
@@ -410,6 +429,8 @@ export async function runBackup(
     await deleteOrphans(storage, manifest, logger, signal);
     manifestAttempted = true;
     await writeManifest(storage, manifest, {
+      // Warns if the store turns out not to honour conditional writes (S3-compatibles).
+      logger,
       ...(signal === undefined ? {} : { signal }),
       ...(retainUntil === undefined ? {} : { retainUntil }),
     });
@@ -425,7 +446,18 @@ export async function runBackup(
       bytesStored: manifest.totals.bytesStored,
       durationMs,
     });
-    return { status: "complete", id, manifest, durationMs };
+    // The consistency warning (e.g. `auto` used `none`) and the rest, for the caller.
+    const warnings = [
+      ...(manifest.consistency.warning === undefined ? [] : [manifest.consistency.warning]),
+      ...encryptionWarnings,
+    ];
+    return {
+      status: "complete",
+      id,
+      manifest,
+      durationMs,
+      ...(warnings.length === 0 ? {} : { warnings }),
+    };
   } catch (error) {
     // 9. Failure: report the real cause (when the change capture failed first, the
     //    dumps only saw its abort). A resumable run keeps its progress for a later
@@ -448,6 +480,7 @@ export async function runBackup(
     throw failure;
   } finally {
     await consistency.close();
+    await heartbeat?.release();
   }
 }
 

@@ -42,6 +42,7 @@ import {
   type ExportedNamespace,
   type ExportNamespace,
 } from "./export-data.ts";
+import { EXPORT_FILE_MODE } from "./export-directory.ts";
 import { BucketPacker, timeSeriesSettings } from "./timeseries-buckets.ts";
 
 /**
@@ -228,5 +229,6 @@ async function openOutput(output: string | Writable): Promise<Writable> {
       hint: "Choose a new file name, or delete the old archive first.",
     });
   }
-  return createWriteStream(output, { flags: "wx" });
+  // Decrypted documents: readable by the owner only (see EXPORT_FILE_MODE).
+  return createWriteStream(output, { flags: "wx", mode: EXPORT_FILE_MODE });
 }

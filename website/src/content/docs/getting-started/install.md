@@ -66,6 +66,13 @@ Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or a
 | `az://account/container/prefix` | Azure Blob Storage |
 | `sftp://user@host:port/path?fingerprint=SHA256:…` | SFTP |
 
+An `endpoint=…` parameter is a plain `https://host[:port]`: one with user info or a query
+string (an Azure SAS token, presigned S3 parameters) is refused, because those are
+credentials. On `az://` URLs that sign in with `DefaultAzureCredential`, an endpoint
+outside Azure Storage's own domains (`*.core.windows.net` and the sovereign clouds) is
+refused too, since the credential sends it a bearer token; add `allowCustomEndpoint=true`
+for a host you trust, such as Azurite.
+
 ## Optional: the age CLI
 
 You do not need it to use MongoShield. It is worth having on the machine where you keep

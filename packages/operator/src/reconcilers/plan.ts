@@ -39,6 +39,7 @@ import { updateStatus } from "../controller/status.ts";
 import { isAlreadyExists, RESOURCES } from "../kube/client.ts";
 import type { CronJob, Job } from "../kube/objects.ts";
 import { buildMongoShieldConfig, validateMongoShieldConfig } from "../resources/config.ts";
+import { defaultJobPolicy, jobPolicyProblem } from "../resources/job-policy.ts";
 import {
   buildConfigMap,
   buildCronJob,
@@ -72,9 +73,13 @@ export async function reconcilePlan(
 
   const plan = await addFinalizer(context.client, RESOURCES.plans, cached, FINALIZERS.plan);
 
-  // 1. Is the plan valid? Check with MongoShield's own config schema and the cron parser.
+  // 1. Is the plan valid? Check with MongoShield's own config schema and the cron parser,
+  //    and against the admin's limits on images and service accounts (job-policy.ts).
+  //    An invalid plan never reaches step 2, so its CronJob keeps its last valid spec.
   const config = buildMongoShieldConfig(plan);
-  const problem = validateMongoShieldConfig(config) ?? validateSchedule(plan);
+  const policy = context.defaults.policy ?? defaultJobPolicy(context.defaults.image);
+  const problem =
+    validateMongoShieldConfig(config) ?? validateSchedule(plan) ?? jobPolicyProblem(plan, policy);
   if (problem !== undefined) {
     await context.events.record(plan, "Warning", "InvalidSpec", problem);
     await writePlanStatus(context, plan, {

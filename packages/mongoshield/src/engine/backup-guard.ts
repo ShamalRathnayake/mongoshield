@@ -23,7 +23,9 @@
  *      namespaces with a `query`. The shape is a short hash stored in the
  *      `mongoshield.shape` label (see `backupShapeLabel`). Backups without the
  *      label only match other backups without it.
- *   4. comes from the same deployment, when both manifests record a `clusterId`.
+ *   4. comes from the same deployment, when both manifests record a `clusterId`
+ *      (and, when both record one, the same `instanceId`: two replica sets that
+ *      share a name, see `sameDeployment`).
  *
  * The baseline does not have to be verified: the guard is about the source
  * data shrinking, not about the previous backup's integrity.
@@ -38,6 +40,7 @@ import { listBackups } from "../catalog/catalog.ts";
 import { MongoShieldError } from "../errors.ts";
 import { isIncrementalManifest, type Manifest } from "../format/manifest.ts";
 import { type Logger, silentLogger } from "../logger.ts";
+import { sameDeployment } from "../mongo/deployment.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 
 /** What the guard checks. Mirrors the `guard` section of the config file. */
@@ -206,7 +209,7 @@ export function isComparable(other: Manifest, candidate: Manifest): boolean {
   const otherCluster = other.source.clusterId;
   const candidateCluster = candidate.source.clusterId;
   if (otherCluster !== undefined && candidateCluster !== undefined) {
-    return otherCluster === candidateCluster;
+    return sameDeployment(other.source, candidate.source);
   }
   return true;
 }

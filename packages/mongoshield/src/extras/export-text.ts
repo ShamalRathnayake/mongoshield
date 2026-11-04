@@ -38,6 +38,7 @@ import { bsonTag, isDocument } from "../engine/filter-values.ts";
 import { matchingDocuments, openNamespace, selectedBackupId } from "../engine/find.ts";
 import { compileProjection, type Projector } from "../engine/find-projection.ts";
 import { MongoShieldError } from "../errors.ts";
+import { EXPORT_FILE_MODE } from "../interop/export-directory.ts";
 import type { BackupSelector, DecryptionOptions } from "../types.ts";
 import { assertNamespace } from "./read-backup.ts";
 
@@ -170,8 +171,11 @@ async function writeOutput(
   context: EngineContext,
 ): Promise<void> {
   const { output } = options;
+  // A file holds decrypted documents: readable by the owner only (EXPORT_FILE_MODE).
   const destination =
-    typeof output === "string" ? createWriteStream(output, { flags: "wx" }) : output;
+    typeof output === "string"
+      ? createWriteStream(output, { flags: "wx", mode: EXPORT_FILE_MODE })
+      : output;
   try {
     await pipeline(chunks, destination, options.signal ? { signal: options.signal } : {});
   } catch (error) {

@@ -44,6 +44,16 @@ describe("collectionFileStem", () => {
     expect(collectionFileStem("orders.2024")).toBe("orders.2024");
   });
 
+  it("escapes Windows device names, which mongorestore still reads back as the name", () => {
+    expect(collectionFileStem("con")).toBe("co%6E");
+    expect(collectionFileStem("NUL.events")).toBe("NU%4C.events");
+    expect(collectionFileStem("console")).toBe("console");
+    expect(parseCollectionFileStem(collectionFileStem("con"))).toEqual({
+      kind: "name",
+      collection: "con",
+    });
+  });
+
   it("shortens long names exactly like mongodump 100.16 (prefix, %24, base64url SHA-1)", () => {
     // Taken from a real `mongodump` run on a collection named "é" × 100.
     const expected = `${"%C3%A9".repeat(34)}%C3%%2402mW-EhxMxXsZ8vh0-6fogZ0Bd4`;

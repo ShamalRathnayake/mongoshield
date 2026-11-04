@@ -65,7 +65,7 @@ Everything is set with environment variables, and none is required:
 | `MONGOSHIELD_SETUP_WINDOW_MINUTES` | Minutes after start during which the first admin can be created without the setup token (default 15; 0 = always need the token). |
 | `MONGOSHIELD_ADMIN_USERNAME` (or `_EMAIL`), `MONGOSHIELD_ADMIN_PASSWORD` / `_PASSWORD_FILE` | Create the first admin at start (headless installs). Ignored once any user exists. |
 | `MONGOSHIELD_DEFAULT_STORAGE` | `false`: do not create the "Local backups" location on a fresh volume. |
-| `PORT` / `HOST` | Listen address (default `8080` / `0.0.0.0`). |
+| `PORT` / `HOST` | Listen address (default `8080` / `::`, which accepts IPv6 and IPv4; `0.0.0.0` where IPv6 is unavailable). |
 | `MONGOSHIELD_PUBLIC_URL` | The console's public URL, e.g. `https://backups.example.com`. |
 | `MONGOSHIELD_COOKIE_SECURE` | `false` allows sign-in over plain HTTP from other machines (evaluation only; on localhost it works without). |
 | `MONGOSHIELD_OIDC_ISSUER`, `MONGOSHIELD_OIDC_CLIENT_ID`, … | OIDC single sign-on. |

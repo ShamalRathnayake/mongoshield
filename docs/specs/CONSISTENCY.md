@@ -19,7 +19,13 @@ nothing) and closes it again, which is exact whatever roles grant the privilege.
 any condition fails, `auto` uses `none` and records why in the manifest's
 `consistency.warning` (shown by `mongoshield backup` and `inspect`); for example the
 built-in `backup` role cannot open change streams, so a user with only that role gets
-`none` and a warning naming the missing privileges. `auto` never picks `snapshot`,
+`none` and a warning naming the missing privileges. A probe the server refuses as
+unsupported (an unknown stage, option or command), and any probe error from a
+MongoDB-compatible database (Amazon DocumentDB, Azure Cosmos DB, FerretDB, recognised
+by host name or `buildInfo`), also make `auto` use `none` with a warning; other probe
+failures on MongoDB itself (network, shutdown) fail the backup. The warning is logged,
+returned in the backup result's `warnings` and copied into the run report of scheduled
+runs (`backup.consistency`, `backup.warnings`). `auto` never picks `snapshot`,
 which fails outright when a backup outlasts the snapshot window. An explicit
 `consistency: "converge"` is not probed: it fails with `MS_UNSUPPORTED_TOPOLOGY` or
 `MS_PERMISSION_DENIED` when it cannot run.

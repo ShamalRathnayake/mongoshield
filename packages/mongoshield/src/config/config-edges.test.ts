@@ -55,6 +55,32 @@ describe("readEnvironmentConfig edge cases", () => {
     );
   });
 
+  it("reads the connection string from MONGOSHIELD_URI_FILE, the variables winning", async () => {
+    const file = join(directory, "uri");
+    await writeFile(file, "mongodb://app:s3cret@db.example.com/\n");
+    expect(readEnvironmentConfig({ MONGOSHIELD_URI_FILE: file }).source).toEqual({
+      uri: "mongodb://app:s3cret@db.example.com/",
+    });
+    expect(
+      readEnvironmentConfig({ MONGOSHIELD_URI_FILE: file, MONGODB_URI: "mongodb://env/" }).source,
+    ).toEqual({ uri: "mongodb://env/" });
+  });
+
+  it("refuses a missing or empty MONGOSHIELD_URI_FILE without printing its contents", async () => {
+    const empty = join(directory, "empty");
+    await writeFile(empty, "  \n");
+    for (const path of [join(directory, "missing"), empty]) {
+      let caught: unknown;
+      try {
+        readEnvironmentConfig({ MONGOSHIELD_URI_FILE: path });
+      } catch (error) {
+        caught = error;
+      }
+      expect(isMongoShieldError(caught, "MS_CONFIG_INVALID")).toBe(true);
+      expect(String(caught)).toContain("MONGOSHIELD_URI_FILE");
+    }
+  });
+
   it("takes the drill's scratch deployment from MONGOSHIELD_DRILL_URI", () => {
     expect(
       readEnvironmentConfig({ MONGOSHIELD_DRILL_URI: " mongodb://scratch:27017 " }).drill,

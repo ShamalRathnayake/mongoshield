@@ -89,6 +89,10 @@ export function buildManifest(input: ManifestInput): Manifest {
       serverVersion: input.deployment.serverVersion,
       // A hash of the replica set name / hosts, never a URI: safe to store.
       clusterId: input.deployment.clusterId,
+      // A hash of the replica set's replicaSetId, when the user may read it.
+      ...(input.deployment.instanceId === undefined
+        ? {}
+        : { instanceId: input.deployment.instanceId }),
     },
     consistency: buildConsistency(input.consistency),
     compression: input.compression,

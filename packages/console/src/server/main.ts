@@ -9,9 +9,13 @@
  *    MONGOSHIELD_SECRET_FILE, else from the data directory's generated secret.key.
  * 2. Opens the data directory (refuses if another console holds it), creates the
  *    admin from MONGOSHIELD_ADMIN_* and the "Local backups" location when they apply.
- * 3. Serves the API and the built UI, starts the plan schedules.
+ *    A data directory the console may not write gets the `chown` that fixes it.
+ * 3. Serves the API and the built UI on `::` (IPv6 and IPv4; 0.0.0.0 without IPv6),
+ *    starts the plan schedules, and logs the container environment (Docker, Podman,
+ *    Kubernetes, …) and whether host.docker.internal resolves.
  * 4. On first start (no admin yet), says how to create it: open the console within
- *    the setup window, or use the one-time setup link.
+ *    the setup window, or use the one-time setup link (from MONGOSHIELD_PUBLIC_URL
+ *    when set; otherwise with a note that a `-p` port mapping changes it).
  * 5. On SIGTERM/SIGINT: stops accepting connections and schedules, lets running
  *    jobs finish within the grace period (then aborts them), releases the data
  *    directory and exits.
@@ -25,12 +29,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import type { LogFields, Logger } from "mongoshield";
+import { addHostFlag, hostAliasMissing } from "../shared/container.ts";
 import { DataDirLockedError } from "../state/lock.ts";
 import { loadOrCreateSecretKey, SecretKeyError } from "../state/secret-key.ts";
 import { StateOpenError } from "../state/store.ts";
 import { createConsoleApp } from "./app.ts";
 import { EnvironmentError, readEnvironment } from "./config.ts";
+import { consoleEnvironment } from "./container-environment.ts";
 import { closeConsole, openConsole } from "./services.ts";
+import { DataDirAccessError, dataDirAccessError, listenHost, setupLinkBase } from "./startup.ts";
 
 /** A logger writing one JSON object per line to stderr. */
 function jsonLogger(): Logger {
@@ -68,28 +75,10 @@ async function main(): Promise<void> {
     });
   }
 
-  const secret = await resolveSecret(environment.secret, environment.dataDir, logger);
-  const opened = await openConsole({
-    dataDir: environment.dataDir,
-    secret,
-    logger,
-    setupWindowMs: environment.setupWindowMs,
-    defaultStorage: environment.defaultStorage,
-    // A replaced container must not fail on its predecessor's lock.
-    waitForPreviousLock: true,
-    ...(environment.initialAdmin === undefined ? {} : { initialAdmin: environment.initialAdmin }),
-    settings: {
-      cookieSecure: environment.cookieSecure,
-      https: environment.publicUrl?.startsWith("https://") === true,
-      shutdownGraceMs: environment.shutdownGraceMs,
-      ...(environment.publicUrl === undefined ? {} : { publicUrl: environment.publicUrl }),
-      ...(environment.proxySecret === undefined ? {} : { proxySecret: environment.proxySecret }),
-      ...(environment.metricsToken === undefined ? {} : { metricsToken: environment.metricsToken }),
-      ...(environment.oidc === undefined ? {} : { oidc: environment.oidc }),
-    },
-    ...(environment.webhookSecret === undefined
-      ? {}
-      : { webhookSecret: environment.webhookSecret }),
+  // A host folder mounted at the data directory may not be writable by the image's
+  // user (UID 65532): say how to fix that instead of printing an EACCES stack trace.
+  const opened = await openDataDirectory(environment, logger).catch((error: unknown) => {
+    throw dataDirAccessError(error, environment.dataDir) ?? error;
   });
 
   const { services, setupToken } = opened;
@@ -112,20 +101,24 @@ async function main(): Promise<void> {
   const app = createConsoleApp(services, uiDir === undefined ? {} : { uiDir });
   services.schedules.start();
 
-  const server = serve(
-    { fetch: app.fetch, port: environment.port, hostname: environment.host },
-    () => {
-      logger.info("MongoShield console listening", {
-        host: environment.host,
-        port: environment.port,
-        dataDir: environment.dataDir,
-      });
-    },
-  );
+  // `::` (IPv6 and IPv4) unless HOST says otherwise; 0.0.0.0 without IPv6.
+  const host = await listenHost(environment.host);
+  const server = serve({ fetch: app.fetch, port: environment.port, hostname: host }, () => {
+    logger.info("MongoShield console listening", {
+      host,
+      port: environment.port,
+      dataDir: environment.dataDir,
+    });
+  });
+
+  // Where the console runs decides what "localhost" means for connection strings; the
+  // lookup of host.docker.internal now means the first page already knows the answer.
+  await logContainerEnvironment(logger);
 
   if (setupToken !== undefined) {
-    const base = environment.publicUrl ?? `http://localhost:${environment.port}`;
-    process.stdout.write(setupInstructions(base, setupToken, opened.setupWindowEndsAt));
+    const link = setupLinkBase(environment.publicUrl, environment.port);
+    process.stdout.write(setupInstructions(link.base, setupToken, opened.setupWindowEndsAt));
+    if (link.note !== undefined) process.stdout.write(`${link.note}\n`);
   }
 
   let stopping = false;
@@ -144,6 +137,57 @@ async function main(): Promise<void> {
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+}
+
+/** Reads (or generates) the secret and opens the data directory: every startup write. */
+async function openDataDirectory(
+  environment: ReturnType<typeof readEnvironment>,
+  logger: Logger,
+): Promise<Awaited<ReturnType<typeof openConsole>>> {
+  const secret = await resolveSecret(environment.secret, environment.dataDir, logger);
+  return openConsole({
+    dataDir: environment.dataDir,
+    secret,
+    logger,
+    setupWindowMs: environment.setupWindowMs,
+    defaultStorage: environment.defaultStorage,
+    // A replaced container must not fail on its predecessor's lock.
+    waitForPreviousLock: true,
+    ...(environment.initialAdmin === undefined ? {} : { initialAdmin: environment.initialAdmin }),
+    settings: {
+      cookieSecure: environment.cookieSecure,
+      https: environment.publicUrl?.startsWith("https://") === true,
+      shutdownGraceMs: environment.shutdownGraceMs,
+      ...environment.security,
+      ...(environment.publicUrl === undefined ? {} : { publicUrl: environment.publicUrl }),
+      ...(environment.proxySecret === undefined ? {} : { proxySecret: environment.proxySecret }),
+      ...(environment.metricsToken === undefined ? {} : { metricsToken: environment.metricsToken }),
+      ...(environment.oidc === undefined ? {} : { oidc: environment.oidc }),
+    },
+    ...(environment.webhookSecret === undefined
+      ? {}
+      : { webhookSecret: environment.webhookSecret }),
+  });
+}
+
+/**
+ * Detects where the console runs (container-environment.ts), logs it, and warns when
+ * the name for the host machine does not resolve (Linux Docker Engine without
+ * `--add-host`): pages will not offer it, and this says how to make it work.
+ */
+async function logContainerEnvironment(logger: Logger): Promise<void> {
+  const container = await consoleEnvironment.fresh();
+  logger.info("Container environment", {
+    kind: container.kind,
+    ...(container.hostAlias === undefined
+      ? {}
+      : { hostAlias: container.hostAlias, hostAliasResolves: container.hostAliasResolves }),
+  });
+  if (container.hostAlias !== undefined && hostAliasMissing(container)) {
+    logger.warn(
+      `${container.hostAlias} does not resolve in this container, so databases on the host machine cannot be reached by that name. On Linux, start the console with ${addHostFlag(container.hostAlias)}.`,
+    );
+  }
 }
 
 /**
@@ -192,7 +236,7 @@ function setupInstructions(base: string, token: string, windowEndsAt: Date | und
     return [
       "",
       "  MongoShield console: no admin account exists yet.",
-      "  Open this one-time link within 24 hours to create it:",
+      "  Open this one-time link within 1 hour to create it:",
       "",
       `    ${link}`,
       "",
@@ -207,7 +251,7 @@ function setupInstructions(base: string, token: string, windowEndsAt: Date | und
     `  Open ${base} within ${minutes} minutes (until ${windowEndsAt.toISOString()})`,
     "  and create it there: whoever opens it first becomes the admin.",
     "",
-    "  After that, use this one-time link (valid 24 hours), or restart the console:",
+    "  After that, use this one-time link (valid 1 hour), or restart the console:",
     "",
     `    ${link}`,
     "",
@@ -222,7 +266,8 @@ main().catch((error: unknown) => {
     error instanceof EnvironmentError ||
     error instanceof SecretKeyError ||
     error instanceof StateOpenError ||
-    error instanceof DataDirLockedError;
+    error instanceof DataDirLockedError ||
+    error instanceof DataDirAccessError;
   const text =
     known && error instanceof Error
       ? error.message

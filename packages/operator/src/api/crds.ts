@@ -98,6 +98,15 @@ export interface CustomResourceDefinition {
 /** Longest Kubernetes object name (a DNS subdomain). */
 const NAME_LENGTH = 253;
 
+/**
+ * `spec.backup.id` of restores and drills: "latest", or a MongoShield backup id
+ * (`2026-10-20T03-00-04Z_7f3a9c`, the format in packages/mongoshield/src/format/layout.ts).
+ * The id becomes a command-line argument of the Job, so anything else (such as
+ * `--to-uri=…`, which would otherwise be parsed as a flag) is refused up front.
+ */
+export const BACKUP_ID_PATTERN =
+  "^(latest|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z_[0-9a-f]{6})$";
+
 /** A string field. */
 function text(description: string, extra: JsonSchema = {}): JsonSchema {
   return { type: "string", maxLength: 1024, description, ...extra };
@@ -261,8 +270,17 @@ const jobSettingsSchema = object("Settings for the pods that run mongoshield.", 
     "Delete finished Jobs after this many seconds. Defaults to 86400 (1 day).",
     { minimum: 0 },
   ),
-  env: embedded("Extra environment variables (core/v1 EnvVar).", "array"),
-  envFrom: embedded("Extra environment from Secrets/ConfigMaps (core/v1 EnvFromSource).", "array"),
+  env: embedded(
+    "Extra environment variables (core/v1 EnvVar). While the operator restricts images, " +
+      "variables that load code (NODE_OPTIONS other than heap-size and warning flags, " +
+      "NODE_PATH, LD_*, OPENSSL_CONF…) and the ones the operator sets are refused.",
+    "array",
+  ),
+  envFrom: embedded(
+    "Extra environment from Secrets/ConfigMaps (core/v1 EnvFromSource). Refused while the " +
+      "operator restricts images, unless its admin allows it (jobPolicy.allowEnvFrom).",
+    "array",
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -588,7 +606,7 @@ const restoreSpecSchema = object(
         name: text("A MongoShieldBackup object; its backupId is restored.", {
           maxLength: NAME_LENGTH,
         }),
-        id: text("A backup id, or 'latest'.", { maxLength: 256 }),
+        id: text("A backup id, or 'latest'.", { maxLength: 256, pattern: BACKUP_ID_PATTERN }),
       },
       [],
       {
@@ -687,7 +705,7 @@ const drillSpecSchema = object(
         name: text("A MongoShieldBackup object; its backupId is drilled.", {
           maxLength: NAME_LENGTH,
         }),
-        id: text("A backup id, or 'latest'.", { maxLength: 256 }),
+        id: text("A backup id, or 'latest'.", { maxLength: 256, pattern: BACKUP_ID_PATTERN }),
       },
       [],
       {

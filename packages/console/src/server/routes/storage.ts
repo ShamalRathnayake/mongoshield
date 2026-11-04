@@ -16,7 +16,7 @@ import { checkStorageInput } from "../../jobs/storage.ts";
 import { storageById } from "../../jobs/tasks.ts";
 import type { StorageTestResult } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
-import { sealStorageCredentials } from "../../state/secrets.ts";
+import { openStorageCredentials, sealStorageCredentials } from "../../state/secrets.ts";
 import type { StorageRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
@@ -30,6 +30,16 @@ import { storageView } from "../views.ts";
 const MAX_URL_LENGTH = 1024;
 /** Credential values can be whole service-account JSON files or SSH keys. */
 const MAX_CREDENTIAL_LENGTH = 16 * 1024;
+
+/**
+ * Limits for a `credentials` map. Empty values are refused: an empty credential is never
+ * meant, and it would make a location look as if it had credentials when it has none.
+ */
+const CREDENTIAL_LIMITS = {
+  maxEntries: 10,
+  maxLength: MAX_CREDENTIAL_LENGTH,
+  nonEmptyValues: true,
+} as const;
 
 /** Registers the storage routes. */
 export function storageRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
@@ -45,11 +55,10 @@ export function storageRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
     const body = asObject(await readJson(c));
     const name = requiredString(body, "name", 100);
     const url = requiredString(body, "url", MAX_URL_LENGTH);
-    const credentials = optionalStringMap(body, "credentials", {
-      maxEntries: 10,
-      maxLength: MAX_CREDENTIAL_LENGTH,
+    const credentials = optionalStringMap(body, "credentials", CREDENTIAL_LIMITS);
+    checkStorageInput(url, credentials ?? {}, services.dataDir, {
+      allowUnsafeTargets: services.settings.allowUnsafeTargets === true,
     });
-    checkStorageInput(url, Object.keys(credentials ?? {}), services.dataDir);
     const id = randomId();
     const at = services.now().toISOString();
     const record: StorageRecord = {
@@ -80,15 +89,15 @@ export function storageRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
     const body = asObject(await readJson(c));
     const name = requiredString(body, "name", 100);
     const url = requiredString(body, "url", MAX_URL_LENGTH);
-    const credentials = optionalStringMap(body, "credentials", {
-      maxEntries: 10,
-      maxLength: MAX_CREDENTIAL_LENGTH,
-    });
+    const credentials = optionalStringMap(body, "credentials", CREDENTIAL_LIMITS);
     const existing = storageById(store, id);
+    // Kept credentials are checked by their VALUES too (decrypted here, never returned):
+    // whether an Azure endpoint may be used depends on what would really authenticate.
     checkStorageInput(
       url,
-      credentials === undefined ? (existing.credentialNames ?? []) : Object.keys(credentials),
+      credentials ?? openStorageCredentials(store, existing),
       services.dataDir,
+      { allowUnsafeTargets: services.settings.allowUnsafeTargets === true },
     );
     const updated = await store.update((state) => {
       const current = state.storage.find((storage) => storage.id === id);

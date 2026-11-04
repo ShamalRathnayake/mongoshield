@@ -7,6 +7,8 @@
  *   security headers  every response (CSP, frame deny, no-referrer, HSTS on TLS, no-store for /api)
  *   body limit        /api: 64 KiB (the largest legitimate body is a plan with a few keys);
  *                     /api/live: 1 MiB + 64 KiB (a document being edited, as Extended JSON)
+ *   client            who is asking: socket address, or a trusted proxy's forwarding headers
+ *   allowed hosts     /api: refuse unknown Host names (DNS rebinding, see hosts.ts)
  *   same origin       /api state-changing requests: refuse a foreign `Origin`
  *   authenticate      /api: cookie session or trusted proxy → `principal`
  *   CSRF              /api state-changing requests of signed-in principals
@@ -20,11 +22,12 @@
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { getPath } from "hono/utils/url";
 import type { PreviewLimits } from "../shared/api.ts";
-import { openConnectionUri, openPlanIdentity, openPlanPassphrase } from "../state/secrets.ts";
 import { authenticate, csrfProtection } from "./auth.ts";
 import type { AppEnv, ConsoleServices } from "./context.ts";
 import { describeError, isKnownError, notFound, statusOf } from "./errors.ts";
+import { basePathOf } from "./hosts.ts";
 import { auditRoutes } from "./routes/audit.ts";
 import { backupRoutes } from "./routes/backups.ts";
 import { browseExtrasRoutes } from "./routes/browse-extras.ts";
@@ -41,7 +44,7 @@ import { restorePreviewRoutes } from "./routes/restore-preview.ts";
 import { sessionRoutes } from "./routes/session.ts";
 import { storageRoutes } from "./routes/storage.ts";
 import { userRoutes } from "./routes/users.ts";
-import { sameOriginOnly, securityHeaders } from "./security.ts";
+import { allowedHostsOnly, resolveClient, sameOriginOnly, securityHeaders } from "./security.ts";
 
 /** Largest accepted request body. */
 export const MAX_BODY_BYTES = 64 * 1024;
@@ -69,8 +72,25 @@ export function createConsoleApp(
   services: ConsoleServices,
   options: ConsoleAppOptions = {},
 ): Hono<AppEnv> {
-  const app = new Hono<AppEnv>();
+  // Served under a sub-path (MONGOSHIELD_PUBLIC_URL=https://example.com/mongoshield), the
+  // console routes `/mongoshield/api/…` like `/api/…`, so it works both behind a proxy
+  // that strips the prefix and one that passes it on.
+  const basePath = basePathOf(services.settings.publicUrl);
+  const app = new Hono<AppEnv>(
+    basePath === "" ? {} : { getPath: (request) => withoutBasePath(getPath(request), basePath) },
+  );
 
+  if (basePath !== "") {
+    // `/mongoshield` → `/mongoshield/`: the UI's assets and API calls are relative to the
+    // page's directory, which needs the trailing slash.
+    app.use("*", async (c, next) => {
+      const requested = new URL(c.req.url);
+      if (requested.pathname !== basePath) return next();
+      return c.redirect(`${basePath}/${requested.search}`, 308);
+    });
+  }
+  // Who is asking (behind trusted proxies), before anything else looks at the request.
+  app.use("*", resolveClient(services.settings));
   app.use("*", securityHeaders(services.settings));
   const bodyLimitOf = (maxSize: number) =>
     bodyLimit({
@@ -92,6 +112,7 @@ export function createConsoleApp(
   app.use("/api/*", (c, next) =>
     c.req.path.startsWith("/api/live/") ? liveBodyLimit(c, next) : defaultBodyLimit(c, next),
   );
+  app.use("/api/*", allowedHostsOnly(services.settings));
   app.use("/api/*", sameOriginOnly(services.settings));
   app.use("/api/*", authenticate(services));
   app.use("/api/*", csrfProtection());
@@ -140,44 +161,21 @@ export function createConsoleApp(
     if (!isKnownError(error)) {
       services.logger.error("Unexpected error while handling a request", {
         method: c.req.method,
-        path: new URL(c.req.url).pathname,
+        path: c.req.path,
         error: error instanceof Error ? (error.stack ?? error.message) : String(error),
       });
     }
-    return c.json({ error: describeError(error, knownSecrets(services)) }, statusOf(error));
+    return c.json({ error: describeError(error, services.knownSecrets()) }, statusOf(error));
   });
 
   return app;
 }
 
 /**
- * Every stored secret, for scrubbing error messages (defense in depth: the
- * library and driver should never put them there, but if one ever does, it is
- * replaced with `***` before the response leaves the server).
+ * `/mongoshield/api/session` → `/api/session` for the base path `/mongoshield`; paths
+ * outside it (a proxy that already stripped the prefix) are routed as they are.
  */
-function knownSecrets(services: ConsoleServices): string[] {
-  const { store } = services;
-  const secrets: string[] = [];
-  for (const connection of store.current.connections) {
-    try {
-      const uri = openConnectionUri(store, connection);
-      secrets.push(uri);
-      // The password alone, in case a message quotes it outside the URI.
-      const password = /^mongodb(?:\+srv)?:\/\/[^:@/]*:([^@/]+)@/i.exec(uri)?.[1];
-      if (password !== undefined) secrets.push(password, decodeURIComponent(password));
-    } catch {
-      // An unreadable secret cannot leak either.
-    }
-  }
-  for (const plan of store.current.plans) {
-    try {
-      const passphrase = openPlanPassphrase(store, plan);
-      if (passphrase !== undefined) secrets.push(passphrase);
-      const identity = openPlanIdentity(store, plan);
-      if (identity !== undefined) secrets.push(identity);
-    } catch {
-      // As above.
-    }
-  }
-  return secrets;
+function withoutBasePath(path: string, basePath: string): string {
+  if (path === basePath) return "/";
+  return path.startsWith(`${basePath}/`) ? path.slice(basePath.length) : path;
 }

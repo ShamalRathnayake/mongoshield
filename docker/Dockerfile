@@ -32,9 +32,19 @@
 # Declared before the first FROM so every stage can read it.
 ARG CLOUD_SDKS=s3
 
-# Node.js major version. Debian 13 (trixie) everywhere so the deps stage and the
+# Base images: Node.js 24 on Debian 13 (trixie) everywhere, so the deps stage and the
 # distroless runtime share the same glibc, should a dependency ever ship native code.
-ARG NODE_MAJOR=24
+# Every FROM below is pinned by digest. The tag is there for people and for Dependabot,
+# which proposes digest updates; a re-pushed tag cannot change what the image is built
+# from. To move to another Node.js major, change all three FROM lines (tag and digest:
+# `docker buildx imagetools inspect node:26-trixie` prints the index digest).
+
+# npm resolves the deps stage's dependency tree at build time (see "Why npm" below), so
+# NPM_BEFORE (an ISO 8601 time) makes it ignore every version published after that
+# moment, like a lockfile frozen at that time. docker.yml passes the commit's timestamp,
+# so a malicious release published while a release is being built cannot get in.
+# Empty (local builds): no limit.
+ARG NPM_BEFORE=""
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +53,7 @@ ARG NODE_MAJOR=24
 # Runs on the builder's own CPU architecture ($BUILDPLATFORM) even for arm64 images:
 # its output (JavaScript and an npm tarball) is identical on every platform, and
 # running natively avoids slow QEMU emulation in multi-arch builds.
-FROM --platform=$BUILDPLATFORM node:${NODE_MAJOR}-trixie AS build
+FROM --platform=$BUILDPLATFORM node:24-trixie@sha256:8c761eca2bf7eec965f946cf47b8090143cb41f45f2f8699af0cc0298d2d2d19 AS build
 
 WORKDIR /repo
 
@@ -86,8 +96,9 @@ RUN pnpm --filter mongoshield build \
 # Runs on the *target* platform. All dependencies are pure JavaScript today, but
 # installing on the target means a future dependency with platform-specific
 # optional packages still gets the right ones.
-FROM node:${NODE_MAJOR}-trixie-slim AS deps
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS deps
 ARG CLOUD_SDKS
+ARG NPM_BEFORE
 
 # Why npm and not `pnpm deploy --prod`: the cloud SDKs are *optional peer*
 # dependencies, and the workspace lockfile resolves them (auto-install-peers) as
@@ -126,7 +137,7 @@ RUN mkdir -p /backups
 #
 # The `nonroot` tag runs as uid/gid 65532. It is repeated below as a numeric
 # USER so Kubernetes can verify `runAsNonRoot: true` without guessing.
-FROM gcr.io/distroless/nodejs${NODE_MAJOR}-debian13:nonroot AS runtime
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:b8cec4b2f2126ff7bd034ec9ac207ffb3272667dfdc48376e3b035d3270549ba AS runtime
 
 ARG CLOUD_SDKS
 

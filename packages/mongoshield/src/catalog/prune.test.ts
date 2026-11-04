@@ -1,14 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { isMongoShieldError, MongoShieldError } from "../errors.ts";
 import { backupDir, manifestKey, resolveBackupKey } from "../format/layout.ts";
+import type { Manifest } from "../format/manifest.ts";
 import { writeManifest } from "../format/manifest-io.ts";
 import type { Logger } from "../logger.ts";
 import { type MemoryStorage, memoryStorage } from "../storage/memory.ts";
 import type { StorageAdapter } from "../storage/types.ts";
-import { listBackups } from "./catalog.ts";
-import { pruneBackups } from "./prune.ts";
+import type { VerifyReport } from "../types.ts";
+import { recordVerification } from "./annotations.ts";
+import { type CatalogEntry, listBackups } from "./catalog.ts";
+import { countsAsVerified, pruneBackups } from "./prune.ts";
 import {
   idAt,
+  makeChainBase,
+  makeIncremental,
   makeManifest,
   putCompleteBackup,
   putIncompleteBackup,
@@ -352,3 +357,109 @@ describe("pruneBackups", () => {
     });
   });
 });
+
+describe("countsAsVerified", () => {
+  const base = makeChainBase(idAt("2026-10-20T00:00:00Z"), 1000);
+  const first = makeIncremental(idAt("2026-10-20T01:00:00Z"), base, 2000);
+  const second = makeIncremental(idAt("2026-10-20T02:00:00Z"), first, 3000);
+
+  /** A complete entry, optionally with a verification record. */
+  function entryOf(
+    manifest: Manifest,
+    verification?: { readonly ok: boolean; readonly chainScope?: "links" },
+  ): CatalogEntry {
+    return {
+      id: manifest.id,
+      startedAt: new Date(manifest.startedAt),
+      status: "complete",
+      manifest,
+      ...(verification === undefined
+        ? {}
+        : {
+            verification: {
+              backupId: manifest.id,
+              verifiedAt: "2026-10-20T03:00:00.000Z",
+              mode: "fast",
+              filesChecked: 1,
+              documentsChecked: 0,
+              problemCount: verification.ok ? 0 : 1,
+              tool: "mongoshield@test",
+              ...verification,
+            },
+          }),
+    };
+  }
+
+  /** `countsAsVerified` for the first of `entries`. */
+  function newestCounts(entries: readonly CatalogEntry[]): boolean {
+    const [newest] = entries;
+    if (newest === undefined) throw new Error("no entry");
+    return countsAsVerified(entries, newest);
+  }
+
+  it("does not count a links-only verification while an earlier member is unverified", () => {
+    expect(
+      newestCounts([
+        entryOf(second, { ok: true, chainScope: "links" }),
+        entryOf(first, { ok: true, chainScope: "links" }),
+        entryOf(base),
+      ]),
+    ).toBe(false);
+  });
+
+  it("does not count a links-only verification on top of a base that failed", () => {
+    expect(
+      newestCounts([
+        entryOf(first, { ok: true, chainScope: "links" }),
+        entryOf(base, { ok: false }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("counts a links-only verification once every earlier member passed its own", () => {
+    expect(
+      newestCounts([
+        entryOf(second, { ok: true, chainScope: "links" }),
+        entryOf(first, { ok: true, chainScope: "links" }),
+        entryOf(base, { ok: true }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("counts a full-chain verification on its own", () => {
+    expect(newestCounts([entryOf(first, { ok: true }), entryOf(base)])).toBe(true);
+  });
+
+  it("feeds minVerified: an unproven incremental does not stand in for a verified backup", async () => {
+    const storage = memoryStorage();
+    const verified = makeChainBase(idAt("2026-10-18T00:00:00Z"), 100);
+    for (const manifest of [verified, base, first]) await writeManifest(storage, manifest);
+    await recordVerification(storage, verifyReport(verified.id));
+    await recordVerification(storage, {
+      ...verifyReport(first.id),
+      chain: { baseBackupId: base.id, length: 1, members: [base.id, first.id], scope: "links" },
+    });
+
+    const result = await pruneBackups(
+      storage,
+      { last: 2, minVerified: 1 },
+      { now: NOW, dryRun: true },
+    );
+    // Before the fix `first` counted as verified, and the verified full backup was removed.
+    expect(result.plan.keep.map((kept) => kept.id)).toContain(verified.id);
+  });
+});
+
+/** A minimal passing verify report. */
+function verifyReport(backupId: string): VerifyReport {
+  return {
+    backupId,
+    mode: "fast",
+    ok: true,
+    filesChecked: 1,
+    bytesChecked: 1,
+    documentsChecked: 0,
+    problems: [],
+    durationMs: 1,
+  };
+}

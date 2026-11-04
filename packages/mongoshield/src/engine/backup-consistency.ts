@@ -31,6 +31,7 @@ import { MongoShieldError } from "../errors.ts";
 import type { ClusterTime, ConsistencyMode } from "../format/manifest.ts";
 import type { Logger } from "../logger.ts";
 import {
+  COMPATIBLE_ENGINE_NAMES,
   type CollectionSpec,
   type DeploymentInfo,
   isAtlasRefusal,
@@ -147,9 +148,14 @@ const UNAUTHORIZED_CODE = 13;
  * `aggregate` with `batchSize: 0` (it returns at once, reading nothing) and a
  * `killCursors`.
  *
- * Only "not authorized", or an Atlas Free/Flex proxy refusing the stream (code 8000,
- * `AtlasError`), makes `auto` fall back to `none`; any other probe failure (network,
- * server down) is a real problem and fails the backup.
+ * "Not authorized", or an Atlas Free/Flex proxy refusing the stream (code 8000,
+ * `AtlasError`), makes `auto` fall back to `none`. So does a server that refuses the
+ * stream as unsupported (an unknown stage, option or command; see
+ * `UNSUPPORTED_PROBE_CODES`), and ANY probe error from a MongoDB-compatible database
+ * (DocumentDB, Cosmos DB, FerretDB: their version numbers promise change streams they
+ * may not have). Any other probe failure on MongoDB itself (network, server down) is a
+ * real problem and fails the backup. Every fall back is logged by the backup and
+ * recorded as the manifest's `consistency.warning`.
  */
 export async function chooseConsistency(
   client: MongoClient,
@@ -168,7 +174,18 @@ export async function chooseConsistency(
       warning: `Consistency "auto" used "none" (collections may reflect different moments): ${convergeUnsupportedReason(deployment) ?? "converge is not available"}.`,
     };
   }
-  if (await mayOpenChangeStream(client)) return { mode, warning: undefined };
+  let allowed: boolean;
+  try {
+    allowed = await mayOpenChangeStream(client);
+  } catch (error) {
+    const reason = unsupportedProbeReason(error, deployment);
+    if (reason === undefined) throw toBackupError(error);
+    return {
+      mode: "none",
+      warning: `Consistency "auto" used "none" (collections may reflect different moments): ${reason}`,
+    };
+  }
+  if (allowed) return { mode, warning: undefined };
   if (isAtlasSharedTier(deployment)) {
     return {
       mode: "none",
@@ -181,6 +198,37 @@ export async function chooseConsistency(
     warning:
       'Consistency "auto" used "none" (collections may reflect different moments): the MongoDB user cannot open a change stream on the whole deployment, which "converge" needs. The built-in backup role does not allow it; grant changeStream and find on all databases (e.g. the readAnyDatabase role).',
   };
+}
+
+/**
+ * Server error codes that mean "this server does not support that", not "something is
+ * wrong right now": a probe refused with one of them makes `auto` fall back to `none`.
+ *   2 BadValue, 9 FailedToParse, 20 IllegalOperation, 59 CommandNotFound,
+ *   72 InvalidOptions, 115 CommandNotSupported, 238 NotImplemented,
+ *   40324 unrecognised pipeline stage, 40415 unknown field (e.g. `showExpandedEvents`
+ *   before 6.0), 40573 `$changeStream` outside a replica set.
+ */
+const UNSUPPORTED_PROBE_CODES: ReadonlySet<number> = new Set([
+  2, 9, 20, 59, 72, 115, 238, 40324, 40415, 40573,
+]);
+
+/**
+ * Why a failed probe means "converge is not available here" (the end of the `auto`
+ * warning), or `undefined` when the failure is a real problem that fails the backup.
+ */
+function unsupportedProbeReason(error: unknown, deployment: DeploymentInfo): string | undefined {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (deployment.engine !== undefined) {
+    return `${COMPATIBLE_ENGINE_NAMES[deployment.engine]} did not open the change stream on the whole deployment that "converge" needs (${detail}).`;
+  }
+  if (
+    error instanceof MongoServerError &&
+    typeof error.code === "number" &&
+    UNSUPPORTED_PROBE_CODES.has(error.code)
+  ) {
+    return `the server refused the change stream on the whole deployment that "converge" needs as unsupported (${detail}). MongoDB-compatible databases often lack it; on MongoDB itself, check the server version (6.0+).`;
+  }
+  return undefined;
 }
 
 /** Opens and immediately closes a cluster-wide change stream; false if not authorized. */
@@ -207,7 +255,8 @@ async function mayOpenClusterChangeStream(client: MongoClient): Promise<boolean>
   } catch (error) {
     if (error instanceof MongoServerError && error.code === UNAUTHORIZED_CODE) return false;
     if (isAtlasRefusal(error)) return false;
-    throw toBackupError(error);
+    // Untranslated: chooseConsistency decides whether it means "unsupported".
+    throw error;
   } finally {
     await session.endSession().catch(() => {});
   }
@@ -243,8 +292,28 @@ export async function openReadConsistency(
     return { mode, session, clusterTime, close };
   } catch (error) {
     await close();
+    if (isAtlasRefusal(error)) throw snapshotRefusedByAtlas(error);
     throw toBackupError(error);
   }
+}
+
+/**
+ * The pinning read is the first snapshot read of a run, made before any collection is
+ * read: when an Atlas tier refuses snapshot reads, this is where the run finds out, so
+ * nothing has been written yet. Whether Free and Flex clusters allow them is not
+ * documented either way (docs/guides/atlas-free-tier.md); this turns a refusal into a
+ * clear answer instead of the generic Atlas one.
+ */
+function snapshotRefusedByAtlas(error: MongoServerError): MongoShieldError {
+  return new MongoShieldError(
+    "MS_UNSUPPORTED_TOPOLOGY",
+    `This Atlas cluster tier refused a snapshot read (readConcern "snapshot"), which consistency "snapshot" and the time series copies of incremental backups need: ${error.message}`,
+    {
+      cause: error,
+      hint: 'Use consistency "auto" (converge) instead of "snapshot" on Atlas Free and Flex clusters. Incremental jobs that hold time series collections then take full backups (fallbackToFull).',
+      details: { serverCode: error.code },
+    },
+  );
 }
 
 /**

@@ -12,8 +12,10 @@
  *
  * Accounts (see `signInOidcUser`):
  *   1. an account linked to this issuer + subject signs in;
- *   2. else an SSO-only account (no password) with the same username is linked, once;
- *      a password account with that name is never taken over (`ACCOUNT_CONFLICT`);
+ *   2. else an SSO-only account (no password) named after the identity's VERIFIED email
+ *      (`email_verified: true`) or its subject is linked, once. Never by
+ *      `preferred_username`, which users can often change at the provider; an existing
+ *      account with the new account's name is never taken over (`ACCOUNT_CONFLICT`);
  *   3. else, with auto-provisioning on, a new SSO-only account is created, otherwise
  *      the sign-in is refused (`NOT_PROVISIONED`).
  * With a role claim configured, the account's role follows the provider at every
@@ -26,20 +28,28 @@ import type { Role } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
 import type { UserRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
+import { clientAddress } from "../auth.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
 import { notFound } from "../errors.ts";
+import { basePathOf } from "../hosts.ts";
 import { PENDING_LOGIN_TTL_MS } from "../oidc/client.ts";
 import { OidcError } from "../oidc/errors.ts";
 import {
   type IdTokenClaims,
+  linkableNamesOf,
   type OidcSettings,
   roleFromClaims,
   usernameFromClaims,
 } from "../oidc/settings.ts";
 import { startSession } from "./session.ts";
 
-/** Where the browser goes after signing in. */
-const SIGNED_IN_LOCATION = "/#/";
+/**
+ * Where the browser goes after signing in: the UI's start page, under the sub-path the
+ * console is served at (MONGOSHIELD_PUBLIC_URL's path, see hosts.ts), if any.
+ */
+function signedInLocation(services: ConsoleServices): string {
+  return `${basePathOf(services.settings.publicUrl)}/#/`;
+}
 
 /** The transaction cookie's name: `__Host-` prefixed when cookies are Secure. */
 function transactionCookieName(services: ConsoleServices): string {
@@ -53,7 +63,9 @@ export function oidcRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
     if (oidc === undefined) throw notFound("Single sign-on");
     let started: Awaited<ReturnType<typeof oidc.begin>>;
     try {
-      started = await oidc.begin();
+      // Keyed by client address, so one address looping on this endpoint can only push
+      // out its own pending sign-ins (client.ts).
+      started = await oidc.begin(clientAddress(c));
     } catch (error) {
       return failedSignIn(c, services, error);
     }
@@ -95,7 +107,7 @@ export function oidcRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
         outcome: "success",
         details: { method: "oidc" },
       });
-      return c.redirect(SIGNED_IN_LOCATION, 303);
+      return c.redirect(signedInLocation(services), 303);
     } catch (error) {
       return failedSignIn(c, services, error);
     }
@@ -119,7 +131,10 @@ async function failedSignIn(
     outcome: "failure",
     details: { method: "oidc", reason: error.code },
   });
-  return c.redirect(`/#/?sso_error=${encodeURIComponent(error.code)}`, 303);
+  return c.redirect(
+    `${signedInLocation(services)}?sso_error=${encodeURIComponent(error.code)}`,
+    303,
+  );
 }
 
 /** The outcome of matching an identity to an account, decided inside one state update. */
@@ -143,28 +158,35 @@ export async function signInOidcUser(
   const identity = { issuer: settings.issuer, subject };
   const mappedRole = roleFromClaims(claims, settings);
   const username = usernameFromClaims(claims, settings.issuer);
+  const linkable = linkableNamesOf(claims);
   const now = services.now().toISOString();
 
   const decision = await services.store.update((state): AccountDecision => {
     const linked = state.users.find(
       (user) => user.oidc?.issuer === identity.issuer && user.oidc.subject === identity.subject,
     );
-    const sameName = state.users.find((user) => user.username === username);
     let account: UserRecord | undefined = linked;
     let created = false;
 
-    if (account === undefined && sameName !== undefined) {
-      if (sameName.passwordHash !== "" || sameName.oidc !== undefined) {
-        return {
-          ok: false,
-          error: new OidcError(
-            "CONSOLE_OIDC_ACCOUNT_CONFLICT",
-            `The console account "${username}" belongs to someone else (it has a password or another identity).`,
-          ),
-        };
-      }
-      // An SSO-only account an admin prepared (or the proxy created): link it.
-      account = { ...sameName, oidc: identity };
+    if (account === undefined) {
+      // An SSO-only account an admin prepared (or the proxy created), named after the
+      // verified email or the subject: link it. Never by preferred_username (A2).
+      const prepared = state.users.find(
+        (user) =>
+          user.passwordHash === "" &&
+          user.oidc === undefined &&
+          (user.username === linkable.subject || user.username.toLowerCase() === linkable.email),
+      );
+      if (prepared !== undefined) account = { ...prepared, oidc: identity };
+    }
+    if (account === undefined && state.users.some((user) => user.username === username)) {
+      return {
+        ok: false,
+        error: new OidcError(
+          "CONSOLE_OIDC_ACCOUNT_CONFLICT",
+          `The console account "${username}" belongs to someone else (it has a password or another identity, or it was prepared for a different verified email).`,
+        ),
+      };
     }
 
     const role = roleFor(account, mappedRole, settings, state.users);

@@ -155,6 +155,7 @@ export class Operator {
       defaults: {
         image: settings.image,
         ...(settings.imagePullPolicy ? { imagePullPolicy: settings.imagePullPolicy } : {}),
+        policy: settings.jobPolicy,
       },
       now,
     };
@@ -204,12 +205,16 @@ export class Operator {
         port: settings.httpPort,
         isReady: () => this.isReady(),
         metrics: () => this.metrics.render(),
+        ...(settings.metricsToken !== undefined ? { metricsToken: settings.metricsToken } : {}),
       });
     }
     this.#logger.info("operator started", {
       namespaces: settings.watchNamespaces ?? "all",
       leaderElection: settings.leaderElection,
       image: settings.image,
+      allowedImages: settings.jobPolicy.allowedImages,
+      // Whether /metrics requires a bearer token (it names every namespace and plan).
+      metricsAuth: settings.metricsToken !== undefined,
     });
 
     if (!this.#elector) {

@@ -189,6 +189,28 @@ describe("fileStorage on a filesystem without hard links", () => {
     expect(await treeOnDisk()).toEqual(["claim"]);
   });
 
+  it("never breaks a fresh lock because the file server's clock lags this machine's", async () => {
+    // The lock was just stamped by the "server" (the real filesystem clock), but this
+    // machine's clock runs 2 minutes ahead: by the local clock alone it looks stale.
+    const lock = join(root, ".claim.mongoshield-lock");
+    await mkdir(lock);
+    const realNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 2 * 60 * 1000);
+    try {
+      const writing = storage.put("claim", Buffer.from("x"), { ifNoneMatch: "*" });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Still waiting: the probe file showed the lock is seconds old on the server.
+      const tree = await treeOnDisk();
+      expect(tree).toContain(".claim.mongoshield-lock");
+      expect(tree).not.toContain("claim");
+      await rm(lock, { recursive: true });
+      await writing;
+      expect(await treeOnDisk()).toEqual(["claim"]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("stops waiting for a busy lock with MS_ABORTED when the signal fires", async () => {
     await mkdir(join(root, ".claim.mongoshield-lock"));
     const controller = new AbortController();

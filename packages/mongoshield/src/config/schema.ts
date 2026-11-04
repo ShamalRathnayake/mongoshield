@@ -345,10 +345,34 @@ export const ConfigSchema = z
 export type MongoShieldConfig = z.infer<typeof ConfigSchema>;
 
 /**
- * What users write in a config file. Every leaf may be `undefined` so that
- * `process.env.X` can be used directly without `!`.
+ * A secret value that is not written in the config itself, read when the config is
+ * loaded (src/config/secret-references.ts):
+ * - `{ env: "SLACK_WEBHOOK_URL" }`: an environment variable;
+ * - `{ file: "/run/secrets/slack-url" }`: a file, e.g. a mounted Kubernetes Secret
+ *   (surrounding whitespace, such as the final newline, is removed).
+ *
+ * Accepted for the values that are themselves credentials but used to have to be
+ * written out: `notify[].url` and `heartbeat`. A JSON config (a ConfigMap, the
+ * operator's resources) has no `process.env`, so this is how it keeps them secret.
  */
-export type MongoShieldConfigInput = DeepAllowUndefined<z.input<typeof ConfigSchema>>;
+export type SecretReference = { readonly env: string } | { readonly file: string };
+
+/** A notify target as written in a config file: its URL may be a {@link SecretReference}. */
+type NotifyTargetInput = Omit<z.input<typeof NotifyTargetSchema>, "url"> & {
+  readonly url: string | SecretReference;
+};
+
+/**
+ * What users write in a config file. Every leaf may be `undefined` so that
+ * `process.env.X` can be used directly without `!`. Webhook and heartbeat URLs may
+ * also be {@link SecretReference}s.
+ */
+export type MongoShieldConfigInput = DeepAllowUndefined<
+  Omit<z.input<typeof ConfigSchema>, "notify" | "heartbeat"> & {
+    readonly notify?: readonly NotifyTargetInput[];
+    readonly heartbeat?: string | SecretReference;
+  }
+>;
 
 /** Recursively allows `undefined` on every property (but keeps functions and adapters intact). */
 type DeepAllowUndefined<T> = T extends readonly (infer Item)[]

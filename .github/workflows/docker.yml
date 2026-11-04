@@ -1,37 +1,39 @@
-# Builds the MongoShield container image (docker/Dockerfile) and publishes it to
-# ghcr.io/shamalrathnayake/mongoshield.
+# Builds the MongoShield container images and publishes them to ghcr.io:
+#   ghcr.io/shamalrathnayake/mongoshield           the CLI (docker/Dockerfile)
+#   ghcr.io/shamalrathnayake/mongoshield-console   the web console (docker/console.Dockerfile)
+#   ghcr.io/shamalrathnayake/mongoshield-operator  the Kubernetes operator (docker/operator.Dockerfile)
 #
 # When it runs, and what it pushes:
-#   pull request touching the image  build linux/amd64, smoke-test, Trivy scan; push nothing
-#   push to main                     the above, then push multi-arch `:next` and `:sha-<short>`;
-#                                    the console image also gets `:latest` (see below)
+#   pull request touching the image  build linux/amd64 and linux/arm64, smoke-test both,
+#                                    Trivy scan; push nothing
+#   push to main                     the above, then push multi-arch `:next` and `:sha-<short>`
 #   release tag mongoshield@X.Y.Z    push `:X.Y.Z`, `:X.Y`, `:X` and `:latest` (no `latest`,
 #     (or vX.Y.Z)                    `X.Y` or `X` for prereleases such as 2.0.0-next.3)
 #   workflow_call / dispatch         same as a tag, for the version passed in
 #
-# Why the console's `:latest` follows main: its quickstart is the tag-less one-liner
-# `docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console`,
-# which pulls `:latest`. While 2.0 is in prerelease no release ever moves `:latest`
-# (prereleases get only their exact tag), so without this the one-liner would not work
-# at all. The trade-off: between releases `:latest` is the newest main build, not the
-# newest release; pin `:X.Y.Z` for production. After GA, set `latest-on-main: false`
-# for the console entry if `:latest` should track releases only (RELEASING.md). The CLI
-# and operator images keep the release-only `:latest`.
+# `:latest` follows releases only, for all three images, so the console quickstart
+# (`docker run … ghcr.io/shamalrathnayake/mongoshield-console`) runs the newest release,
+# never an untested build from main. `:next` is the newest main build.
+#
+# Publishing happens only from main or a release tag: a workflow_dispatch from any other
+# branch builds and tests but pushes nothing. The pushing job runs in the protected
+# `release` environment (restrict it to main and tags in the repository settings).
 #
 # Every pushed image gets an SBOM and SLSA provenance attestation (attached by BuildKit)
 # and a keyless cosign signature (Sigstore, using this workflow's GitHub OIDC identity).
-# Verify with:
-#   cosign verify ghcr.io/shamalrathnayake/mongoshield:latest \
-#     --certificate-identity-regexp '^https://github.com/ShamalRathnayake/mongoshield/' \
+# Verify that an image was signed by this workflow on main or on a release tag (images
+# for npm releases are built by release.yml calling this workflow from main):
+#   cosign verify ghcr.io/shamalrathnayake/mongoshield:2 \
+#     --certificate-identity-regexp '^https://github\.com/ShamalRathnayake/mongoshield/\.github/workflows/docker\.yml@refs/(heads/main|tags/(mongoshield@|v)[0-9].*)$' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 #
 # Note: tags pushed by another workflow with GITHUB_TOKEN (changesets in release.yml) do
-# not trigger `push: tags`. The release workflow should call this one via workflow_call
+# not trigger `push: tags`. The release workflow calls this one via workflow_call
 # after publishing (see the `workflow_call` input below).
 #
-# Actions are pinned by major version: we get bug and security fixes without editing
-# this file, and Dependabot proposes major upgrades. Pin to full commit SHAs instead if
-# your supply-chain policy requires it.
+# Third-party actions are pinned to full commit SHAs (the comment names the release), so
+# a moved or force-pushed tag cannot change what runs with the registry and signing
+# credentials. Dependabot proposes updates (.github/dependabot.yml).
 name: Docker
 
 on:
@@ -39,6 +41,7 @@ on:
     paths:
       - docker/** # includes docker/smoke/ (the console's end-to-end smoke tests)
       - .dockerignore
+      - .trivyignore
       - .github/workflows/docker.yml
       - packages/mongoshield/**
       - packages/console/**
@@ -61,7 +64,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to publish, e.g. 2.0.0. Leave empty to publish `next` from this branch.
+        description: Version to publish, e.g. 2.0.0. Leave empty to publish `next` from main.
         type: string
         required: false
 
@@ -74,51 +77,33 @@ concurrency:
 permissions:
   contents: read
 
-# Three images are built from this repository: the CLI (docker/Dockerfile), the
-# web console (docker/console.Dockerfile) and the Kubernetes operator
-# (docker/operator.Dockerfile). The matrix below builds them the same way.
-
 jobs:
-  image:
-    name: Build, scan and publish (${{ matrix.image }})
+  # Works out, once, the versions to tag with and whether to push at all.
+  plan:
+    name: Decide version and push
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: mongoshield
-            dockerfile: docker/Dockerfile
-          - image: mongoshield-console
-            dockerfile: docker/console.Dockerfile
-            # `:latest` also on pushes to main (see the header): the quickstart needs it.
-            latest-on-main: true
-          # The operator has its own 0.x version line (its CRDs are v1alpha1), so a
-          # release tags its image with packages/operator/package.json's version.
-          - image: mongoshield-operator
-            dockerfile: docker/operator.Dockerfile
-            version-file: packages/operator/package.json
-    env:
-      IMAGE: ghcr.io/shamalrathnayake/${{ matrix.image }}
-      # The image built for the smoke test and the vulnerability scan (never pushed).
-      LOCAL_IMAGE: ${{ matrix.image }}:ci
-    permissions:
-      contents: read
-      packages: write # push to ghcr.io
-      id-token: write # cosign keyless signing (OIDC token -> Sigstore certificate)
-      # SBOM and provenance are pushed to ghcr.io as part of the image: no extra permission.
+    outputs:
+      # The library/console version of a release ("" when building `next`).
+      version: ${{ steps.decide.outputs.version }}
+      # The operator's version for the same release (packages/operator/package.json).
+      operator-version: ${{ steps.decide.outputs.operator-version }}
+      # "true" when the images are published.
+      push: ${{ steps.decide.outputs.push }}
+      # Commit time, passed to the builds as NPM_BEFORE (see docker/Dockerfile).
+      npm-before: ${{ steps.decide.outputs.npm-before }}
     steps:
-      - uses: actions/checkout@v5 # v5: current major
-
-      # Work out the version (if this is a release) and whether to push at all.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Decide version and push
-        id: release
+        id: decide
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
-          VERSION_FILE: ${{ matrix.version-file }}
         run: |
           set -euo pipefail
           version=""
@@ -129,43 +114,58 @@ jobs:
             version="${REF_NAME#mongoshield@}"
             version="${version#v}"
           fi
-          # Images with their own version line (the operator): on a release, use the
-          # version in their package.json instead of the library's.
-          if [[ -n "${version}" && -n "${VERSION_FILE}" ]]; then
-            version="$(jq -r .version "${VERSION_FILE}")"
+          # The operator has its own version line: on a release, its image is tagged
+          # with its package.json version instead of the library's.
+          operator_version=""
+          if [[ -n "${version}" ]]; then
+            operator_version="$(jq -r .version packages/operator/package.json)"
           fi
-          push=true
-          if [[ "${EVENT}" == "pull_request" ]]; then push=false; fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "push=${push}" >> "$GITHUB_OUTPUT"
-          echo "Version: ${version:-<none, building next>}  Push: ${push}"
+          # Publish only from main or a release tag, never from a PR or another branch.
+          push=false
+          if [[ "${EVENT}" != "pull_request" ]] && [[ "${REF}" == "refs/heads/main" || "${REF}" == refs/tags/* ]]; then
+            push=true
+          elif [[ "${EVENT}" != "pull_request" ]]; then
+            echo "::notice::${REF} is not main or a release tag: building and testing only, nothing is pushed."
+          fi
+          {
+            echo "version=${version}"
+            echo "operator-version=${operator_version}"
+            echo "push=${push}"
+            echo "npm-before=$(git log -1 --format=%cI)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version: ${version:-<none, building next>}  Operator: ${operator_version:-<none>}  Push: ${push}"
 
-      # Tags and labels. `type=semver` skips `latest`, `X.Y` and `X` for prereleases
-      # automatically, so 2.0.0-next.3 is only ever published as `:2.0.0-next.3`.
-      - name: Image tags and labels
-        id: meta
-        uses: docker/metadata-action@v5 # v5: current major
+  # Builds each image for linux/amd64, runs it, and scans it. Nothing here can push or
+  # sign: no packages or id-token permission.
+  image:
+    name: Build and test (${{ matrix.image }})
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mongoshield
+            dockerfile: docker/Dockerfile
+          - image: mongoshield-console
+            dockerfile: docker/console.Dockerfile
+          - image: mongoshield-operator
+            dockerfile: docker/operator.Dockerfile
+    env:
+      # The image built for the smoke test and the vulnerability scan (never pushed).
+      LOCAL_IMAGE: ${{ matrix.image }}:ci
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          images: ${{ env.IMAGE }}
-          flavor: |
-            latest=auto
-          tags: |
-            type=semver,pattern={{version}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
-            type=semver,pattern={{major}},value=${{ steps.release.outputs.version }},enable=${{ steps.release.outputs.version != '' }}
-            type=raw,value=next,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' }}
-            type=raw,value=latest,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' && matrix.latest-on-main == true }}
-            type=sha,enable=${{ steps.release.outputs.version == '' && github.ref == 'refs/heads/main' }}
-
-      # QEMU lets the amd64 runner build the arm64 image. Only the deps stage runs
-      # emulated; the build stage runs natively (see FROM --platform in the Dockerfile).
-      - uses: docker/setup-qemu-action@v4 # v3: current major
-      - uses: docker/setup-buildx-action@v3 # v3: current major
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # 1. Build for the runner's platform and load it into the local Docker daemon,
       #    so it can be run and scanned before anything is published.
       - name: Build (linux/amd64, local)
-        uses: docker/build-push-action@v6 # v6: current major
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -173,9 +173,11 @@ jobs:
           load: true
           push: false
           tags: ${{ env.LOCAL_IMAGE }}
-          # The GitHub Actions cache makes the multi-arch build below reuse these layers.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            NPM_BEFORE=${{ needs.plan.outputs.npm-before }}
+          # The GitHub Actions cache makes the multi-arch build in `publish` reuse these layers.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
       # 2. Does it start? --version needs no database; --help lists every command,
       #    which proves all modules load. Runs as the image's non-root user.
@@ -213,7 +215,7 @@ jobs:
         if: matrix.image == 'mongoshield-operator'
         run: |
           set -euo pipefail
-          docker run -d --name operator -p 8080:8080 -e LEADER_ELECTION=false "${LOCAL_IMAGE}"
+          docker run -d --name operator -p 127.0.0.1:8080:8080 -e LEADER_ELECTION=false "${LOCAL_IMAGE}"
           for _ in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
           curl -fsS http://localhost:8080/healthz
           # To a file first: `grep -q` closing the pipe early would fail curl under pipefail.
@@ -223,12 +225,14 @@ jobs:
           test "$(docker inspect --format '{{.State.ExitCode}}' operator)" = "0"
           test "$(docker inspect --format '{{.Config.User}}' "${LOCAL_IMAGE}")" = "65532:65532"
 
-      # 3. Fail on known, fixable HIGH/CRITICAL vulnerabilities in the OS packages or
-      #    node_modules. Unfixed ones are ignored: there is nothing to upgrade to yet.
-      #    trivy-action has no major-version tag, so it is pinned to a release.
-      - name: Vulnerability scan (Trivy)
-        uses: aquasecurity/trivy-action@v0.36.0 # no major tag exists; bump deliberately
+      # 3. Vulnerability scans. trivy-action v0.35.0+ is required (earlier tags were
+      #    force-pushed to credential-stealing code in March 2026, CVE-2026-33634); it is
+      #    pinned by SHA, and the Trivy binary it installs by version.
+      #    a) Fail on known HIGH/CRITICAL vulnerabilities that have a fix: upgrade.
+      - name: Vulnerability scan (Trivy, fixable)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.70.0
           image-ref: ${{ env.LOCAL_IMAGE }}
           scanners: vuln
           severity: HIGH,CRITICAL
@@ -237,10 +241,142 @@ jobs:
           trivyignores: .trivyignore
           exit-code: "1"
           format: table
+      #    b) Also fail on CRITICAL ones without a fix: there is nothing to upgrade, but
+      #       someone must look (swap the dependency, or add a .trivyignore entry with a
+      #       reason and an expiry date when it cannot be reached from MongoShield).
+      - name: Vulnerability scan (Trivy, unfixed critical)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: false
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table
+          # The first scan already downloaded the vulnerability database.
+          skip-setup-trivy: true
+
+  # The arm64 images are published too, so they are started for real on GitHub's arm64
+  # runners (natively, no QEMU): an arm64-only regression must not ship untested.
+  arm64:
+    name: Build and test on arm64 (${{ matrix.image }})
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mongoshield
+            dockerfile: docker/Dockerfile
+          - image: mongoshield-console
+            dockerfile: docker/console.Dockerfile
+          - image: mongoshield-operator
+            dockerfile: docker/operator.Dockerfile
+    env:
+      LOCAL_IMAGE: ${{ matrix.image }}:ci-arm64
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build (linux/arm64, local)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
+          build-args: |
+            NPM_BEFORE=${{ needs.plan.outputs.npm-before }}
+          cache-from: type=gha,scope=arm64-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=arm64-${{ matrix.image }}
+      - name: Check the architecture
+        run: test "$(docker inspect --format '{{.Architecture}}' "${LOCAL_IMAGE}")" = "arm64"
+      - name: Smoke test (CLI)
+        if: matrix.image == 'mongoshield'
+        run: |
+          docker run --rm "${LOCAL_IMAGE}" --version
+          docker run --rm "${LOCAL_IMAGE}" --help
+      # The full zero-setup run (a real MongoDB 8 replica set, backup and restore) on arm64.
+      - name: Smoke test (console, zero setup)
+        if: matrix.image == 'mongoshield-console'
+        env:
+          SMOKE_PORT: "8080"
+        run: docker/smoke/console-zero-setup.sh "${LOCAL_IMAGE}"
+      - name: Smoke test (operator)
+        if: matrix.image == 'mongoshield-operator'
+        run: |
+          set -euo pipefail
+          docker run -d --name operator -p 127.0.0.1:8080:8080 -e LEADER_ELECTION=false "${LOCAL_IMAGE}"
+          for _ in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8080/healthz
+          docker stop operator
+          test "$(docker inspect --format '{{.State.ExitCode}}' operator)" = "0"
+
+  # Builds every platform, pushes and signs. Only after both platforms passed their tests,
+  # only from main or a release tag, and in the protected `release` environment. This is
+  # the only job with permission to push packages and to get a signing identity.
+  publish:
+    name: Publish (${{ matrix.image }})
+    needs: [plan, image, arm64]
+    if: needs.plan.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mongoshield
+            dockerfile: docker/Dockerfile
+          - image: mongoshield-console
+            dockerfile: docker/console.Dockerfile
+          # The operator has its own version line (see the plan job).
+          - image: mongoshield-operator
+            dockerfile: docker/operator.Dockerfile
+            own-version: true
+    env:
+      IMAGE: ghcr.io/shamalrathnayake/${{ matrix.image }}
+      VERSION: ${{ matrix.own-version && needs.plan.outputs.operator-version || needs.plan.outputs.version }}
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # cosign keyless signing (OIDC token -> Sigstore certificate)
+      # SBOM and provenance are pushed to ghcr.io as part of the image: no extra permission.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # Tags and labels. `type=semver` skips `latest`, `X.Y` and `X` for prereleases
+      # automatically, so 2.0.0-next.3 is only ever published as `:2.0.0-next.3`.
+      # `latest=auto` gives `:latest` to stable releases only; main gets `:next` and `:sha-…`.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.VERSION }},enable=${{ env.VERSION != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }},enable=${{ env.VERSION != '' }}
+            type=semver,pattern={{major}},value=${{ env.VERSION }},enable=${{ env.VERSION != '' }}
+            type=raw,value=next,enable=${{ env.VERSION == '' && github.ref == 'refs/heads/main' }}
+            type=sha,enable=${{ env.VERSION == '' && github.ref == 'refs/heads/main' }}
+
+      # QEMU lets the amd64 runner build the arm64 image. Only the deps stage runs
+      # emulated; the build stage runs natively (see FROM --platform in the Dockerfile).
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GitHub Container Registry
-        if: steps.release.outputs.push == 'true'
-        uses: docker/login-action@v3 # v3: current major
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -253,8 +389,7 @@ jobs:
       #    are passed to the build).
       - name: Build and push (linux/amd64, linux/arm64)
         id: push
-        if: steps.release.outputs.push == 'true'
-        uses: docker/build-push-action@v6 # v6: current major
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -263,27 +398,26 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            NPM_BEFORE=${{ needs.plan.outputs.npm-before }}
           sbom: true
           provenance: mode=max
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
       - name: Install cosign
-        if: steps.release.outputs.push == 'true'
-        uses: sigstore/cosign-installer@v3 # v3: current major
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       # 5. Sign the pushed manifest list by digest (signing a tag could sign whatever the
       #    tag points to by then). One signature covers every tag and both platforms.
       #    Keyless: cosign gets a short-lived certificate for this workflow's identity;
       #    the signature is recorded in Sigstore's public transparency log.
       - name: Sign image (cosign keyless)
-        if: steps.release.outputs.push == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
       - name: Summary
-        if: steps.release.outputs.push == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}

@@ -56,6 +56,45 @@ describe("periodOf", () => {
     expect(periodOf("weekly", new Date("2024-12-30T00:00:00Z"))).toBe("2025-W01");
   });
 
+  it("labels periods on a time zone's wall clock when one is given", () => {
+    // 00:30 UTC is 06:00 in Colombo (UTC+05:30) and still the previous day in New York.
+    const date = new Date("2026-10-21T00:30:00Z");
+    expect(periodOf("daily", date, "Asia/Colombo")).toBe("2026-10-21");
+    expect(periodOf("hourly", date, "Asia/Colombo")).toBe("2026-10-21T06");
+    expect(periodOf("daily", date, "America/New_York")).toBe("2026-10-20");
+    // Sunday 23:30 in Colombo is Sunday 18:00 UTC; Monday 00:30 Colombo is a new ISO week.
+    expect(periodOf("weekly", new Date("2026-10-25T18:00:00Z"), "Asia/Colombo")).toBe("2026-W43");
+    expect(periodOf("weekly", new Date("2026-10-25T19:00:00Z"), "Asia/Colombo")).toBe("2026-W44");
+    expect(periodOf("yearly", new Date("2026-12-31T20:00:00Z"), "Asia/Colombo")).toBe("2027");
+  });
+
+  it("is unchanged (UTC) without a time zone, and with UTC itself", () => {
+    fc.assert(
+      fc.property(
+        fc.date({ min: new Date(0), max: new Date("2100-01-01"), noInvalidDate: true }),
+        (date) => {
+          for (const bucket of ["hourly", "daily", "weekly", "monthly", "yearly"] as const) {
+            expect(periodOf(bucket, date, "UTC")).toBe(periodOf(bucket, date));
+          }
+        },
+      ),
+    );
+  });
+
+  it("counts two backups of one local day as one daily slot in that zone", () => {
+    // 2026-10-19 in Colombo runs from 2026-10-18T18:30Z to 2026-10-19T18:30Z.
+    const backups = [backup("2026-10-19T18:00:00Z"), backup("2026-10-18T19:00:00Z")];
+    expect(removedIds(plan(backups, { daily: 2 }))).toEqual([]);
+    const local = plan(backups, { daily: 2, timeZone: "Asia/Colombo" });
+    expect(removedIds(local)).toEqual(["2026-10-18T19:00:00Z"]);
+  });
+
+  it("refuses an unknown time zone", () => {
+    expect(() =>
+      plan([backup("2026-10-20T00:00:00Z")], { daily: 1, timeZone: "Mars/Olympus" }),
+    ).toThrow(/Unknown time zone/);
+  });
+
   it("treats a leap day as its own day in February", () => {
     const leapDay = new Date("2024-02-29T12:00:00Z");
     expect(periodOf("daily", leapDay)).toBe("2024-02-29");

@@ -34,6 +34,7 @@
  */
 
 import type { Collection, Document, WriteConcernSettings } from "mongodb";
+import { withUseLease } from "../catalog/use-leases.ts";
 import type { RestoreContext } from "../engine/context.ts";
 import { compileFilter, type DocumentMatcher } from "../engine/filter.ts";
 import { matchingDocuments } from "../engine/find.ts";
@@ -50,6 +51,7 @@ import {
 } from "../engine/find-restore.ts";
 import { type BatchLimits, DEFAULT_BATCH_LIMITS } from "../engine/restore-documents.ts";
 import { assertValidTargetNamespace, compileRenameMap } from "../engine/restore-rename.ts";
+import { verifyBeforeWriting } from "../engine/restore-verify-first.ts";
 import { MongoShieldError, throwIfAborted } from "../errors.ts";
 import { valueInStoredOrder } from "../format/field-order.ts";
 import { type CollectionEntry, collectionEntries } from "../format/manifest.ts";
@@ -195,9 +197,26 @@ export async function restoreTenant(
   const { planned, skipped } = await planNamespaces(context, backup, options);
 
   const results: TenantNamespaceResult[] = [];
-  for (const namespace of planned) {
-    throwIfAborted(options.signal);
-    results.push(await restoreNamespace(context, backup, namespace, { ...options, mode, dryRun }));
+  const restoreAll = async (): Promise<void> => {
+    for (const namespace of planned) {
+      throwIfAborted(options.signal);
+      results.push(
+        await restoreNamespace(context, backup, namespace, { ...options, mode, dryRun }),
+      );
+    }
+  };
+  if (dryRun) await restoreAll();
+  else {
+    // While the backup (and its chain) is read, prune must leave it alone
+    // (catalog/use-leases.ts). The selected backup's lease keeps its chain too.
+    const selectedId = backup.chain?.backupId ?? backup.manifest.id;
+    await withUseLease(
+      context.storage,
+      [selectedId],
+      "restore",
+      { logger: context.logger },
+      restoreAll,
+    );
   }
 
   const result: RestoreTenantResult = {
@@ -377,10 +396,19 @@ async function restoreNamespace(
   if (!exists && !options.dryRun) {
     await createTarget(context, opened, planned.targetNamespace, options);
   }
-  const deleted =
-    options.mode === "replace-tenant" && exists
-      ? await deleteTenant(collection, planned.filter, options)
-      : 0;
+  const replacing = options.mode === "replace-tenant" && exists;
+  if (replacing && !options.dryRun) {
+    // The tenant's live documents are deleted before the backed-up ones are read, and
+    // a data part's checksum is only known at its end: check the parts first, so a
+    // damaged backup cannot leave the tenant deleted and half restored.
+    await verifyBeforeWriting({
+      source: opened.source,
+      files: opened.entry.files,
+      logger: context.logger,
+      signal: options.signal,
+    });
+  }
+  const deleted = replacing ? await deleteTenant(collection, planned.filter, options) : 0;
 
   const counts: Counts = { matched: 0, inserted: 0, replaced: 0, skipped: 0 };
   const writer: BatchWriter = {

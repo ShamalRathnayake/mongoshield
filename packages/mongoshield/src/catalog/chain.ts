@@ -25,6 +25,7 @@ import {
   isIncrementalManifest,
   type Manifest,
 } from "../format/manifest.ts";
+import { sameDeployment } from "../mongo/deployment.ts";
 import type { CatalogEntry } from "./catalog.ts";
 
 /** A chain resolved from its newest member back to its base full backup. */
@@ -320,6 +321,15 @@ function linkProblems(child: IncrementalManifest, parent: Manifest): ChainProble
   if (childCluster === undefined || parentCluster === undefined || childCluster !== parentCluster) {
     problems.push(
       mismatch(child, `its parent ${parent.id} was taken from a different (or unknown) deployment`),
+    );
+  } else if (!sameDeployment(child.source, parent.source)) {
+    // Same clusterId (same replica set name) but a different replica set: two
+    // clusters both called e.g. `rs0`, or one that was rebuilt under the old name.
+    problems.push(
+      mismatch(
+        child,
+        `its parent ${parent.id} was taken from another replica set with the same name`,
+      ),
     );
   }
   return problems;

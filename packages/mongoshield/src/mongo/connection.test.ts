@@ -14,7 +14,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { isMongoShieldError, MongoShieldError } from "../errors.ts";
 import type { SourceOptions } from "../types.ts";
-import { openConnection, toConnectionError } from "./connection.ts";
+import { openConnection, toConnectionError, usesSingleHostDiscovery } from "./connection.ts";
 
 const context = { location: "mongodb://db.example.com:27017" };
 
@@ -76,6 +76,32 @@ describe("toConnectionError", () => {
     expect(hintOf(new MongoNetworkError("connection reset"))).toMatch(/network connection/);
     expect(hintOf("a thrown string")).toMatch(/running and reachable/);
     expect(toConnectionError("a thrown string", context).message).toContain("a thrown string");
+  });
+
+  it("suggests directConnection=true for a selection timeout on a single-host URI", () => {
+    const description = { type: "Unknown", servers: new Map() } as unknown as TopologyDescription;
+    const selection = new MongoServerSelectionError("timed out", description);
+    const single = toConnectionError(selection, { ...context, singleHostDiscovery: true });
+    expect(single.hint).toContain("directConnection=true");
+    expect(single.hint).toContain("No suitable server");
+    // Other URIs, and other failures on single-host URIs, keep their hints.
+    expect(hintOf(selection)).not.toContain("directConnection");
+    const refused = codedError("connect ECONNREFUSED 127.0.0.1:1", "ECONNREFUSED");
+    expect(
+      toConnectionError(refused, { ...context, singleHostDiscovery: true }).hint,
+    ).not.toContain("directConnection");
+  });
+
+  it("recognises single-host URIs that leave topology discovery to the driver", () => {
+    expect(usesSingleHostDiscovery("mongodb://localhost:27017")).toBe(true);
+    expect(
+      usesSingleHostDiscovery("mongodb://u:p%40ss@host.docker.internal:27017/app?tls=true"),
+    ).toBe(true);
+    expect(usesSingleHostDiscovery("mongodb://localhost:27017/?directConnection=true")).toBe(false);
+    expect(usesSingleHostDiscovery("mongodb://localhost:27017/?replicaSet=rs0")).toBe(false);
+    expect(usesSingleHostDiscovery("mongodb://a:1,b:2")).toBe(false);
+    expect(usesSingleHostDiscovery("mongodb+srv://cluster0.abcde.mongodb.net")).toBe(false);
+    expect(usesSingleHostDiscovery("mongodb://lb:27017/?loadBalanced=true")).toBe(false);
   });
 
   it("removes the given secrets from the message", () => {

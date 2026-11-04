@@ -1,5 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
-import { CANCELLING_MESSAGE, createInterruptHandler, SIGINT_EXIT_CODE } from "./interrupt.ts";
+import {
+  CANCELLING_MESSAGE,
+  cliHandlesTermination,
+  createInterruptHandler,
+  SIGINT_EXIT_CODE,
+} from "./interrupt.ts";
+
+describe("cliHandlesTermination", () => {
+  it("leaves SIGTERM to run and schedule, wherever global flags put them", () => {
+    expect(cliHandlesTermination(["schedule"])).toBe(false);
+    expect(cliHandlesTermination(["--config", "f.ts", "schedule"])).toBe(false);
+    expect(cliHandlesTermination(["-c", "f.ts", "--verbose", "run", "--once"])).toBe(false);
+    expect(cliHandlesTermination(["--config=f.ts", "run"])).toBe(false);
+  });
+
+  it("handles SIGTERM like Ctrl-C for every other command", () => {
+    expect(cliHandlesTermination(["backup"])).toBe(true);
+    expect(cliHandlesTermination(["--json", "list"])).toBe(true);
+    expect(cliHandlesTermination([])).toBe(true);
+    // A config file named like a command is a flag value, not the command.
+    expect(cliHandlesTermination(["--config", "run", "backup"])).toBe(true);
+  });
+});
 
 function setup() {
   const effects = { abort: vi.fn(), exit: vi.fn(), write: vi.fn() };

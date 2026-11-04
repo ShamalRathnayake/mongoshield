@@ -502,14 +502,14 @@ spec:
                       minimum: 0
                     env:
                       type: array
-                      description: Extra environment variables (core/v1 EnvVar).
+                      description: Extra environment variables (core/v1 EnvVar). While the operator restricts images, variables that load code (NODE_OPTIONS other than heap-size and warning flags, NODE_PATH, LD_*, OPENSSL_CONF…) and the ones the operator sets are refused.
                       maxItems: 100
                       items:
                         type: object
                         x-kubernetes-preserve-unknown-fields: true
                     envFrom:
                       type: array
-                      description: Extra environment from Secrets/ConfigMaps (core/v1 EnvFromSource).
+                      description: Extra environment from Secrets/ConfigMaps (core/v1 EnvFromSource). Refused while the operator restricts images, unless its admin allows it (jobPolicy.allowEnvFrom).
                       maxItems: 100
                       items:
                         type: object
@@ -1035,6 +1035,7 @@ spec:
                       type: string
                       maxLength: 256
                       description: A backup id, or 'latest'.
+                      pattern: ^(latest|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z_[0-9a-f]{6})$
                   x-kubernetes-validations:
                     - rule: '!(has(self.name) && has(self.id))'
                       message: set backup.name or backup.id
@@ -1337,6 +1338,7 @@ spec:
                       type: string
                       maxLength: 256
                       description: A backup id, or 'latest'.
+                      pattern: ^(latest|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z_[0-9a-f]{6})$
                   x-kubernetes-validations:
                     - rule: '!(has(self.name) && has(self.id))'
                       message: set backup.name or backup.id

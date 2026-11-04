@@ -18,7 +18,10 @@
  *
  * Creating collections and building indexes reuse restore's helpers
  * (`restore-collections.ts`, `restore-indexes.ts`), so a copy recreates options,
- * validators, collations, time series and views exactly like a restore does.
+ * validators, collations, time series and views exactly like a restore does. With a
+ * mask, definitions that refer to masked fields (a validator's `$in` list, a partial
+ * index filter, a view's `$match`) are copied as they are, values included; the copy
+ * warns about each one before writing (`warnAboutMaskedDefinitions`).
  */
 
 import {
@@ -41,6 +44,8 @@ import {
 import { type LoadResult, type WriteMode, writeDocuments } from "../engine/restore-documents.ts";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { deserializeInStoredOrder, valueInStoredOrder } from "../format/field-order.ts";
+import type { Logger } from "../logger.ts";
+import type { Mask } from "../mask/index.ts";
 import type { CollectionSpec } from "../mongo/index.ts";
 import type { RestorePlanEntry } from "../types.ts";
 
@@ -153,7 +158,7 @@ async function writeInChunks(
   onChunkWritten: (lastId: unknown) => void,
 ): Promise<LoadResult> {
   const iterator = documents[Symbol.asyncIterator]();
-  const totals = { documents: 0, documentsRead: 0, bytes: 0 };
+  const totals = { documents: 0, documentsRead: 0, duplicatesSkipped: 0, bytes: 0 };
   let exhausted = false;
   while (!exhausted) {
     let last: Buffer | undefined;
@@ -180,6 +185,7 @@ async function writeInChunks(
     );
     totals.documents += result.documents;
     totals.documentsRead += result.documentsRead;
+    totals.duplicatesSkipped += result.duplicatesSkipped;
     totals.bytes += result.bytes;
     if (last !== undefined) onChunkWritten(idOfRawDocument(last));
   }
@@ -338,6 +344,137 @@ export async function createView(
   } catch (error) {
     throw toCopyError(`${db.databaseName}.${name}`, "Creating the view", error);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Masked copies: definitions that may hold unmasked values
+// ---------------------------------------------------------------------------
+
+/** Where a collection's definition can quote field values. */
+export interface MaskedDefinitionWarning {
+  /** The source namespace whose definition is copied. */
+  readonly ns: string;
+  /** `validator`, `index <name> (partialFilterExpression)` or `view pipeline`. */
+  readonly where: string;
+  /** The masked field paths it refers to. */
+  readonly fields: readonly string[];
+}
+
+/**
+ * The definitions a masked copy carries over that refer to masked fields.
+ *
+ * Masking rewrites documents, but a copy recreates each collection's definition as
+ * the source has it: a validator (`{ email: { $in: ["ceo@acme.com", …] } }`), a
+ * partial index's `partialFilterExpression`, or a view's pipeline (`$match` on a
+ * customer's name) can quote the very values the mask hides, in clear text, in the
+ * staging database. The definitions are still copied (dropping a validator or a view
+ * changes behaviour); this lists them so the copy can warn. A view is checked against
+ * the rules of its source collection as well as its own.
+ */
+export function maskedDefinitionWarnings(
+  spec: CollectionSpec,
+  masksOf: (ns: string) => readonly string[],
+): MaskedDefinitionWarning[] {
+  const ownPaths = masksOf(spec.ns);
+  const warnings: MaskedDefinitionWarning[] = [];
+  const check = (where: string, expression: unknown, paths: readonly string[]): void => {
+    if (expression === undefined || paths.length === 0) return;
+    const fields = maskedFieldsIn(expression, paths);
+    if (fields.length > 0) warnings.push({ ns: spec.ns, where, fields });
+  };
+
+  check("validator", spec.options.validator, ownPaths);
+  for (const index of spec.indexes) {
+    const name = typeof index.name === "string" ? index.name : "?";
+    check(`index ${name} (partialFilterExpression)`, index.partialFilterExpression, ownPaths);
+  }
+  if (spec.type === "view") {
+    const viewOn = spec.options.viewOn;
+    const sourcePaths = typeof viewOn === "string" ? masksOf(`${spec.db}.${viewOn}`) : [];
+    check("view pipeline", spec.options.pipeline, [...new Set([...ownPaths, ...sourcePaths])]);
+  }
+  return warnings;
+}
+
+/**
+ * Logs a warning for every copied definition that refers to a masked field (see
+ * {@link maskedDefinitionWarnings}), before anything is written.
+ */
+export function warnAboutMaskedDefinitions(
+  namespaces: readonly { readonly spec: CollectionSpec }[],
+  mask: Mask,
+  logger: Logger,
+): void {
+  const masksOf = (ns: string): readonly string[] => mask.forNamespace(ns)?.paths ?? [];
+  for (const { spec } of namespaces) {
+    for (const warning of maskedDefinitionWarnings(spec, masksOf)) {
+      logger.warn(
+        `The ${warning.where} of ${warning.ns} refers to masked ${warning.fields.length === 1 ? "field" : "fields"} ${warning.fields.join(", ")}: it is copied as defined, so any values it quotes reach the target unmasked. Review it on the target, or leave the namespace out.`,
+        { ns: warning.ns, where: warning.where, fields: warning.fields },
+      );
+    }
+  }
+}
+
+/** The masked paths (as written in the rules) that `expression` refers to. */
+function maskedFieldsIn(expression: unknown, maskedPaths: readonly string[]): string[] {
+  const references = new Set<string>();
+  collectFieldReferences(expression, "", references);
+  const found: string[] = [];
+  for (const masked of maskedPaths) {
+    const target = plainPath(masked);
+    for (const reference of references) {
+      const ref = plainPath(reference);
+      // The same field, a part of it, or a document that contains it.
+      if (ref === target || ref.startsWith(`${target}.`) || target.startsWith(`${ref}.`)) {
+        found.push(masked);
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Every field a query, validator or pipeline names: dotted keys outside operators
+ * (`{ "profile.email": … }`), `$jsonSchema` property names (`properties: { email }`),
+ * and aggregation field paths (`"$email"`, not `"$$variables"`). A walk over plain
+ * values, bounded by the definition's size.
+ */
+function collectFieldReferences(node: unknown, prefix: string, into: Set<string>): void {
+  if (typeof node === "string") {
+    if (node.startsWith("$") && !node.startsWith("$$") && node.length > 1) {
+      into.add(node.slice(1));
+    }
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const element of node) collectFieldReferences(element, prefix, into);
+    return;
+  }
+  if (typeof node !== "object" || node === null) return;
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "properties" && typeof value === "object" && value !== null) {
+      // $jsonSchema: each property is a field one level down.
+      for (const [name, schema] of Object.entries(value)) {
+        into.add(`${prefix}${name}`);
+        collectFieldReferences(schema, `${prefix}${name}.`, into);
+      }
+    } else if (key.startsWith("$")) {
+      collectFieldReferences(value, prefix, into);
+    } else {
+      into.add(`${prefix}${key}`);
+      collectFieldReferences(value, `${prefix}${key}.`, into);
+    }
+  }
+}
+
+/** `addresses.*.street` / `addresses.0.street` → `addresses.street`: array steps dropped. */
+function plainPath(path: string): string {
+  return path
+    .split(".")
+    .filter((segment) => segment !== "*" && !/^\d+$/.test(segment))
+    .join(".");
 }
 
 /** Server error code for "not authorized". */

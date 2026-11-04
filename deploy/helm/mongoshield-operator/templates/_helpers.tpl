@@ -48,7 +48,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
-{{/* The image Jobs run: repository:tag. */}}
+{{/*
+The image Jobs run: repository:tag. The tag defaults to the chart's appVersion (the
+MongoShield release this operator ships with), never `latest`.
+*/}}
 {{- define "mongoshield-operator.jobImage" -}}
-{{- printf "%s:%s" .Values.jobImage.repository (.Values.jobImage.tag | default "latest") }}
+{{- printf "%s:%s" .Values.jobImage.repository (.Values.jobImage.tag | default .Chart.AppVersion) }}
+{{- end }}
+
+{{/* The Secret holding the /metrics bearer token: the user's, or the one this chart makes. */}}
+{{- define "mongoshield-operator.metricsSecretName" -}}
+{{- default (printf "%s-metrics" (include "mongoshield-operator.fullname" .)) .Values.metrics.auth.existingSecret }}
 {{- end }}

@@ -176,6 +176,13 @@ export const ManifestSchema = z
       serverVersion: z.string(),
       /** Stable, non-secret identifier for the source deployment (a hash, never a URI). */
       clusterId: z.string().optional(),
+      /**
+       * A hash of the replica set's `settings.replicaSetId`, which tells apart two
+       * replica sets with the same name (see `DeploymentInfo.instanceId`). Added in
+       * MongoShield 2.0.2 without a format bump: old readers ignore it and compare
+       * `clusterId` alone, as before; new readers compare it only when both sides have it.
+       */
+      instanceId: z.string().optional(),
     }),
     consistency: z.object({
       mode: z.enum(["none", "snapshot", "converge"]),

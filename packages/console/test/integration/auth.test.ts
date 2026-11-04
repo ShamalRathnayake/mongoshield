@@ -39,6 +39,8 @@ describe("setup token", () => {
     expect(before.body).toEqual({
       setupComplete: false,
       authMethods: ["password"],
+      // Test consoles turn Secure cookies off (plain-HTTP requests in-process).
+      cookieSecure: false,
       // Tests open consoles without a setup window: the token is required.
       setup: { tokenRequired: true },
     });
@@ -73,10 +75,10 @@ describe("setup token", () => {
     expect(response.body.error.code).toBe("CONSOLE_SETUP_TOKEN_INVALID");
   });
 
-  it("expires the token after 24 hours", async () => {
+  it("expires the token after an hour", async () => {
     const clock = new TestClock();
     const testConsole = await open({ clock });
-    clock.advance(24 * 60 * 60 * 1000 + 1);
+    clock.advance(60 * 60 * 1000 + 1);
     const response = await testConsole.client().request("POST", "/api/setup", {
       token: testConsole.setupToken,
       username: "admin",

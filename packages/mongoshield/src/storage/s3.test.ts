@@ -10,6 +10,7 @@ import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   type GetObjectCommandOutput,
@@ -27,6 +28,7 @@ import {
 import { mockClient } from "aws-sdk-client-mock";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isMongoShieldError } from "../errors.ts";
+import { isConditionalWritesUnsupported } from "./conditional-writes.ts";
 import { type S3StorageOptions, s3Storage } from "./s3.ts";
 
 const MiB = 1024 * 1024;
@@ -347,6 +349,193 @@ describe("s3Storage", () => {
       expect(isMongoShieldError(error, "MS_STORAGE_IO")).toBe(true);
       expect(isMongoShieldError(error) && error.hint).toContain('"WHEN_REQUIRED"');
     });
+
+    it("uses WHEN_REQUIRED checksums by default with a custom endpoint, and the SDK's default on AWS", async () => {
+      // The adapter creates its own client here, so mock every S3Client instance.
+      const everyClient = mockClient(S3Client);
+      try {
+        everyClient.on(PutObjectCommand).resolves({ ETag: '"e"' });
+        const settingsOf = async (options: Partial<S3StorageOptions>) => {
+          everyClient.resetHistory();
+          await s3Storage({ bucket: "bkt", region: "us-east-1", ...options }).put(
+            "a",
+            Buffer.from("x"),
+          );
+          const created = everyClient.call(0).thisValue as S3Client;
+          return [
+            await created.config.requestChecksumCalculation(),
+            await created.config.responseChecksumValidation(),
+          ];
+        };
+        const credentials = { accessKeyId: "test", secretAccessKey: "test" };
+        expect(await settingsOf({ credentials, endpoint: "http://127.0.0.1:9000" })).toEqual([
+          "WHEN_REQUIRED",
+          "WHEN_REQUIRED",
+        ]);
+        expect(await settingsOf({ credentials })).toEqual(["WHEN_SUPPORTED", "WHEN_SUPPORTED"]);
+        // An explicit setting wins over the endpoint default.
+        expect(
+          await settingsOf({
+            credentials,
+            endpoint: "http://127.0.0.1:9000",
+            requestChecksumCalculation: "WHEN_SUPPORTED",
+          }),
+        ).toEqual(["WHEN_SUPPORTED", "WHEN_REQUIRED"]);
+      } finally {
+        everyClient.restore();
+      }
+    });
+  });
+
+  describe("conditional writes on S3-compatible services", () => {
+    /** An adapter for an unknown S3-compatible store: conditional writes are probed. */
+    const probing = (options: Partial<S3StorageOptions> = {}) =>
+      storage({ conditionalWrites: "probe", ...options });
+
+    it("trusts If-None-Match on AWS and R2, and probes any other endpoint", () => {
+      const aws = s3Storage({ bucket: "b", endpoint: "https://s3.eu-west-1.amazonaws.com" });
+      const r2 = s3Storage({ bucket: "b", endpoint: "https://acct.r2.cloudflarestorage.com" });
+      const b2 = s3Storage({ bucket: "b", endpoint: "https://s3.us-west-004.backblazeb2.com" });
+      // All three still claim the capability; only the unknown one checks it first.
+      for (const adapter of [aws, r2, b2])
+        expect(adapter.capabilities.conditionalWrites).toBe(true);
+      expect(
+        s3Storage({ bucket: "b", conditionalWrites: false }).capabilities.conditionalWrites,
+      ).toBe(false);
+    });
+
+    it("probes once, then sends the conditional write, when the store refuses the second create", async () => {
+      s3.on(PutObjectCommand)
+        .resolvesOnce({ ETag: '"probe"' })
+        .rejectsOnce(serviceError("PreconditionFailed", 412))
+        .resolves({ ETag: '"e"' });
+      s3.on(DeleteObjectCommand).resolves({});
+      const adapter = probing();
+      await adapter.put("locks/x", Buffer.from("x"), { ifNoneMatch: "*" });
+      await adapter.put("locks/y", Buffer.from("y"), { ifNoneMatch: "*" });
+
+      const keys = s3.commandCalls(PutObjectCommand).map((call) => call.args[0].input.Key);
+      // Two probe writes of the same key, then the two real writes: no second probe.
+      expect(keys).toHaveLength(4);
+      // The probe object sits next to the object being written.
+      expect(keys[0]).toMatch(/^base\/locks\/\.conditional-write-probe-[0-9a-f-]{36}$/);
+      expect(keys[1]).toBe(keys[0]);
+      expect(keys.slice(2)).toEqual(["base/locks/x", "base/locks/y"]);
+      expect(s3.commandCalls(DeleteObjectCommand)[0]?.args[0].input.Key).toBe(keys[0]);
+    });
+
+    it("reports a store that ignores If-None-Match as unsupported, without writing the object", async () => {
+      s3.on(PutObjectCommand).resolves({ ETag: '"e"' });
+      s3.on(DeleteObjectCommand).resolves({});
+      const adapter = probing();
+      const error = await rejection(adapter.put("locks/x", Buffer.from("x"), { ifNoneMatch: "*" }));
+      expect(isConditionalWritesUnsupported(error)).toBe(true);
+      expect(isMongoShieldError(error) && error.hint).toContain('schedule.lock to "mongo"');
+      // Only the two probe writes happened, and the verdict is kept.
+      await rejection(adapter.put("locks/y", Buffer.from("y"), { ifNoneMatch: "*" }));
+      expect(s3.commandCalls(PutObjectCommand)).toHaveLength(2);
+      // Unconditional writes are not affected.
+      await adapter.put("data", Buffer.from("d"));
+      expect(s3.commandCalls(PutObjectCommand)).toHaveLength(3);
+    });
+
+    it("reports a store that answers 501 to the probe as unsupported", async () => {
+      s3.on(PutObjectCommand).rejects(serviceError("NotImplemented", 501));
+      s3.on(DeleteObjectCommand).resolves({});
+      const error = await rejection(
+        probing().put("locks/x", Buffer.from("x"), { ifNoneMatch: "*" }),
+      );
+      expect(isConditionalWritesUnsupported(error)).toBe(true);
+    });
+
+    it("maps a 501 to a conditional write on a trusted store to the same error", async () => {
+      s3.on(PutObjectCommand).rejects(serviceError("NotImplemented", 501));
+      const error = await rejection(
+        storage().put("locks/x", Buffer.from("x"), { ifNoneMatch: "*" }),
+      );
+      expect(isConditionalWritesUnsupported(error)).toBe(true);
+      // The same 501 on an ordinary write stays a storage error.
+      const plain = await rejection(storage().put("data", Buffer.from("x")));
+      expect(isMongoShieldError(plain, "MS_STORAGE_IO")).toBe(true);
+    });
+
+    it("reports an inconclusive probe as unsupported, and probes again at the next conditional put", async () => {
+      s3.on(PutObjectCommand)
+        .rejectsOnce(serviceError("InternalError", 500))
+        .resolvesOnce({ ETag: '"probe"' })
+        .rejectsOnce(serviceError("PreconditionFailed", 412))
+        .resolves({ ETag: '"e"' });
+      s3.on(DeleteObjectCommand).resolves({});
+      const adapter = probing();
+      const first = await rejection(adapter.put("locks/x", Buffer.from("x"), { ifNoneMatch: "*" }));
+      // Callers fall back (manifest) or refuse (lock), exactly as for "unsupported".
+      expect(isConditionalWritesUnsupported(first)).toBe(true);
+      expect(isMongoShieldError(first) && first.details?.inconclusive).toBe(true);
+      // The failure is not kept: the second put probes again, and then writes.
+      await adapter.put("locks/x", Buffer.from("x"), { ifNoneMatch: "*" });
+      expect(s3.commandCalls(PutObjectCommand)).toHaveLength(4);
+    });
+
+    it("probes next to the manifest, and a probe refused for permissions does not fail the write", async () => {
+      // A backup role that may only write below backups/: the probe is denied
+      // anywhere else, but it is written next to the manifest, so it is allowed.
+      s3.on(PutObjectCommand)
+        .rejects(serviceError("AccessDenied", 403))
+        .on(PutObjectCommand, { Key: "base/backups/id/manifest.json" })
+        .resolves({ ETag: '"m"' });
+      s3.on(DeleteObjectCommand).resolves({});
+      const adapter = probing();
+      const error = await rejection(
+        adapter.put("backups/id/manifest.json", Buffer.from("{}"), { ifNoneMatch: "*" }),
+      );
+      // AccessDenied says nothing about If-None-Match: inconclusive, not forbidden.
+      expect(isConditionalWritesUnsupported(error)).toBe(true);
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(false);
+      const probeKey = s3.commandCalls(PutObjectCommand)[0]?.args[0].input.Key;
+      expect(probeKey).toMatch(/^base\/backups\/id\/\.conditional-write-probe-/);
+      // The probe object is deleted (best effort) even when its write failed.
+      expect(s3.commandCalls(DeleteObjectCommand)[0]?.args[0].input.Key).toBe(probeKey);
+      // The manifest write's fallback, an unconditional put, works.
+      await adapter.put("backups/id/manifest.json", Buffer.from("{}"));
+    });
+
+    it("probes at the root of the prefix for a key without a directory", async () => {
+      s3.on(PutObjectCommand)
+        .resolvesOnce({ ETag: '"probe"' })
+        .rejectsOnce(serviceError("PreconditionFailed", 412))
+        .resolves({ ETag: '"e"' });
+      s3.on(DeleteObjectCommand).resolves({});
+      await probing().put("top", Buffer.from("x"), { ifNoneMatch: "*" });
+      const probeKey = s3.commandCalls(PutObjectCommand)[0]?.args[0].input.Key;
+      expect(probeKey).toMatch(/^base\/\.conditional-write-probe-/);
+    });
+
+    it("reports a cancelled probe as cancelled, not as unsupported", async () => {
+      const controller = new AbortController();
+      s3.on(PutObjectCommand).callsFake(() => {
+        controller.abort();
+        throw serviceError("RequestAborted", 499);
+      });
+      s3.on(DeleteObjectCommand).resolves({});
+      const error = await rejection(
+        probing().put("locks/x", Buffer.from("x"), {
+          ifNoneMatch: "*",
+          signal: controller.signal,
+        }),
+      );
+      expect(isConditionalWritesUnsupported(error)).toBe(false);
+      expect(isMongoShieldError(error, "MS_ABORTED")).toBe(true);
+    });
+
+    it("refuses conditional puts outright when conditionalWrites is false", async () => {
+      const error = await rejection(
+        storage({ conditionalWrites: false }).put("locks/x", Buffer.from("x"), {
+          ifNoneMatch: "*",
+        }),
+      );
+      expect(isConditionalWritesUnsupported(error)).toBe(true);
+      expect(s3.commandCalls(PutObjectCommand)).toHaveLength(0);
+    });
   });
 
   describe("get", () => {
@@ -568,6 +757,64 @@ describe("s3Storage", () => {
     it("ignores NoSuchKey entries reported by S3-compatible stores", async () => {
       s3.on(DeleteObjectsCommand).resolves({ Errors: [{ Key: "base/a", Code: "NoSuchKey" }] });
       await storage().delete(["a"]);
+    });
+
+    it("refuses to hide an object still under Object Lock behind a delete marker", async () => {
+      s3.on(GetObjectLockConfigurationCommand).resolves({
+        ObjectLockConfiguration: { ObjectLockEnabled: "Enabled" },
+      });
+      s3.on(HeadObjectCommand, { Key: "base/locked" }).resolves({
+        ObjectLockRetainUntilDate: new Date(Date.now() + 86_400_000),
+      });
+      s3.on(HeadObjectCommand, { Key: "base/free" }).resolves({});
+      s3.on(DeleteObjectsCommand).resolves({});
+
+      const error = await rejection(storage().delete(["free", "locked"]));
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
+      expect((error as { details?: { objectLocked?: boolean } }).details?.objectLocked).toBe(true);
+      // Nothing of the batch was deleted.
+      expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(0);
+
+      // Expired retention and no legal hold: deleted as usual.
+      s3.on(HeadObjectCommand, { Key: "base/locked" }).resolves({
+        ObjectLockRetainUntilDate: new Date(Date.now() - 1000),
+        ObjectLockLegalHoldStatus: "OFF",
+      });
+      await storage().delete(["free", "locked"]);
+      expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(1);
+    });
+
+    it("asks for the Object Lock setting once, and checks objects when it may not read it", async () => {
+      s3.on(GetObjectLockConfigurationCommand).rejects(serviceError("AccessDenied", 403));
+      s3.on(HeadObjectCommand).resolves({});
+      s3.on(DeleteObjectsCommand).resolves({});
+      const adapter = storage();
+      await adapter.delete(["a"]);
+      await adapter.delete(["b"]);
+      // "Unknown" is kept as "maybe locked": one configuration request, a HEAD per key.
+      expect(s3.commandCalls(GetObjectLockConfigurationCommand)).toHaveLength(1);
+      expect(s3.commandCalls(HeadObjectCommand)).toHaveLength(2);
+      // A HEAD without retention or legal hold fields lets the delete go ahead.
+      expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(2);
+    });
+
+    it("still refuses a locked object when the Object Lock setting could not be read", async () => {
+      s3.on(GetObjectLockConfigurationCommand).rejects(serviceError("AccessDenied", 403));
+      s3.on(HeadObjectCommand).resolves({ ObjectLockLegalHoldStatus: "ON" });
+      s3.on(DeleteObjectsCommand).resolves({});
+      const error = await rejection(storage().delete(["held"]));
+      expect((error as { details?: { objectLocked?: boolean } }).details?.objectLocked).toBe(true);
+      expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(0);
+    });
+
+    it("does not check objects on a bucket without Object Lock", async () => {
+      s3.on(GetObjectLockConfigurationCommand).rejects(
+        serviceError("ObjectLockConfigurationNotFoundError", 404),
+      );
+      s3.on(DeleteObjectsCommand).resolves({});
+      await storage().delete(["a", "b"]);
+      expect(s3.commandCalls(HeadObjectCommand)).toHaveLength(0);
+      expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(1);
     });
   });
 

@@ -7,9 +7,10 @@
 
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { generateIdentity } from "mongoshield";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { generateIdentity, MongoShield } from "mongoshield";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  countDocuments,
   mongoUri,
   removeDataDir,
   seed,
@@ -270,5 +271,76 @@ describe("incremental plans", () => {
       kind: "incremental",
       chain: { parent: first.backupId, base: first.backupId, length: 1 },
     });
+  });
+});
+
+describe("pre-verification of restores", () => {
+  it("checksums every file first when a restore writes into existing data, like the CLI", async () => {
+    // A fresh backup: the one above was damaged on purpose by an earlier test.
+    const backup = await waitForJob(
+      testConsole,
+      (await admin.request("POST", `/api/plans/${ids.plan}/run`)).body.id,
+    );
+    expect(backup.status, JSON.stringify(backup.error)).toBe("succeeded");
+    const restore = vi.spyOn(MongoShield.prototype, "restore");
+    const planRestore = vi.spyOn(MongoShield.prototype, "planRestore");
+    const run = async (mode: string, rename: Record<string, string>) => {
+      const response = await admin.request("POST", "/api/restore", {
+        storageId: ids.storage,
+        backupId: backup.backupId,
+        targetConnectionId: ids.source,
+        include: [`${db}.users`],
+        rename,
+        mode,
+        identities: [key.identity],
+      });
+      expect(response.status, response.text).toBe(200);
+      return waitForJob(testConsole, response.body.id);
+    };
+    const lastVerifyFirst = () => restore.mock.calls.at(-1)?.[0]?.verifyFirst;
+    try {
+      // Into an empty namespace: nothing live can be lost, so no extra read of the
+      // backup, and no extra plan either (fail-if-exists refuses non-empty targets).
+      expect((await run("fail-if-exists", { [`${db}.*`]: `${db}_fresh.*` })).status).toBe(
+        "succeeded",
+      );
+      expect(lastVerifyFirst()).toBeUndefined();
+      expect(planRestore).not.toHaveBeenCalled();
+
+      // Merging into the live collection: the console plans (under the job's signal)
+      // and asks for verification, as the library leaves it off for insert and upsert.
+      expect((await run("upsert", {})).status).toBe("succeeded");
+      expect(lastVerifyFirst()).toBe(true);
+      expect(planRestore).toHaveBeenCalledTimes(1);
+      expect(planRestore.mock.calls[0]?.[0]?.signal).toBeInstanceOf(AbortSignal);
+
+      // Drop mode over the live collection: left to the library's default, which turns
+      // verification on itself (no second plan by the console).
+      planRestore.mockClear();
+      expect((await run("drop", {})).status).toBe("succeeded");
+      expect(lastVerifyFirst()).toBeUndefined();
+      expect(planRestore).not.toHaveBeenCalled();
+    } finally {
+      restore.mockRestore();
+      planRestore.mockRestore();
+    }
+
+    // ...and that default really protects the live collection: with a damaged data file,
+    // a drop-mode restore fails before it drops anything.
+    const record = testConsole.services.store.current.storage.find(
+      (storage) => storage.id === ids.storage,
+    );
+    if (record === undefined) throw new Error("storage record");
+    const adapter = await testConsole.services.storage.adapterFor(record);
+    const keys: string[] = [];
+    for await (const object of adapter.list(`backups/${backup.backupId}/`)) keys.push(object.key);
+    const dataKey = keys.find((candidate) => candidate.includes(`/${db}/users.bson`));
+    expect(dataKey, keys.join(", ")).toBeDefined();
+    await adapter.put(dataKey ?? "", Buffer.from("damaged"));
+    const before = await countDocuments(db, "users");
+    expect(before).toBeGreaterThan(0);
+    const damaged = await run("drop", {});
+    expect(damaged.status).toBe("failed");
+    expect(await countDocuments(db, "users")).toBe(before);
   });
 });

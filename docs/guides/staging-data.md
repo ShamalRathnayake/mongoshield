@@ -415,5 +415,11 @@ listed at once.
   error says which one.
 - **Views are copied last**, as definitions; their `viewOn` follows renames
   within the same database. They read the (masked) copied data.
+- **Definitions are copied as they are, values included.** Masking rewrites
+  documents, not a validator's `$in` list, a partial index's
+  `partialFilterExpression` or a view's `$match`. When one of them refers to a
+  masked field, the copy warns before writing anything (`The validator of
+  app.users refers to masked field email …`): review it on the target, or leave
+  the namespace out, if it quotes real values.
 - **Indexes on masked fields stay valid**, but query plans can change if the
   value distribution changes a lot (`redact` makes every value equal).

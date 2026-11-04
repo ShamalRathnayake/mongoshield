@@ -338,7 +338,14 @@ async function runRestore(
         action: "replace existing documents with --mode upsert",
       });
     }
-    return finish(context, await restoreDocuments(engine, options));
+    // Through the MongoShield instance, not the engine: it re-applies the erasure ledger
+    // afterwards, like every other restore path. The open client is reused (and not
+    // closed by it).
+    const restored = await cli.shield.restoreDocuments({
+      ...options,
+      to: { client: connection.client },
+    });
+    return finish(context, restored);
   } finally {
     await connection.close();
   }
@@ -400,6 +407,11 @@ function finish(context: CommandContext, result: RestoreDocumentsResult): number
   out.result(
     `${out.style("green", "✔")} Restored ${plural(result.inserted + result.replaced, "document")} into ${result.targetNamespace} (${details}) in ${formatDuration(result.durationMs)}.`,
   );
+  if (result.erasures !== undefined && result.erasures.documentsDeleted > 0) {
+    out.info(
+      `  Then deleted ${plural(result.erasures.documentsDeleted, "document")} the erasure ledger lists.`,
+    );
+  }
   return 0;
 }
 

@@ -15,7 +15,7 @@ and the exact steps for the **first stable release, 2.0.0**.
 | Operator image | `ghcr.io/shamalrathnayake/mongoshield-operator:` the operator's version | `docker.yml`, called by `release.yml` |
 | Git tags + GitHub releases | `mongoshield@X.Y.Z`, `@mongoshield/console@X.Y.Z` | changesets/action in `release.yml` |
 | Docs site | https://shamalrathnayake.github.io/mongoshield/ | `docs.yml`, on every push to `main` |
-| GitHub Action | `ShamalRathnayake/mongoshield/action@v2` | a moving `v2` git tag, moved by hand (below) |
+| GitHub Action | `ShamalRathnayake/mongoshield/action@v2` | a moving `v2` git tag, moved by `release.yml` (`action-tag` job) after each stable release |
 
 npm packages are published with **trusted publishing** (OIDC, no `NPM_TOKEN` anywhere) and
 carry **provenance**. Images are multi-arch, signed with cosign (keyless) and ship an SBOM
@@ -77,15 +77,28 @@ run on `main` creates them):
 Check from a machine that is not logged in to ghcr.io:
 `docker logout ghcr.io && docker pull ghcr.io/shamalrathnayake/mongoshield-console:latest`.
 
-**Console `:latest` follows `main`.** The console's quickstart is the tag-less
-`docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console`,
-so `docker.yml` also pushes `:latest` of the console image on every push to `main`
-(`latest-on-main: true` in its matrix). Pre-GA that is the only way the one-liner works:
-prereleases never move `:latest`. The trade-off is that between releases `:latest` is the
-newest `main` build rather than the newest release; production users should pin `:X.Y.Z`.
-After 2.0.0, decide whether to keep that or set `latest-on-main: false` so `:latest`
-tracks releases only (as for the CLI and operator images). A release always moves
-`:latest` to itself.
+**`:latest` follows releases only**, for all three images (the console used to move it
+on every push to `main` while 2.0 was in prerelease). The tag-less console quickstart
+therefore runs the newest stable release; `:next` is the newest `main` build.
+
+### GitHub: the `release` environment
+
+`release.yml` (npm publish, the Action tag) and `docker.yml` (image push and signing) run
+their publishing jobs in a GitHub environment named `release`, and only on `main` (or a
+release tag, for images). Create it once:
+
+1. **Settings → Environments → New environment:** `release`.
+2. **Deployment branches and tags:** "Selected branches and tags", add the branch `main`
+   and the tag patterns `mongoshield@*` and `v*`. A workflow run from any other branch
+   (a `workflow_dispatch` from a feature branch, a compromised PR branch) then cannot
+   enter the environment, so it cannot publish, push or sign.
+3. Optional: **Required reviewers** (yourself) to approve every publish by hand. Note that
+   pushes to `main` also publish the `:next` images through this environment.
+4. Optional: a **tag ruleset** for `v*` and `mongoshield@*` so only the release workflow
+   (GitHub Actions) and admins can create or move those tags.
+
+Without the environment, GitHub creates it on the first run with no protection, and
+the `if: github.ref == 'refs/heads/main'` guards in the workflows still apply.
 
 ### npm: trusted publisher for `mongoshield` (exists already)
 
@@ -95,7 +108,8 @@ On https://www.npmjs.com/package/mongoshield/access (Settings):
    - Organization or user: `ShamalRathnayake`
    - Repository: `mongoshield`
    - Workflow filename: `release.yml` (the file name only, not the path)
-   - Environment: leave empty (the release job does not use a GitHub environment)
+   - Environment: `release` (the release job runs in that environment; npm then accepts
+     a publish only from it, so a workflow that is not gated by its branch rule cannot publish)
 2. **Publishing access:** "Require two-factor authentication and disallow tokens". With a
    trusted publisher, CI needs no token, and nobody can publish with a leaked one.
 
@@ -247,8 +261,9 @@ npx --yes mongoshield@2.0.0 --version
 mkdir -p /tmp/verify && cd /tmp/verify && npm init -y >/dev/null \
   && npm install mongoshield@2.0.0 @mongoshield/console@2.0.0 && npm audit signatures
 docker run --rm ghcr.io/shamalrathnayake/mongoshield:2.0.0 --version
+# Signed by docker.yml running on main (release.yml calls it from there), nothing else:
 cosign verify ghcr.io/shamalrathnayake/mongoshield:2.0.0 \
-  --certificate-identity-regexp '^https://github.com/ShamalRathnayake/mongoshield/' \
+  --certificate-identity https://github.com/ShamalRathnayake/mongoshield/.github/workflows/docker.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -266,15 +281,33 @@ gh release edit "mongoshield@2.0.0" --latest
 gh release edit "mongoshield@2.0.0" --notes-file <(printf '%s\n\n' "First stable release." && gh release view "mongoshield@2.0.0" --json body -q .body)
 ```
 
-Point the Action's major tag at the release (move it the same way on every release):
+**The Action's major tag moves by itself.** After a stable release, the `action-tag` job
+in `release.yml` points `v2` at the commit tagged `mongoshield@2.0.0` (through the GitHub
+API, in the `release` environment). Prereleases never move it. The Action reads its
+default CLI version from `packages/mongoshield/package.json` at that commit, so `@v2` runs
+exactly the release it points to, and users who pin the Action to a commit SHA pin the CLI
+too. Check it:
 
 ```sh
-git fetch --tags
+git fetch --tags --force
+git rev-parse 'v2^{commit}' 'mongoshield@2.0.0^{commit}'   # the same commit twice
+```
+
+If the job failed (for example because a tag ruleset blocks GitHub Actions from moving
+`v*` tags), move it by hand once, the same way:
+
+```sh
 git tag -f v2 "mongoshield@2.0.0^{commit}"
 git push -f origin v2
 ```
 
 `docker.yml` ignores `v2` (it only builds full versions such as `v2.0.0`).
+
+**What the Action installs is pinned**, so a release of the Action is a release of its
+whole install: `mongoshield@<that release>`, the MongoDB driver and the cloud SDKs at the
+exact versions in `action/run.sh` (the ones `pnpm-lock.yaml` resolved), with
+`npm install --ignore-scripts`. When the SDKs are bumped in the lockfile, update the pins
+in `action/run.sh` and `docker/install-sdks.sh` in the same pull request.
 
 ### 8. npm housekeeping
 
@@ -308,7 +341,7 @@ npm dist-tag ls mongoshield        # latest: 2.0.0, next: 2.0.0
 1. Every user-facing pull request adds a changeset: `pnpm changeset`.
 2. Merging to `main` keeps the "chore: version packages" PR up to date.
 3. Merging that PR publishes, tags, releases and builds the images as above (steps 5–7;
-   move the `v2` tag each time).
+   the `v2` tag moves by itself).
 
 Pre-releases: `pnpm changeset pre enter next`, merge, and version PRs then produce
 `X.Y.Z-next.N` on the `next` dist-tag (images get only their exact `:X.Y.Z-next.N` tag).

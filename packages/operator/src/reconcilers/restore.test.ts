@@ -66,7 +66,6 @@ describe("reconcileRestore", () => {
     const container = pod?.containers[0];
     expect(container?.args).toEqual([
       "restore",
-      "latest",
       "--json",
       "--config",
       "/etc/mongoshield/config/mongoshield.config.json",
@@ -74,6 +73,9 @@ describe("reconcileRestore", () => {
       "fail-if-exists",
       "--rename",
       "app.*=app_restored.*",
+      // The id last, after `--`, so it can never be parsed as a flag.
+      "--",
+      "latest",
     ]);
     const uri = container?.env?.find((variable) => variable.name === "MONGODB_URI");
     expect(uri?.valueFrom?.secretKeyRef).toEqual({ name: "staging-mongodb", key: "MONGODB_URI" });
@@ -113,7 +115,6 @@ describe("reconcileRestore", () => {
 
     expect(restoreJob(client)?.spec?.template.spec?.containers[0]?.args).toEqual([
       "restore",
-      "2026-10-20T03-00-04Z_7f3a9c",
       "--json",
       "--config",
       "/etc/mongoshield/config/mongoshield.config.json",
@@ -129,6 +130,8 @@ describe("reconcileRestore", () => {
       "--skip-indexes",
       "--users-and-roles",
       "create",
+      "--",
+      "2026-10-20T03-00-04Z_7f3a9c",
     ]);
   });
 
@@ -192,7 +195,7 @@ describe("reconcileRestore", () => {
       status: { phase: "Succeeded", backupId: "id-42" },
     });
     await reconcileRestore(context, ref);
-    expect(restoreJob(client)?.spec?.template.spec?.containers[0]?.args?.[1]).toBe("id-42");
+    expect(restoreJob(client)?.spec?.template.spec?.containers[0]?.args?.at(-1)).toBe("id-42");
   });
 
   it("waits for a referenced backup that does not exist yet, fails for an unusable one", async () => {

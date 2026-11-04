@@ -11,10 +11,11 @@ import {
   makeIncremental,
   makeManifest,
 } from "../catalog/test-fixtures.ts";
-import { isMongoShieldError } from "../errors.ts";
+import { isMongoShieldError, MongoShieldError } from "../errors.ts";
 import type { Manifest } from "../format/manifest.ts";
 import {
   chooseParent,
+  fallbackWarning,
   fullBackupDue,
   type ParentRequirements,
   sameSelection,
@@ -89,6 +90,35 @@ describe("chooseParent", () => {
     expect(chooseParent(entries, requirements()).manifest.id).toBe(base.id);
   });
 
+  it("never continues a backup, or a chain, that failed its last verification", () => {
+    const failed = (manifest: Manifest, ok: boolean): CatalogEntry => ({
+      ...entry(manifest),
+      verification: {
+        backupId: manifest.id,
+        verifiedAt: "2026-10-20T02:00:00.000Z",
+        mode: "fast",
+        ok,
+        filesChecked: 1,
+        documentsChecked: 0,
+        problemCount: ok ? 0 : 1,
+        tool: "mongoshield@test",
+      },
+    });
+    const older = makeChainBase(idAt("2026-10-19T00:00:00Z"), 500);
+    // The damaged base: neither it nor its incremental may get a child.
+    const entries = [entry(first), failed(base, false), entry(older)];
+    expect(chooseParent(entries, requirements()).manifest.id).toBe(older.id);
+
+    const named = errorOf(() => chooseParent(entries, requirements({ from: first.id })));
+    expect(isMongoShieldError(named, "MS_CONFIG_INVALID")).toBe(true);
+    expect(String(named)).toContain(`its chain holds ${base.id}, which failed`);
+
+    // A passing verification (the newest one counts) makes it usable again.
+    expect(chooseParent([entry(first), failed(base, true)], requirements()).manifest.id).toBe(
+      first.id,
+    );
+  });
+
   it("finds nothing to continue (MS_BACKUP_NOT_FOUND)", () => {
     const error = errorOf(() => chooseParent([], requirements()));
     expect(isMongoShieldError(error, "MS_BACKUP_NOT_FOUND")).toBe(true);
@@ -155,6 +185,52 @@ describe("chooseParent", () => {
       chooseParent([entry(planned)], requirements({ labels: { "mongoshield.plan": "p2" } })),
     );
     expect(isMongoShieldError(error, "MS_BACKUP_NOT_FOUND")).toBe(true);
+  });
+});
+
+describe("chooseParent and replica sets that share a name", () => {
+  const withInstance = (instanceId: string | undefined): Partial<Manifest> => ({
+    source: {
+      topology: "replicaSet",
+      serverVersion: "8.0.0",
+      clusterId: CHAIN_CLUSTER_ID,
+      ...(instanceId === undefined ? {} : { instanceId }),
+    },
+  });
+
+  it("never continues a backup of another replica set with the same name", () => {
+    const staging = makeChainBase(idAt("2026-10-20T00:00:00Z"), 1000, withInstance("staging"));
+    const prod = makeChainBase(idAt("2026-10-19T00:00:00Z"), 500, withInstance("prod"));
+    const ofProd = requirements({
+      deployment: { clusterId: CHAIN_CLUSTER_ID, instanceId: "prod" },
+    });
+    // The staging backup is newer, but it is not this deployment's.
+    expect(chooseParent([entry(staging), entry(prod)], ofProd).manifest.id).toBe(prod.id);
+    const error = errorOf(() => chooseParent([entry(staging)], { ...ofProd, from: staging.id }));
+    expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
+    expect(String(error)).toContain("different deployment");
+  });
+
+  it("keeps continuing chains written before instanceId was recorded", () => {
+    const old = makeChainBase(idAt("2026-10-20T00:00:00Z"), 1000, withInstance(undefined));
+    const ofProd = requirements({
+      deployment: { clusterId: CHAIN_CLUSTER_ID, instanceId: "prod" },
+    });
+    expect(chooseParent([entry(old)], ofProd).manifest.id).toBe(old.id);
+  });
+});
+
+describe("fallbackWarning", () => {
+  it("warns about MS_SNAPSHOT_TOO_OLD, which repeats on every run, and nothing routine", () => {
+    const tooOld = new MongoShieldError("MS_SNAPSHOT_TOO_OLD", "snapshot too old");
+    expect(fallbackWarning(tooOld)).toContain("minSnapshotHistoryWindowInSeconds");
+    for (const code of [
+      "MS_BACKUP_NOT_FOUND",
+      "MS_CHANGE_HISTORY_LOST",
+      "MS_CONFIG_INVALID",
+    ] as const) {
+      expect(fallbackWarning(new MongoShieldError(code, "x"))).toBeUndefined();
+    }
   });
 });
 

@@ -28,8 +28,18 @@
  * part", while small objects work. Others reject the checksum headers outright.
  * For those services set `requestChecksumCalculation: "WHEN_REQUIRED"` (or
  * `?requestChecksumCalculation=WHEN_REQUIRED` on an `s3://` URL, or configure
- * your own `client` that way). Backups stay verified end to end either way:
- * every file's SHA-256 is in the manifest and checked on restore and verify.
+ * your own `client` that way). With a custom `endpoint` (an S3-compatible
+ * service) and no explicit setting, the adapter already uses "WHEN_REQUIRED" for
+ * both request checksums and response validation, since small test objects pass
+ * either way and the failure only shows on the first object over one part.
+ * Backups stay verified end to end either way: every file's SHA-256 is in the
+ * manifest and checked on restore and verify.
+ *
+ * Memory: each upload buffers up to `partSize × queueSize` bytes (16 MiB × 4 =
+ * 64 MiB by default), and a backup uploads one file per collection it dumps in
+ * parallel (`backup.parallelism`, default 4), so plan for about 256 MiB of upload
+ * buffers. For small functions (Lambda, Vercel, Netlify) lower `queueSize` and/or
+ * `partSize` (`?queueSize=2&partSizeMiB=8` on an `s3://` URL) or `parallelism`.
  *
  * How the contract is met:
  * - Atomic writes: S3 objects only become visible when a PutObject or
@@ -39,6 +49,18 @@
  *   "AbortIncompleteMultipartUpload" as a safety net for crashed processes.)
  * - Conditional writes use `If-None-Match: *` (supported by S3 since 2024, and
  *   by MinIO and R2). A 412 response becomes MS_STORAGE_PRECONDITION_FAILED.
+ *   Not every S3-compatible store has them: some answer 501 NotImplemented,
+ *   others ignore the header and overwrite. So they are only trusted without a
+ *   check on AWS (no endpoint, or an `amazonaws.com` one) and Cloudflare R2. For
+ *   any other endpoint the first conditional put first probes the store once
+ *   (create a probe object twice with If-None-Match, next to the object being
+ *   written, expect the second to be refused, delete it). A store that fails the
+ *   probe, or answers a conditional put with 501, gets MS_CONFIG_INVALID marked as
+ *   "conditional writes unsupported" (see `isConditionalWritesUnsupported`): the
+ *   backup lock then refuses with a hint, and the manifest write retries without
+ *   the condition. A probe that cannot decide (AccessDenied, network errors) gets
+ *   the same error marked inconclusive, and is tried again at the next conditional put.
+ *   The `conditionalWrites` option skips the probe (`true`) or turns them off.
  * - Keys are stored under `prefix`, which is added on write and stripped on read.
  * - `lastModified` from `head()` and `list()` is always the server's value (S3
  *   keeps whole seconds; for multipart objects it is when the upload started).
@@ -55,12 +77,16 @@
  *     default when the client uses `requestChecksumCalculation: "WHEN_SUPPORTED"`,
  *     so retained puts always ask for a CRC32 checksum explicitly; lib-storage
  *     then sends it on PutObject and on every UploadPart.
- *   - Object Lock buckets are versioned. Deleting without a version id (what
- *     `delete` does) succeeds but only adds a delete marker: the locked version
- *     stays, and is billed, until its retention ends and a lifecycle rule
- *     expires it. Prune therefore never deletes before `immutableUntil`.
+ *   - Object Lock buckets are versioned. Deleting without a version id succeeds but
+ *     only adds a delete marker: the locked version stays, and is billed, until its
+ *     retention ends, while the object vanishes from listings. So on a bucket with
+ *     Object Lock enabled, `delete` first HEADs each key and refuses (an object-locked
+ *     MS_STORAGE_FORBIDDEN, as the other adapters raise) when one is still retained
+ *     or under legal hold. Prune then skips the backup, also a replicated copy whose
+ *     manifest does not record the destination's lock (extras/replicate.ts).
  */
 
+import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import type * as ClientS3 from "@aws-sdk/client-s3";
 import type {
@@ -83,10 +109,12 @@ import {
   storagePrefixOf,
   unquote,
 } from "./adapter-utils.ts";
+import { conditionalWritesUnsupportedError } from "./conditional-writes.ts";
 import { assertValidKey, assertValidPrefix } from "./keys.ts";
 import {
   assertValidRetainUntil,
   IMMUTABLE_GUIDE,
+  objectLockedError,
   onceSuccessful,
   resolveRetentionMode,
 } from "./retention.ts";
@@ -145,11 +173,29 @@ export interface S3StorageOptions {
   readonly sseKmsKeyId?: string;
   /**
    * When the SDK computes request checksums, for a client created by the adapter:
-   * the SDK default `"WHEN_SUPPORTED"` (every upload carries a CRC32), or
-   * `"WHEN_REQUIRED"` for S3-compatible services that reject those checksums or
-   * fail multipart uploads with them (see the header comment). Ignored with `client`.
+   * `"WHEN_SUPPORTED"` (every upload carries a CRC32), or `"WHEN_REQUIRED"` for
+   * S3-compatible services that reject those checksums or fail multipart uploads
+   * with them (see the header comment). Defaults to the SDK's `"WHEN_SUPPORTED"`
+   * on AWS, and to `"WHEN_REQUIRED"` when a custom `endpoint` is set. Ignored with `client`.
    */
   readonly requestChecksumCalculation?: "WHEN_SUPPORTED" | "WHEN_REQUIRED";
+  /**
+   * When the SDK validates response checksums, for a client created by the adapter.
+   * Defaults like `requestChecksumCalculation`: the SDK's `"WHEN_SUPPORTED"` on AWS,
+   * `"WHEN_REQUIRED"` with a custom `endpoint`. Ignored with `client`.
+   */
+  readonly responseChecksumValidation?: "WHEN_SUPPORTED" | "WHEN_REQUIRED";
+  /**
+   * Whether the store honours `If-None-Match: *` (create-if-absent), which the
+   * storage lock and the manifest write rely on:
+   * - `true`: trust it without checking.
+   * - `false`: never send it; the storage lock is then refused (use the mongo lock).
+   * - `"probe"`: check once, at the first conditional put (see the header comment).
+   *
+   * Default: `true` on AWS and Cloudflare R2 (and with your own `client`),
+   * `"probe"` for any other custom `endpoint`.
+   */
+  readonly conditionalWrites?: boolean | "probe";
   /**
    * Make `put()` report the server's Last-Modified time instead of the local
    * clock, at the cost of one HEAD request per put (for the exact version just
@@ -182,12 +228,21 @@ const DEFAULT_ENDPOINT_REGION = "us-east-1";
 
 const INSTALL_HINT = "npm install @aws-sdk/client-s3 @aws-sdk/lib-storage";
 
-const CAPABILITIES: StorageCapabilities = {
-  conditionalWrites: true,
-  rangeReads: true,
-  // Object Lock. Whether the bucket has it enabled is checked at the first retained put.
-  objectLock: true,
-};
+/**
+ * Endpoint host suffixes of providers known to honour `If-None-Match: *` on
+ * PutObject and CompleteMultipartUpload: AWS itself (S3 since August 2024) and
+ * Cloudflare R2. MinIO supports it too, but cannot be told apart by its host
+ * name, so it goes through the probe (and passes it).
+ */
+const CONDITIONAL_WRITE_HOSTS = [".amazonaws.com", ".r2.cloudflarestorage.com"] as const;
+
+/**
+ * Name prefix of the conditional-write probe object. The probe is written next to
+ * the object that triggered it (the manifest's or the lock's directory), so a role
+ * allowed to write there can always write the probe too, and a probe object left
+ * behind (no delete permission) sits in a directory that readers and prune handle.
+ */
+const PROBE_NAME_PREFIX = ".conditional-write-probe-";
 
 /** Our retention modes in S3's vocabulary. */
 const OBJECT_LOCK_MODES = { compliance: "COMPLIANCE", governance: "GOVERNANCE" } as const;
@@ -216,6 +271,13 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
   const location = `s3://${bucket}/${basePrefix}`;
   const ownsClient = options.client === undefined;
   const retentionMode: RetentionMode = resolveRetentionMode(options.retention, "S3");
+  const conditionalWrites = conditionalWritesMode(options);
+  const capabilities: StorageCapabilities = {
+    conditionalWrites: conditionalWrites !== false,
+    rangeReads: true,
+    // Object Lock. Whether the bucket has it enabled is checked at the first retained put.
+    objectLock: true,
+  };
 
   // The client is created lazily and shared by every call: it holds only
   // connection pools and configuration, never per-run state.
@@ -274,6 +336,96 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
     if (enabled !== "Enabled") throw objectLockDisabledError(bucket, location);
   });
 
+  /**
+   * The probe's verdict, once known: does this store honour `If-None-Match: *`?
+   * Kept for the adapter's lifetime, so the probe runs at most once. A probe that
+   * failed for another reason (network, permissions) is not kept and runs again.
+   */
+  let conditionalWriteProbe: Promise<boolean> | undefined;
+
+  function probeOnce(key: string, signal: AbortSignal | undefined): Promise<boolean> {
+    if (!conditionalWriteProbe) {
+      const attempt = probeConditionalWrites(key, signal);
+      conditionalWriteProbe = attempt;
+      attempt.catch(() => {
+        if (conditionalWriteProbe === attempt) conditionalWriteProbe = undefined;
+      });
+    }
+    return conditionalWriteProbe;
+  }
+
+  /**
+   * Checks that the store refuses to create an object that already exists: writes
+   * a tiny probe object twice with `If-None-Match: *` and expects the second write
+   * to be refused with 412 (or 409). A store that accepts both writes ignores the
+   * header; one that answers 501 does not implement it. Any other failure (no
+   * permission, a network error) throws: it says nothing either way.
+   *
+   * The probe object goes next to `key`, the object about to be written (see
+   * PROBE_NAME_PREFIX), and is deleted afterwards, best effort.
+   */
+  async function probeConditionalWrites(
+    key: string,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    const { sdk, client } = await context();
+    const probeKey = probeKeyNextTo(key);
+    const putProbe = () =>
+      client.send(
+        new sdk.s3.PutObjectCommand({
+          Bucket: bucket,
+          Key: objectKey(probeKey),
+          Body: "conditional write probe\n",
+          IfNoneMatch: "*",
+        }),
+        sendOptions(signal),
+      );
+    try {
+      await putProbe();
+      try {
+        await putProbe();
+        // The second create-if-absent succeeded: the header was ignored.
+        return false;
+      } catch (error) {
+        if (isPreconditionRefusal(error)) return true;
+        if (isConditionalHeaderRejected(error)) return false;
+        throw error;
+      }
+    } catch (error) {
+      if (isConditionalHeaderRejected(error)) return false;
+      throw fail(error, "write", probeKey, signal);
+    } finally {
+      await client
+        .send(new sdk.s3.DeleteObjectCommand({ Bucket: bucket, Key: objectKey(probeKey) }))
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Throws the "unsupported" error unless conditional writes may be used for `key`.
+   *
+   * A probe that failed without a verdict (for example AccessDenied on the probe
+   * object, or a network error) also gets the "unsupported" error, marked
+   * inconclusive: callers cannot rely on create-if-absent they could not confirm.
+   * The manifest write then falls back to an unconditional put with a warning
+   * (src/format/manifest-io.ts), so a backup whose data is uploaded is not thrown
+   * away, while the storage lock refuses (src/schedule/lock-storage.ts). The
+   * failure is not remembered, so the next conditional put probes again.
+   */
+  async function ensureConditionalWrites(key: string, signal: AbortSignal | undefined) {
+    if (conditionalWrites !== "probe") return;
+    const target = `${location}${key}`;
+    let supported: boolean;
+    try {
+      supported = await probeOnce(key, signal);
+    } catch (error) {
+      // Cancellation is not a verdict about the store: report it as such.
+      if (signal?.aborted) throw error;
+      throw conditionalWritesUnsupportedError(target, error, { inconclusive: true });
+    }
+    if (!supported) throw conditionalWritesUnsupportedError(target);
+  }
+
   /** Upload part size: the configured one, grown if `sizeHint` would need more than 10,000 parts. */
   function partSizeFor(sizeHint: number | undefined): number {
     if (sizeHint === undefined || sizeHint <= 0) return partSize;
@@ -300,6 +452,11 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
 
     try {
       const { sdk, client } = await context();
+      if (putOptions.ifNoneMatch !== undefined) {
+        if (conditionalWrites === false)
+          throw conditionalWritesUnsupportedError(`${location}${key}`);
+        await ensureConditionalWrites(key, signal);
+      }
       if (retainUntil !== undefined) await ensureObjectLockEnabled();
       throwIfAborted(signal);
       // lib-storage sends small bodies as one PutObject and large ones as a
@@ -336,6 +493,11 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
     } catch (error) {
       if (body instanceof Readable) body.destroy();
       await abortDanglingUpload(upload, key);
+      // A store that does not implement If-None-Match (501) gets the same error as
+      // one that failed the probe, so callers can fall back or refuse clearly.
+      if (putOptions.ifNoneMatch !== undefined && !signal?.aborted && isNotImplemented(error)) {
+        throw conditionalWritesUnsupportedError(`${location}${key}`, error);
+      }
       throw fail(error, "write", key, signal);
     } finally {
       signal?.removeEventListener("abort", onAbort);
@@ -524,8 +686,13 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
       throw fail(error, "delete", keys[0] ?? "", signal);
     });
 
+    const checkLocks = await bucketHasObjectLock();
     for (const batch of chunk(keys, DELETE_BATCH_SIZE)) {
       throwIfAborted(signal);
+      // On an Object Lock bucket a delete of a locked object "succeeds" by adding a
+      // delete marker: the object vanishes from listings (and restores) but stays,
+      // billed, until its retention ends. Refuse instead, like every other adapter.
+      if (checkLocks) await refuseLockedObjects(batch, signal);
       let response: ClientS3.DeleteObjectsCommandOutput;
       try {
         response = await client.send(
@@ -540,6 +707,89 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
         throw fail(error, "delete", batch[0] ?? "", signal);
       }
       throwIfDeleteFailed(response.Errors ?? []);
+    }
+  }
+
+  /**
+   * Whether the bucket has Object Lock enabled, asked once per adapter. Without
+   * permission to read the configuration (or after any other failure to read it)
+   * the answer is "maybe", and "maybe" is treated as "yes" for the adapter's
+   * lifetime: every delete HEADs its objects first, which costs requests but never
+   * hides a locked object behind a delete marker. Asking again before every delete
+   * would only add a request that keeps failing the same way.
+   */
+  let objectLockKnown: Promise<boolean> | undefined;
+  function bucketHasObjectLock(): Promise<boolean> {
+    if (!objectLockKnown) {
+      const attempt = readObjectLockEnabled();
+      objectLockKnown = attempt;
+      // Only a failure to load the SDK rejects; do not keep that, the next call retries.
+      attempt.catch(() => {
+        if (objectLockKnown === attempt) objectLockKnown = undefined;
+      });
+    }
+    return objectLockKnown;
+  }
+
+  /** Reads the bucket's Object Lock setting; "unknown" (any error but "off") reads as on. */
+  async function readObjectLockEnabled(): Promise<boolean> {
+    const { sdk, client } = await context();
+    try {
+      const response: ClientS3.GetObjectLockConfigurationCommandOutput | undefined =
+        await client.send(new sdk.s3.GetObjectLockConfigurationCommand({ Bucket: bucket }));
+      return response?.ObjectLockConfiguration?.ObjectLockEnabled === "Enabled";
+    } catch (error) {
+      const name = errorName(error);
+      // Never enabled (404), or an S3-compatible store without the feature (501).
+      if (name === "ObjectLockConfigurationNotFoundError" || isNotImplemented(error)) return false;
+      // Unknown (no permission, an outage): assume locked, so deletes check each object.
+      return true;
+    }
+  }
+
+  /** Objects HEADed at the same time when checking a batch for locks. */
+  const LOCK_CHECK_CONCURRENCY = 8;
+
+  /**
+   * Throws an object-locked error (MS_STORAGE_FORBIDDEN, `details.objectLocked`) when
+   * any key is under a retention date in the future or a legal hold, before anything
+   * of the batch is deleted. Prune skips such a backup instead of hiding it.
+   * HEAD only reports lock fields with s3:GetObjectRetention / GetObjectLegalHold;
+   * without them nothing can be seen and the delete goes ahead as before.
+   */
+  async function refuseLockedObjects(
+    keys: readonly string[],
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const { sdk, client } = await context();
+    const now = Date.now();
+    for (let start = 0; start < keys.length; start += LOCK_CHECK_CONCURRENCY) {
+      throwIfAborted(signal);
+      const group = keys.slice(start, start + LOCK_CHECK_CONCURRENCY);
+      const locked = await Promise.all(
+        group.map(async (key) => {
+          try {
+            const response: ClientS3.HeadObjectCommandOutput | undefined = await client.send(
+              new sdk.s3.HeadObjectCommand({ Bucket: bucket, Key: objectKey(key) }),
+              sendOptions(signal),
+            );
+            const until = response?.ObjectLockRetainUntilDate;
+            const held = response?.ObjectLockLegalHoldStatus === "ON";
+            return held || (until !== undefined && until.getTime() > now) ? key : undefined;
+          } catch (error) {
+            // Already gone: nothing to protect. Anything else surfaces from the delete.
+            if (isNotFound(error)) return undefined;
+            throw fail(error, "delete", key, signal);
+          }
+        }),
+      );
+      const first = locked.find((key) => key !== undefined);
+      if (first !== undefined) {
+        throw objectLockedError(
+          `${location}${first} is locked by S3 Object Lock (retention or legal hold); deleting it would only hide it behind a delete marker.`,
+          { details: { key: first } },
+        );
+      }
     }
   }
 
@@ -563,7 +813,7 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
   return {
     kind: "s3",
     location,
-    capabilities: CAPABILITIES,
+    capabilities,
     put,
     get,
     head,
@@ -578,6 +828,18 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
       created?.client.destroy();
     },
   };
+}
+
+/**
+ * The key of the conditional-write probe object for a put of `key`: a unique name
+ * in the same directory (`backups/<id>/manifest.json` probes with
+ * `backups/<id>/.conditional-write-probe-<uuid>`; a key without a directory probes
+ * at the root of the prefix).
+ */
+function probeKeyNextTo(key: string): string {
+  const slash = key.lastIndexOf("/");
+  const directory = slash === -1 ? "" : key.slice(0, slash + 1);
+  return `${directory}${PROBE_NAME_PREFIX}${randomUUID()}`;
 }
 
 /**
@@ -631,11 +893,47 @@ async function createContext(options: S3StorageOptions): Promise<S3Context> {
     ...(options.endpoint === undefined ? {} : { endpoint: options.endpoint }),
     ...(options.forcePathStyle === undefined ? {} : { forcePathStyle: options.forcePathStyle }),
     ...(options.credentials === undefined ? {} : { credentials: options.credentials }),
-    ...(options.requestChecksumCalculation === undefined
-      ? {}
-      : { requestChecksumCalculation: options.requestChecksumCalculation }),
+    ...checksumSettings(options),
   });
   return { sdk, client };
+}
+
+/**
+ * The checksum settings for a client the adapter creates. Explicit options win.
+ * Otherwise AWS keeps the SDK's defaults, and a custom endpoint gets
+ * "WHEN_REQUIRED" for both: S3-compatible stores often lack the per-part CRC32
+ * support that the SDK's default needs for multipart uploads (see the header).
+ */
+function checksumSettings(
+  options: Pick<
+    S3StorageOptions,
+    "endpoint" | "requestChecksumCalculation" | "responseChecksumValidation"
+  >,
+): Pick<S3ClientConfig, "requestChecksumCalculation" | "responseChecksumValidation"> {
+  const fallback = options.endpoint === undefined ? undefined : "WHEN_REQUIRED";
+  const request = options.requestChecksumCalculation ?? fallback;
+  const response = options.responseChecksumValidation ?? fallback;
+  return {
+    ...(request === undefined ? {} : { requestChecksumCalculation: request }),
+    ...(response === undefined ? {} : { responseChecksumValidation: response }),
+  };
+}
+
+/**
+ * Decides how far to trust `If-None-Match` (see `S3StorageOptions.conditionalWrites`):
+ * the explicit option, else `true` for AWS, R2 and a caller's own client, else "probe".
+ */
+function conditionalWritesMode(options: S3StorageOptions): boolean | "probe" {
+  if (options.conditionalWrites !== undefined) return options.conditionalWrites;
+  if (options.client !== undefined || options.endpoint === undefined) return true;
+  let host: string;
+  try {
+    host = new URL(options.endpoint).hostname.toLowerCase();
+  } catch {
+    // The SDK reports an invalid endpoint itself, at the first request.
+    return "probe";
+  }
+  return CONDITIONAL_WRITE_HOSTS.some((suffix) => host.endsWith(suffix)) ? true : "probe";
 }
 
 /**
@@ -726,6 +1024,29 @@ function httpStatus(error: unknown): number | undefined {
 /** 501 NotImplemented: an S3-compatible store that lacks the feature (e.g. Object Lock). */
 function isNotImplemented(error: unknown): boolean {
   return errorName(error) === "NotImplemented" || httpStatus(error) === 501;
+}
+
+/**
+ * True for the answer a store that honours `If-None-Match: *` gives when the key
+ * exists: 412 PreconditionFailed, or 409 ConditionalRequestConflict when a
+ * concurrent conditional write won.
+ */
+function isPreconditionRefusal(error: unknown): boolean {
+  const name = errorName(error);
+  return (
+    name === "PreconditionFailed" ||
+    name === "ConditionalRequestConflict" ||
+    httpStatus(error) === 412
+  );
+}
+
+/**
+ * True when the store refuses the `If-None-Match` header itself: 501, or a 400 whose
+ * message names the header or conditional requests (wording varies by store).
+ */
+function isConditionalHeaderRejected(error: unknown): boolean {
+  if (isNotImplemented(error)) return true;
+  return httpStatus(error) === 400 && /if-none-match|conditional/i.test(messageOf(error));
 }
 
 /**

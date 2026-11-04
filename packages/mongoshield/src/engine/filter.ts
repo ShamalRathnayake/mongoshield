@@ -42,6 +42,9 @@
  *   quantifiers (`a++`), atomic groups (`(?>…)`), inline options anywhere but at the
  *   start, recursion, conditionals, `\h` / `\R`, and `$` without `m` (PCRE also
  *   matches before a final newline); the `l` option is rejected;
+ * - patterns that could backtrack for practically forever are refused with
+ *   MS_CONFIG_INVALID (nested quantifiers such as `(a+)+`, or more than 1024
+ *   characters; see filter-regex.ts), where the server would run them;
  * - documents changed by a converge backup's window (find-window.ts) lose the stored
  *   order of fields a change added, which only matters for integer-like names;
  * - collations are not supported: string comparison is always binary.
@@ -59,6 +62,7 @@ import {
   resolvePath,
   splitPath,
 } from "./filter-path.ts";
+import { regexCostProblem } from "./filter-regex.ts";
 import {
   BSON_TYPE_CODES,
   type BsonKind,
@@ -634,8 +638,18 @@ function rewritePattern(pattern: string, extended: boolean): string {
   return output;
 }
 
-/** `new RegExp`, trying Unicode mode first and reporting invalid patterns. */
+/**
+ * `new RegExp`, trying Unicode mode first and reporting invalid patterns. Patterns that
+ * could backtrack for practically forever (nested quantifiers, very long patterns; see
+ * filter-regex.ts) are reported too, because JavaScript's engine cannot be interrupted.
+ */
 function compileRegExp(pattern: string, flags: string, compiler: Compiler | undefined): RegExp {
+  const costProblem = regexCostProblem(pattern);
+  if (costProblem !== undefined) {
+    compiler?.problems.push(costProblem);
+    // Never run: the problem fails compileFilter before any document is matched.
+    return /(?!)/;
+  }
   try {
     return new RegExp(pattern, `${flags}u`);
   } catch {

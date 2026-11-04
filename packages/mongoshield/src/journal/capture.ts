@@ -70,11 +70,16 @@ export interface JournalScope {
  * internal databases, `system.*` and scratch collections; plus `dropDatabase` of any
  * database that may hold such namespaces, and renames into them.
  *
+ * `regexDatabaseFilter` writes the server-side filter with regexes only, for Atlas Free
+ * and Flex clusters, which refuse `$in` / `$nin` in `ns.db` filters of change streams
+ * (the writer sets it when it detects such a tier; see `serverDatabaseFilter`).
+ *
  * @throws MongoShieldError `MS_CONFIG_INVALID` for malformed patterns.
  */
 export function createJournalScope(patterns: {
   readonly include?: readonly NamespacePattern[] | undefined;
   readonly exclude?: readonly NamespacePattern[] | undefined;
+  readonly regexDatabaseFilter?: boolean | undefined;
 }): JournalScope {
   const rules = compileNamespaceRules(patterns);
   const isUserDatabase = (db: string): boolean =>
@@ -111,7 +116,9 @@ export function createJournalScope(patterns: {
     return from !== undefined && to !== undefined && keepsNamespace(to) && !keepsNamespace(from);
   };
 
-  const serverFilter = serverDatabaseFilter(rules, [], INTERNAL_DATABASES);
+  const serverFilter = serverDatabaseFilter(rules, [], INTERNAL_DATABASES, {
+    regexOnly: patterns.regexDatabaseFilter === true,
+  });
   return { serverFilter, keepsNamespace, keeps, needsDestinationSnapshot };
 }
 

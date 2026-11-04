@@ -8,6 +8,9 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   root: "src/ui",
+  // Relative asset URLs ("./assets/…"), so the built UI also works when the console is
+  // served under a sub-path (MONGOSHIELD_PUBLIC_URL=https://example.com/mongoshield).
+  base: "./",
   plugins: [react()],
   build: {
     outDir: "../../dist/ui",

@@ -14,12 +14,11 @@
  */
 
 import type { Hono } from "hono";
-import { MongoShieldError, redactMongoUri } from "mongoshield";
+import { MongoShieldError } from "mongoshield";
 import { connectionById } from "../../jobs/tasks.ts";
 import type { ConnectionTestResult } from "../../shared/api.ts";
-import { throughContainerHost } from "../../shared/connection-string.ts";
 import { randomId } from "../../state/crypto.ts";
-import { scrubText } from "../../state/redact.ts";
+import { previewConnectionUri, scrubText } from "../../state/redact.ts";
 import { openConnectionUri, sealConnectionUri } from "../../state/secrets.ts";
 import type { ConnectionRecord, DeploymentRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
@@ -28,6 +27,7 @@ import {
   type InspectOptions,
   inspectConnection,
   normalizeConnectionUri,
+  reachedAddress,
   recallCheck,
 } from "../connection-check.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
@@ -69,7 +69,7 @@ export function connectionRoutes(
     const principal = requireRole(c, "admin");
     const body = asObject(await readJson(c));
     const name = requiredString(body, "name", 100);
-    const uri = uriField(body);
+    const uri = uriField(body, services.settings.allowUnsafeTargets === true);
     if (uri === undefined) throw invalid('"uri" is required for a new connection.');
     const production = requiredBoolean(body, "production");
     const id = randomId();
@@ -77,7 +77,7 @@ export function connectionRoutes(
       id,
       name,
       uri: sealConnectionUri(store, id, uri),
-      uriPreview: redactMongoUri(uri),
+      uriPreview: previewConnectionUri(uri),
       production,
       createdAt: services.now().toISOString(),
     };
@@ -103,7 +103,7 @@ export function connectionRoutes(
     const id = c.req.param("id");
     const body = asObject(await readJson(c));
     const name = requiredString(body, "name", 100);
-    const uri = uriField(body);
+    const uri = uriField(body, services.settings.allowUnsafeTargets === true);
     const production = requiredBoolean(body, "production");
     const updated = await store.update((state) => {
       const existing = state.connections.find((connection) => connection.id === id);
@@ -115,7 +115,7 @@ export function connectionRoutes(
         production,
         ...(uri === undefined
           ? {}
-          : { uri: sealConnectionUri(store, id, uri), uriPreview: redactMongoUri(uri) }),
+          : { uri: sealConnectionUri(store, id, uri), uriPreview: previewConnectionUri(uri) }),
         ...liveEditsAfterUpdate(existing, production, principal.user.username, services.now()),
       };
       state.connections = state.connections.map((connection) =>
@@ -173,10 +173,7 @@ export function connectionRoutes(
     const result = await inspectConnection(uri, options.inspect);
     // In a container, "localhost" was refused but the host machine answered: store the
     // address that works, so backups and browsing use it from now on.
-    const working =
-      result.reachedThrough === undefined
-        ? undefined
-        : (options.inspect?.containerAddress ?? throughContainerHost)(uri);
+    const working = reachedAddress(uri, result, options.inspect?.containerAddress);
     if (result.ok && working !== undefined) {
       await store.update((state) => {
         state.connections = state.connections.map((candidate) =>
@@ -184,7 +181,7 @@ export function connectionRoutes(
             ? {
                 ...candidate,
                 uri: sealConnectionUri(store, connection.id, working),
-                uriPreview: redactMongoUri(working),
+                uriPreview: previewConnectionUri(working),
               }
             : candidate,
         );
@@ -228,11 +225,13 @@ export function connectionRoutes(
  * The optional `uri` field: a MongoDB connection string, cleaned and checked like a
  * pasted one (quotes and `mongosh "…"` removed, raw special characters in the password
  * encoded, placeholders such as `<db_password>` refused), see connection-check.ts.
+ * Options using the console's own workload identity are refused unless the console
+ * allows unsafe targets (network-targets.ts).
  */
-export function uriField(body: Fields): string | undefined {
+export function uriField(body: Fields, allowUnsafeTargets: boolean): string | undefined {
   const uri = optionalString(body, "uri", MAX_URI_LENGTH);
   if (uri === undefined) return undefined;
-  return normalizeConnectionUri(uri);
+  return normalizeConnectionUri(uri, allowUnsafeTargets);
 }
 
 /**

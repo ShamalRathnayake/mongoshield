@@ -89,8 +89,10 @@ describe("sessions", () => {
 });
 
 describe("setup token", () => {
-  it("is valid for 24 hours, stored hashed, and replaced by a new one", async () => {
+  it("is valid for an hour, stored hashed, and replaced by a new one", async () => {
+    expect(SETUP_TOKEN_TTL_MS).toBe(60 * 60 * 1000);
     const token = await issueSetupToken(store, start);
+    expect(isValidSetupToken(store, token, later(SETUP_TOKEN_TTL_MS - 1))).toBe(true);
     expect(JSON.stringify(store.current)).not.toContain(token);
     expect(isValidSetupToken(store, token, start)).toBe(true);
     expect(isValidSetupToken(store, "other", start)).toBe(false);

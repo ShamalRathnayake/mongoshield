@@ -191,33 +191,63 @@ second's writes are not replayed** (cluster time `{ t: <second>, i: 0 }`): when 
 names the second the bad `deleteMany` ran, replaying that second might replay it. Pass a
 cluster time for exact control.
 
-1. `planPointInTimeRestore(storage, at)`: the newest complete base backup whose cluster
-   time is at or before `at`, a covered range from that time through `at`, and the
+1. `planPointInTimeRestore(storage, at, { include, exclude, clusterId, instanceId })`: the newest
+   complete base backup whose cluster time is at or before `at` **and that suits the
+   restore** (src/journal/base-suitability.ts):
+   - it covers every namespace the restore selects: each is in the base, or the base's
+     recorded selection would have backed it up (a collection created after it). The
+     namespaces checked are those of every complete backup in the location plus the
+     include patterns without `*`;
+   - it has no `query` filter on a selected namespace;
+   - with `clusterId` (and `instanceId`, for two replica sets sharing a set name), it
+     comes from that deployment. Without it, each base is judged against its own
+     deployment's backups only, and the newest suitable one at or before `at` decides;
+     when suitable bases of other deployments lie inside the journal range the restore
+     uses, the plan's `warnings` say so (the journal does not record its deployment).
+     One plan never mixes deployments. `restore({ at })` passes `sourceIdentity`, else
+     the configured source's identity (never the target's); `mongoshield restore --at`
+     takes `--source-cluster <clusterId>[/<instanceId>]`, else the configured source's.
+
+   Unsuitable newer bases are passed over (listed in the error and in
+   `details.skippedBases` when nothing suitable is left). Manifests written before
+   selections were recorded are accepted unchecked. Then: a covered range from the
+   base's time through `at`, and the
    segments holding `(base time, at]` (with their stored size and an estimate of the
    number of events). Only names, manifests and small records are read. Otherwise
    `MS_CHANGE_HISTORY_LOST`, listing the recoverable ranges (also in
    `details.recoverableRanges`): within each covered range, from its oldest base backup
    to its end, plus every base backup on its own.
-2. Restore the base backup as usual (including its own converge replay and index builds).
-3. `replayJournal({ client, storage, from: base time, to: at, baseNamespaces, include,
-   exclude, rename, mode, decryption, … })`: reads the whole range once (chain,
-   decryption, parsing) before writing anything, maps namespaces with the restore's
+2. Pre-flight, BEFORE the base restore and in dry runs too (`preflightJournal` in
+   src/journal/replay.ts): reads the whole range `(base time, at]` once (chain,
+   decryption, parsing); with `baseSelection` (the plan's), refuses journaled
+   namespaces the restore selects that the base neither holds nor would have backed up
+   (`MS_CHANGE_HISTORY_LOST`); conflict-checks the targets of collections created after
+   the base backup with `mode` (`MS_RESTORE_CONFLICT`). A refusal here leaves the
+   target untouched; a refusal after the base restore would leave it at the base
+   backup's time.
+3. Restore the base backup as usual (including its own converge replay and index builds).
+4. `replayJournal({ client, storage, preflight, from: base time, to: at, baseNamespaces,
+   baseSelection, include, exclude, rename, mode, decryption, … })`: reuses the
+   pre-flight (without one it runs its own before writing anything); maps namespaces
+   with the restore's
    rules (src/engine/converge-targets.ts; collections created after the base backup are
-   conflict-checked with `mode`), then replays with the converge rules
+   conflict-checked with `mode` again, and dropped first in mode `drop`), then replays with the converge rules
    (src/engine/converge-replay.ts). Index changes after the base backup (the indexes of
    collections created after it included) are applied once the documents are in, with
    the converge rules (src/engine/converge-indexes.ts; the base restore has built the
    base backup's indexes already); `skipIndexes` leaves them out.
-4. Report the exact cluster time restored to (`restoredTo`), the number of events and
+5. Report the exact cluster time restored to (`restoredTo`), the number of events and
    the indexes created and dropped (`indexesCreated`, `indexesDropped`).
 
-When the journal does not reach `at` (`MS_CHANGE_HISTORY_LOST`), `restore({ backup:
+When the journal does not reach `at`, or the pre-flight finds the base does not cover
+what it changes (`MS_CHANGE_HISTORY_LOST` either way), `restore({ backup:
 "latest", at })` looks for an intact incremental chain that covers `at` and restores it up
 to `at` instead; the error lists the chains' ranges next to the journal's when none does.
 
 `mongoshield journal status` shows the recovery point, the RPO, the covered ranges and
 any gaps (`--json` for scripts, `--max-rpo 10m` exits 1 when the journal is further
-behind). `mongoshield restore --at` (with `--dry-run` showing the plan) wires steps 1 to 3.
+behind). `mongoshield restore --at` (with `--dry-run` showing the plan and running the
+pre-flight) wires steps 1 to 4.
 
 ## Retention
 

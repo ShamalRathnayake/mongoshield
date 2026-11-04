@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { makeBackup, makeDrill, makePlan, makeRestore } from "../../test/helpers/fixtures.ts";
 import { ANNOTATIONS, LABELS } from "../api/constants.ts";
 import { hashOf, stableStringify } from "./hash.ts";
+import { PINNED_ENVIRONMENT } from "./job-policy.ts";
 import { buildJobSpec, buildPodTemplate } from "./pod.ts";
 import {
   backupJobNameOf,
@@ -33,6 +34,36 @@ function storedPlan(overrides: Parameters<typeof makePlan>[1] = {}) {
 }
 
 describe("pod template", () => {
+  it("pins the code-loading variables after the user's, while the policy restricts images", () => {
+    const template = buildPodTemplate({
+      plan: storedPlan({
+        job: {
+          env: [
+            { name: "AWS_REGION", value: "eu-west-1" },
+            { name: "NODE_OPTIONS", value: "--max-old-space-size=4096" },
+          ],
+        },
+      }),
+      defaults,
+      args: ["run"],
+      configMapName: "cm",
+      labels: {},
+      configHash: "h",
+    });
+    const container = template.spec?.containers[0];
+    const names = container?.env?.map((variable) => variable.name) ?? [];
+    // env wins over envFrom, so the pins also beat the storage credentials Secret.
+    expect(container?.envFrom).toEqual([{ secretRef: { name: "s3-credentials" } }]);
+    expect(names.slice(-PINNED_ENVIRONMENT.length)).toEqual(
+      PINNED_ENVIRONMENT.map((variable) => variable.name),
+    );
+    expect(names.filter((name) => name === "NODE_OPTIONS")).toHaveLength(1);
+    expect(container?.env?.find((variable) => variable.name === "NODE_OPTIONS")?.value).toBe(
+      "--max-old-space-size=4096",
+    );
+    expect(names).toContain("AWS_REGION");
+  });
+
   it("runs hardened, non-root, read-only, without the API token", () => {
     const template = buildPodTemplate({
       plan: storedPlan(),
@@ -65,6 +96,8 @@ describe("pod template", () => {
         valueFrom: { secretKeyRef: { name: "prod-mongodb", key: "MONGODB_URI" } },
       },
       { name: "NO_COLOR", value: "1" },
+      // The default policy restricts images, so the code-loading variables are pinned.
+      ...PINNED_ENVIRONMENT,
     ]);
     expect(pod?.volumes?.map((volume) => volume.name)).toEqual(["config", "tmp"]);
     expect(template.metadata?.annotations?.["mongoshield.io/config-hash"]).toBe("h1");
@@ -96,7 +129,12 @@ describe("pod template", () => {
           envFrom: [{ configMapRef: { name: "extra" } }],
         },
       }),
-      defaults: { ...defaults, imagePullPolicy: "IfNotPresent" },
+      // A custom image and envFrom: only an admin who allows any image permits both.
+      defaults: {
+        ...defaults,
+        imagePullPolicy: "IfNotPresent",
+        policy: { allowedImages: ["*"], allowedServiceAccounts: ["*"], allowEnvFrom: false },
+      },
       args: ["run"],
       uriSecret: { name: "prod-mongodb", key: "uri" },
       configMapName: "cm",
@@ -314,11 +352,25 @@ describe("drill and deletion workloads", () => {
     });
     expect(drillArgs(makeDrill(), "id")).toEqual([
       "drill",
-      "id",
       "--json",
       "--config",
       "/etc/mongoshield/config/mongoshield.config.json",
+      "--",
+      "id",
     ]);
+  });
+
+  it("passes a flag-looking backup id after `--`, so the CLI never parses it as a flag", () => {
+    const sneaky = "--to-uri=mongodb://attacker.example/";
+    for (const args of [
+      restoreArgs(makeRestore("r"), sneaky),
+      drillArgs(makeDrill(), sneaky),
+      buildDataDeletionJob(makeBackup(), storedPlan(), sneaky, defaults, "h").spec?.template.spec
+        ?.containers[0]?.args ?? [],
+    ]) {
+      expect(args.slice(-2)).toEqual(["--", sneaky]);
+      expect(args.indexOf(sneaky)).toBe(args.length - 1);
+    }
   });
 
   it("builds the data deletion Job, owned by the backup", () => {

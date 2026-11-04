@@ -22,13 +22,15 @@
 #   - the container serves HTTP on 8080 and keeps its state in the /data volume.
 
 ARG CLOUD_SDKS=all
-ARG NODE_MAJOR=24
+# Base images are pinned by digest and npm installs honour NPM_BEFORE, as in
+# docker/Dockerfile (read it for why).
+ARG NPM_BEFORE=""
 
 
 # ---------------------------------------------------------------------------
 # Stage 1: build both packages and pack them as npm tarballs
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM node:${NODE_MAJOR}-trixie AS build
+FROM --platform=$BUILDPLATFORM node:24-trixie@sha256:8c761eca2bf7eec965f946cf47b8090143cb41f45f2f8699af0cc0298d2d2d19 AS build
 WORKDIR /repo
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
@@ -60,8 +62,9 @@ RUN pnpm --filter mongoshield build \
 # ---------------------------------------------------------------------------
 # Stage 2: install the tarballs like a user would (flat node_modules, no symlinks)
 # ---------------------------------------------------------------------------
-FROM node:${NODE_MAJOR}-trixie-slim AS deps
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS deps
 ARG CLOUD_SDKS
+ARG NPM_BEFORE
 WORKDIR /app
 COPY --from=build /pack/mongoshield.tgz /pack/console.tgz /tmp/
 COPY docker/install-sdks.sh /usr/local/bin/install-sdks.sh
@@ -71,7 +74,8 @@ RUN echo '{ "name": "mongoshield-console-image", "private": true, "type": "modul
 # then the console itself, whose `mongoshield` dependency is already satisfied.
 RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
     sh /usr/local/bin/install-sdks.sh /tmp/mongoshield.tgz "$CLOUD_SDKS" \
- && npm install --omit=dev --ignore-scripts --no-audit --no-fund /tmp/console.tgz
+ && npm install --omit=dev --ignore-scripts --no-audit --no-fund \
+      ${NPM_BEFORE:+--before="$NPM_BEFORE"} /tmp/console.tgz
 
 # The state volume's mount point, owned by the runtime user so a fresh named
 # volume inherits that ownership and is writable without a chown (Docker copies the
@@ -83,7 +87,7 @@ RUN mkdir -p /data
 # ---------------------------------------------------------------------------
 # Stage 3: distroless runtime, non-root
 # ---------------------------------------------------------------------------
-FROM gcr.io/distroless/nodejs${NODE_MAJOR}-debian13:nonroot AS runtime
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:b8cec4b2f2126ff7bd034ec9ac207ffb3272667dfdc48376e3b035d3270549ba AS runtime
 ARG CLOUD_SDKS
 
 LABEL org.opencontainers.image.title="MongoShield Console" \
@@ -96,10 +100,12 @@ LABEL org.opencontainers.image.title="MongoShield Console" \
 COPY --from=deps /app /app
 COPY --from=deps --chown=65532:65532 /data /data
 
+# No HOST here: the server's own default listen address applies (all interfaces), so
+# the image follows it, including dual-stack IPv4 + IPv6 where the server supports it.
+# Set HOST to listen on one address only; the HEALTHCHECK below follows it.
 ENV NODE_ENV=production \
     MONGOSHIELD_DATA_DIR=/data \
-    PORT=8080 \
-    HOST=0.0.0.0
+    PORT=8080
 
 USER 65532:65532
 WORKDIR /app
@@ -114,8 +120,12 @@ VOLUME ["/data"]
 # Unlike the CLI image, the console is a long-running web server, so a health check
 # is meaningful: /healthz answers when the server is up. Distroless has no curl, so
 # Node itself makes the request; any failure exits non-zero.
+#
+# Which address: the one in HOST when it names a single address (an IPv6 one goes in
+# brackets), otherwise loopback over IPv4 and then IPv6, so the check passes whether the
+# server listens on 0.0.0.0, on :: (dual stack) or in an IPv6-only network.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+  CMD ["/nodejs/bin/node", "-e", "const host=process.env.HOST||'';const port=process.env.PORT||8080;const any=['','0.0.0.0','::','[::]'].includes(host);const hosts=any?['127.0.0.1','[::1]']:[host.includes(':')&&!host.startsWith('[')?'['+host+']':host];(async()=>{for(const h of hosts){try{const r=await fetch('http://'+h+':'+port+'/healthz',{signal:AbortSignal.timeout(2000)});if(r.ok)process.exit(0)}catch{}}process.exit(1)})()"]
 
 # The server handles SIGTERM and SIGINT itself (finishes running jobs within a grace
 # period, then exits 0), so `docker stop` and Ctrl-C under `docker run -it` stop it

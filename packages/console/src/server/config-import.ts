@@ -34,15 +34,15 @@
 
 import {
   ConfigSchema,
+  defaultCompression,
   isMongoShieldError,
   type MongoShieldConfig,
-  redactMongoUri,
 } from "mongoshield";
 import { checkSchedule } from "../jobs/schedules.ts";
 import { checkStorageInput } from "../jobs/storage.ts";
 import type { ConfigImportChange, ConfigImportResult, ConfigImportSecrets } from "../shared/api.ts";
 import { randomId } from "../state/crypto.ts";
-import { redactUrlToOrigin } from "../state/redact.ts";
+import { previewConnectionUri, redactUrlToOrigin, SECRET_URI_OPTIONS } from "../state/redact.ts";
 import {
   sealConnectionUri,
   sealNotifyUrl,
@@ -60,6 +60,11 @@ import type {
   StorageRecord,
 } from "../state/types.ts";
 import { invalid } from "./errors.ts";
+import {
+  UNSAFE_TARGET_HINT,
+  unsafeConnectionUriReason,
+  unsafeWebhookReason,
+} from "./network-targets.ts";
 import {
   asObject,
   type Fields,
@@ -82,20 +87,6 @@ const MAX_NOTIFY = 10;
 const MAX_RECIPIENTS = 20;
 const MAX_RETENTION = 1000;
 const MIN_PASSPHRASE_LENGTH = 12;
-
-/**
- * Connection string options that carry secrets. The same list the library's
- * `redactMongoUri` scrubs (src/redact.ts in `mongoshield`); kept here because the
- * library does not export it.
- */
-const SECRET_URI_OPTIONS = new Set([
-  "password",
-  "authmechanismproperties",
-  "tlscertificatekeyfilepassword",
-  "aws_session_token",
-  "secret",
-  "token",
-]);
 
 /** A checked import request. */
 export interface ImportRequest {
@@ -123,6 +114,8 @@ export interface ImportContext {
   readonly store: StateStore;
   readonly dataDir: string;
   readonly now: Date;
+  /** MONGOSHIELD_ALLOW_UNSAFE_TARGETS: skip the network-target guard (network-targets.ts). */
+  readonly allowUnsafeTargets?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,9 +185,12 @@ function parseSecrets(
       maxItems: MAX_NOTIFY,
       maxLength: 2048,
     });
+    // Empty values are refused, as in the storage routes: an empty credential would make
+    // the location look as if it had credentials (see checkStorageInput).
     const storageCredentials = optionalStringMap(fields, "storageCredentials", {
       maxEntries: 10,
       maxLength: MAX_CREDENTIAL_LENGTH,
+      nonEmptyValues: true,
     });
     secrets.set(name, {
       ...(uri === undefined ? {} : { uri: uri.trim() }),
@@ -297,7 +293,8 @@ function readConfig(
     name,
     uri: readUri(where, config.source?.uri, secrets.uri),
     storageUrl: readStorageUrl(where, config.storage),
-    compression: config.compression ?? "zstd",
+    // Unset means the library default: zstd where this Node.js has it, gzip otherwise.
+    compression: config.compression ?? defaultCompression(),
     encryption,
     include: checkPatterns(where("backup.include"), config.backup?.include ?? []),
     exclude: checkPatterns(where("backup.exclude"), config.backup?.exclude ?? []),
@@ -662,7 +659,7 @@ export function planImport(
       encryption: resolveEncryption(config, secrets, existing, planId, context.store),
       consistency: config.consistency,
       verify: config.verify,
-      notify: resolveNotify(config, secrets, existing, planId, context.store),
+      notify: resolveNotify(config, secrets, existing, planId, context),
       createdAt: existing?.createdAt ?? at,
       ...(config.schedule === undefined ? {} : { schedule: config.schedule }),
       ...(config.retention === undefined ? {} : { retention: config.retention }),
@@ -722,7 +719,16 @@ function resolveConnection(
     }
     return { record: kept, created: false };
   }
-  const preview = redactMongoUri(config.uri);
+  // The same guard as the connection routes (network-targets.ts), for the document's
+  // source.uri and secrets.<plan>.uri alike.
+  const unsafe = unsafeConnectionUriReason(config.uri, context.allowUnsafeTargets === true);
+  if (unsafe !== undefined) {
+    throw invalid(
+      `Plan ${JSON.stringify(config.name)}: the connection string is refused: ${unsafe}.`,
+      UNSAFE_TARGET_HINT,
+    );
+  }
+  const preview = previewConnectionUri(config.uri);
   const match = connections.find((connection) => connection.uriPreview === preview);
   if (match !== undefined) return { record: match, created: false };
   const id = randomId();
@@ -765,7 +771,9 @@ function resolveStorage(
   if (match !== undefined) return { record: match, created: false };
   const credentials = secrets.storageCredentials ?? {};
   try {
-    checkStorageInput(config.storageUrl, Object.keys(credentials), context.dataDir);
+    checkStorageInput(config.storageUrl, credentials, context.dataDir, {
+      allowUnsafeTargets: context.allowUnsafeTargets === true,
+    });
   } catch (error) {
     if (!isMongoShieldError(error)) throw error;
     throw invalid(`Plan ${JSON.stringify(planName)}: storage: ${error.message}`, error.hint);
@@ -834,7 +842,7 @@ function resolveNotify(
   secrets: ConfigImportSecrets,
   existing: PlanRecord | undefined,
   planId: string,
-  store: StateStore,
+  context: ImportContext,
 ): NotifyRecord[] {
   return config.notifyTypes.map((type, index): NotifyRecord => {
     const url = secrets.notifyUrls?.[index];
@@ -844,7 +852,18 @@ function resolveNotify(
           `Plan ${JSON.stringify(config.name)}: notifyUrls[${index}] must be an http(s) URL.`,
         );
       }
-      return { type, url: sealNotifyUrl(store, planId, url), urlPreview: redactUrlToOrigin(url) };
+      const unsafe = unsafeWebhookReason(url, context.allowUnsafeTargets === true);
+      if (unsafe !== undefined) {
+        throw invalid(
+          `Plan ${JSON.stringify(config.name)}: notifyUrls[${index}] is refused: ${unsafe}.`,
+          UNSAFE_TARGET_HINT,
+        );
+      }
+      return {
+        type,
+        url: sealNotifyUrl(context.store, planId, url),
+        urlPreview: redactUrlToOrigin(url),
+      };
     }
     const kept = existing?.notify[index];
     if (kept === undefined) {

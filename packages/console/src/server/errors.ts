@@ -26,6 +26,7 @@ export type ErrorStatus =
   | 409
   | 413
   | 415
+  | 421
   | 422
   | 429
   | 500

@@ -7,13 +7,17 @@
  * variables to set.
  *
  * Injection safety: every value from the state (names, URLs, patterns) is
- * written with `JSON.stringify`, which produces a valid, fully escaped
- * TypeScript string literal, and names in comments are written the same way.
- * Identifiers are built from `[A-Za-z0-9]` only. So no stored value can ever
- * close a string or comment and inject code into a file someone will run.
+ * written with {@link literal}: `JSON.stringify`, which produces a valid, fully
+ * escaped TypeScript string literal, plus escapes for what JSON leaves alone but
+ * would end a comment (names also appear in `//` and `/** … *\/` comments):
+ * `*\/` closes a block comment, and U+2028 / U+2029 are line terminators in
+ * JavaScript, so they end a `//` comment. Identifiers are built from `[A-Za-z0-9]`
+ * only. So no stored value can ever close a string or comment and inject code
+ * into a file someone will run.
  */
 
 import { localPathOf, storageSchemeOf } from "../jobs/storage.ts";
+import { redactStorageUrl } from "../state/redact.ts";
 import type { ConnectionRecord, ConsoleState, PlanRecord, StorageRecord } from "../state/types.ts";
 
 /** The exported file. */
@@ -68,55 +72,53 @@ function renderPlan(
   variables: string[],
 ): string {
   const uriVariable = `MONGODB_URI_${envSuffix(connection.name)}`;
-  variables.push(`${uriVariable}  connection string of ${JSON.stringify(connection.name)}`);
+  variables.push(`${uriVariable}  connection string of ${literal(connection.name)}`);
   for (const name of storage.credentialNames ?? []) {
-    variables.push(`${name}  credential of storage ${JSON.stringify(storage.name)}`);
+    variables.push(`${name}  credential of storage ${literal(storage.name)}`);
   }
 
   const out: string[] = [];
-  out.push(`/** Plan ${JSON.stringify(plan.name)}. */`);
+  out.push(`/** Plan ${literal(plan.name)}. */`);
   out.push(`export const ${identifier} = defineConfig({`);
   out.push(`  source: { uri: process.env.${uriVariable} },`);
-  out.push(`  storage: ${JSON.stringify(storageLocation(storage, dataDir))},`);
-  out.push(`  compression: ${JSON.stringify(plan.compression)},`);
+  out.push(`  storage: ${literal(storageLocation(storage, dataDir))},`);
+  out.push(`  compression: ${literal(plan.compression)},`);
 
   if (plan.encryption.kind === "recipients") {
-    out.push(`  encryption: { recipients: ${JSON.stringify(plan.encryption.recipients)} },`);
+    out.push(`  encryption: { recipients: ${literal(plan.encryption.recipients)} },`);
   } else if (plan.encryption.kind === "managed") {
     // The console keeps the private key; the CLI only needs the public one to encrypt.
     // Restoring needs the recovery key (Backup plans → Recovery key) as an identity file.
     out.push("  // Key kept by the console: restore with its recovery key (--identity-file).");
-    out.push(`  encryption: { recipients: ${JSON.stringify([plan.encryption.recipient])} },`);
+    out.push(`  encryption: { recipients: ${literal([plan.encryption.recipient])} },`);
   } else if (plan.encryption.kind === "passphrase") {
     const variable = `MONGOSHIELD_PASSPHRASE_${envSuffix(plan.name)}`;
-    variables.push(`${variable}  backup passphrase of plan ${JSON.stringify(plan.name)}`);
+    variables.push(`${variable}  backup passphrase of plan ${literal(plan.name)}`);
     out.push(`  encryption: { passphrase: process.env.${variable} },`);
   }
 
   const backup: string[] = [];
-  if (plan.include.length > 0) backup.push(`include: ${JSON.stringify(plan.include)}`);
-  if (plan.exclude.length > 0) backup.push(`exclude: ${JSON.stringify(plan.exclude)}`);
-  backup.push(`consistency: ${JSON.stringify(plan.consistency)}`);
+  if (plan.include.length > 0) backup.push(`include: ${literal(plan.include)}`);
+  if (plan.exclude.length > 0) backup.push(`exclude: ${literal(plan.exclude)}`);
+  backup.push(`consistency: ${literal(plan.consistency)}`);
   if (plan.incremental !== undefined) {
-    backup.push(
-      `incremental: { fullEveryDays: ${JSON.stringify(plan.incremental.fullEveryDays)} }`,
-    );
+    backup.push(`incremental: { fullEveryDays: ${literal(plan.incremental.fullEveryDays)} }`);
   }
   out.push(`  backup: { ${backup.join(", ")} },`);
 
-  if (plan.retention !== undefined) out.push(`  retention: ${JSON.stringify(plan.retention)},`);
+  if (plan.retention !== undefined) out.push(`  retention: ${literal(plan.retention)},`);
   if (plan.schedule !== undefined) {
     out.push(
-      `  schedule: { cron: ${JSON.stringify(plan.schedule.cron)}, timezone: ${JSON.stringify(plan.schedule.timezone)}, verify: ${JSON.stringify(plan.verify)} },`,
+      `  schedule: { cron: ${literal(plan.schedule.cron)}, timezone: ${literal(plan.schedule.timezone)}, verify: ${literal(plan.verify)} },`,
     );
   }
   if (plan.notify.length > 0) {
     out.push("  notify: [");
     plan.notify.forEach((target, index) => {
       const variable = `MONGOSHIELD_NOTIFY_${envSuffix(plan.name)}_${index + 1}`;
-      variables.push(`${variable}  ${target.type} URL of plan ${JSON.stringify(plan.name)}`);
+      variables.push(`${variable}  ${target.type} URL of plan ${literal(plan.name)}`);
       out.push(
-        `    { type: ${JSON.stringify(target.type)}, url: process.env.${variable}, on: ["success", "failure"] },`,
+        `    { type: ${literal(target.type)}, url: process.env.${variable}, on: ["success", "failure"] },`,
       );
     });
     out.push("  ],");
@@ -125,9 +127,26 @@ function renderPlan(
   return out.join("\n");
 }
 
-/** Where the CLI should find the backups: local paths become absolute. */
+/**
+ * Where the CLI should find the backups: local paths become absolute. A SAS token
+ * left in an old location's `endpoint=` is not exported (`redactStorageUrl`).
+ */
 function storageLocation(storage: StorageRecord, dataDir: string): string {
-  return storageSchemeOf(storage.url) === "file" ? localPathOf(storage.url, dataDir) : storage.url;
+  return storageSchemeOf(storage.url) === "file"
+    ? localPathOf(storage.url, dataDir)
+    : redactStorageUrl(storage.url);
+}
+
+/**
+ * A JSON value as TypeScript source that is safe in code AND in comments (see the file
+ * header): `JSON.stringify`, then `*\/` → `*\\/` and U+2028 / U+2029 → `\\u2028` /
+ * `\\u2029`. Inside a string literal both escapes read back as the same characters.
+ */
+export function literal(value: unknown): string {
+  return JSON.stringify(value)
+    .replaceAll("*/", "*\\/")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
 }
 
 /** `Prod EU (main)` → `PROD_EU_MAIN`. */

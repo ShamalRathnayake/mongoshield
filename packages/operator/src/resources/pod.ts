@@ -30,12 +30,24 @@ import {
 } from "../api/constants.ts";
 import type { BackupPlan, SecretKeyRef } from "../api/types.ts";
 import type { JobSpec, PodTemplateSpec } from "../kube/objects.ts";
+import {
+  defaultJobPolicy,
+  imagesRestricted,
+  type JobPolicy,
+  restrictedEnvironment,
+} from "./job-policy.ts";
 
 /** Defaults the operator was configured with. */
 export interface JobDefaults {
   /** The MongoShield image to run when a plan does not name one. */
   readonly image: string;
   readonly imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
+  /**
+   * Which `spec.job.image` and `spec.job.serviceAccountName` plans may use (checked by
+   * the plan reconciler). Absent: defaultJobPolicy(image), i.e. only the default image's
+   * repository and any service account.
+   */
+  readonly policy?: JobPolicy;
 }
 
 /** Everything needed to build one pod template. */
@@ -143,7 +155,10 @@ export function buildJobSpec(plan: BackupPlan, template: PodTemplateSpec): JobSp
   };
 }
 
-/** Environment variables: the connection string, keys, and the user's extras. */
+/**
+ * Environment variables: the connection string, keys, the user's extras and, while the
+ * job policy restricts images, the pinned variables that keep the image's code fixed.
+ */
 function environment(inputs: PodInputs): V1EnvVar[] {
   const { plan, uriSecret } = inputs;
   // Every pod of a plan with `spec.drill` gets the drill target, not only the runs
@@ -188,8 +203,12 @@ function environment(inputs: PodInputs): V1EnvVar[] {
       value: `${IDENTITY_MOUNT_PATH}/${identityKey(plan)}`,
     });
   }
-  // The user's own variables last, so they can override ours if they must.
-  env.push(...(plan.spec.job?.env ?? []));
+  // The user's own variables last. While the policy restricts images, they come without
+  // anything that loads code, followed by the pinned variables (job-policy.ts), which win
+  // over the same names from any envFrom source, the storage credentials Secret included.
+  const planEnv = plan.spec.job?.env ?? [];
+  const policy = inputs.defaults.policy ?? defaultJobPolicy(inputs.defaults.image);
+  env.push(...(imagesRestricted(policy) ? restrictedEnvironment(planEnv) : planEnv));
   return env;
 }
 

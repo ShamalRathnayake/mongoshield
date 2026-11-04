@@ -11,6 +11,10 @@
  * from:
  *
  *   clusterId   manifest.source.clusterId (a hash identifying the deployment)
+ *   instanceId  manifest.source.instanceId (tells apart two replica sets that share a
+ *               set name, e.g. staging and prod both called `rs0`). Compared only
+ *               when both the scope and the backup record it, like `sameDeployment`
+ *               in mongo/deployment.ts, so backups written before it existed still match
  *   labels      manifest.labels, e.g. `mongoshield.shape` (the include/exclude
  *               selection, see engine/backup-guard.ts) or `mongoshield.plan`
  *               (the console plan that wrote the backup)
@@ -42,6 +46,11 @@ export const PLAN_LABEL = "mongoshield.plan";
 export interface PruneScope {
   /** Only backups whose `manifest.source.clusterId` is this value. */
   readonly clusterId?: string;
+  /**
+   * Only backups whose `manifest.source.instanceId` is this value, or that record
+   * none (older backups). Set it together with `clusterId`.
+   */
+  readonly instanceId?: string;
   /** Only backups whose `manifest.labels` include every one of these key/value pairs. */
   readonly labels?: Readonly<Record<string, string>>;
 }
@@ -49,6 +58,7 @@ export interface PruneScope {
 /** What a backup records about its origin: from its manifest, or its checkpoint while it runs. */
 export interface BackupOrigin {
   readonly clusterId?: string | undefined;
+  readonly instanceId?: string | undefined;
   readonly labels: Readonly<Record<string, string>>;
 }
 
@@ -58,6 +68,15 @@ export interface BackupOrigin {
  */
 export function isInScope(origin: BackupOrigin, scope: PruneScope): boolean {
   if (scope.clusterId !== undefined && origin.clusterId !== scope.clusterId) return false;
+  // Two replica sets with one set name share a clusterId; their instanceIds differ.
+  // A side that does not know its instanceId keeps matching (see the file header).
+  if (
+    scope.instanceId !== undefined &&
+    origin.instanceId !== undefined &&
+    origin.instanceId !== scope.instanceId
+  ) {
+    return false;
+  }
   for (const [key, value] of Object.entries(scope.labels ?? {})) {
     // `Object.hasOwn` so that a label named like an Object.prototype member
     // ("constructor", "toString") never matches by accident.
@@ -106,6 +125,7 @@ export function validateScope(scope: PruneScope): void {
 export function describeScope(scope: PruneScope): string {
   const parts: string[] = [];
   if (scope.clusterId !== undefined) parts.push(`cluster ${scope.clusterId}`);
+  if (scope.instanceId !== undefined) parts.push(`instance ${scope.instanceId}`);
   for (const [key, value] of Object.entries(scope.labels ?? {})) parts.push(`${key}=${value}`);
   return parts.length === 0 ? "every backup" : parts.join(" · ");
 }

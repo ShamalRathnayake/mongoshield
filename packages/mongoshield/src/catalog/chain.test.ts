@@ -131,6 +131,26 @@ describe("resolveChain", () => {
     expect(isMongoShieldError(caught, "MS_INTEGRITY_FAILED")).toBe(true);
   });
 
+  it("tells apart two replica sets that share a set name by their instanceId", () => {
+    const base = makeChainBase(idAt("2026-10-20T00:00:00Z"), 1000);
+    const baseFromStaging: Manifest = { ...base, source: { ...base.source, instanceId: "aaa" } };
+    const childOf = (instanceId: string | undefined): Manifest =>
+      makeIncremental(idAt("2026-10-20T01:00:00Z"), baseFromStaging, 2000, {
+        source: {
+          ...base.source,
+          ...(instanceId === undefined ? {} : { instanceId }),
+        },
+      });
+    const fromProd = childOf("bbb");
+    expect(
+      inspectChain([entry(fromProd), entry(baseFromStaging)], fromProd).problems[0]?.problem,
+    ).toContain("same name");
+    // Same instance, or a side written before instanceId existed: still one chain.
+    for (const child of [childOf("aaa"), childOf(undefined)]) {
+      expect(inspectChain([entry(child), entry(baseFromStaging)], child).problems).toEqual([]);
+    }
+  });
+
   it("refuses a parent without an exact end time", () => {
     const base = makeManifest(idAt("2026-10-20T00:00:00Z"), {
       source: { topology: "replicaSet", serverVersion: "8.0.0", clusterId: "c0ffee" },

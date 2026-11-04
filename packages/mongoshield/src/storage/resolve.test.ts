@@ -162,6 +162,92 @@ describe("resolveStorage for az://", () => {
     const error = await configError(url);
     expect(error?.message).not.toContain("secret");
   });
+
+  it("refuses a SAS token inside the endpoint parameter without repeating it", async () => {
+    const endpoint = encodeURIComponent(
+      "https://myaccount.blob.core.windows.net/?sv=2024-01-01&sig=sas-secret",
+    );
+    const error = await configError(`az://myaccount/backups?endpoint=${endpoint}`);
+    expect(error?.message).not.toContain("sas-secret");
+    expect(error?.hint).not.toContain("sas-secret");
+    expect(error?.hint).toContain("AZURE_STORAGE_CONNECTION_STRING");
+  });
+
+  it("refuses user info in the endpoint parameter", async () => {
+    const endpoint = encodeURIComponent("https://key:secret@myaccount.blob.core.windows.net");
+    const error = await configError(`az://myaccount/backups?endpoint=${endpoint}`);
+    expect(error?.message).not.toContain("secret");
+  });
+
+  it.each([
+    "https://myaccount.blob.core.windows.net",
+    "https://myaccount.privatelink.blob.core.windows.net",
+    "https://myaccount.blob.core.chinacloudapi.cn",
+    "https://myaccount.blob.core.usgovcloudapi.net",
+  ])("accepts the Azure Storage endpoint %s with DefaultAzureCredential", async (endpoint) => {
+    const storage = await resolveStorage(
+      `az://myaccount/backups?endpoint=${encodeURIComponent(endpoint)}`,
+    );
+    expect(storage.kind).toBe("azure");
+  });
+
+  it("refuses an endpoint outside Azure, where DefaultAzureCredential would send its token", async () => {
+    const error = await configError(
+      "az://myaccount/backups?endpoint=https%3A%2F%2Fcollector.example.com",
+    );
+    expect(error?.message).toContain("collector.example.com");
+    expect(error?.hint).toContain("allowCustomEndpoint=true");
+  });
+
+  it("accepts the upload-memory parameters blockSizeMiB and uploadConcurrency", async () => {
+    const storage = await resolveStorage(
+      "az://myaccount/backups?blockSizeMiB=4&uploadConcurrency=2",
+    );
+    expect(storage.kind).toBe("azure");
+    await configError("az://myaccount/backups?uploadConcurrency=zero");
+  });
+
+  it("accepts an endpoint outside Azure when allowCustomEndpoint=true says so", async () => {
+    const storage = await resolveStorage(
+      "az://devstoreaccount1/backups?endpoint=http%3A%2F%2F127.0.0.1%3A10000%2Fdevstoreaccount1&allowCustomEndpoint=true",
+    );
+    expect(storage.kind).toBe("azure");
+  });
+});
+
+describe("resolveStorage endpoint parameter for s3://", () => {
+  it("refuses presigned parameters in the endpoint without repeating them", async () => {
+    const endpoint = encodeURIComponent("https://s3.example.com/?X-Amz-Signature=s3-secret");
+    const error = await configError(`s3://bucket?endpoint=${endpoint}`);
+    expect(error?.message).not.toContain("s3-secret");
+  });
+
+  it("accepts the upload-memory, checksum and conditional-write parameters", async () => {
+    const storage = await resolveStorage(
+      "s3://bucket?endpoint=https%3A%2F%2Fs3.example.com&partSizeMiB=8&queueSize=2" +
+        "&responseChecksumValidation=when_required&conditionalWrites=probe",
+    );
+    expect(storage.kind).toBe("s3");
+    const off = await resolveStorage("s3://bucket?conditionalWrites=false");
+    expect(off.capabilities.conditionalWrites).toBe(false);
+    expect((await resolveStorage("gs://bucket?chunkSizeMiB=8")).kind).toBe("gcs");
+  });
+
+  it.each([
+    "s3://bucket?partSizeMiB=1",
+    "s3://bucket?partSizeMiB=8.5",
+    "s3://bucket?queueSize=0",
+    "s3://bucket?conditionalWrites=sometimes",
+    "s3://bucket?responseChecksumValidation=NEVER",
+    "gs://bucket?chunkSizeMiB=-1",
+  ])("rejects %j with MS_CONFIG_INVALID", async (url) => {
+    await configError(url);
+  });
+
+  it("keeps accepting any S3-compatible host, since SigV4 never sends the secret key", async () => {
+    const storage = await resolveStorage("s3://bucket?endpoint=https%3A%2F%2Fminio.example.com");
+    expect(storage.kind).toBe("s3");
+  });
 });
 
 describe("resolveStorage for sftp://", () => {

@@ -20,11 +20,21 @@ export interface NamespaceFilterOptions {
 /** A predicate over full namespaces such as `"app.users"`. */
 export type NamespaceFilter = (ns: string) => boolean;
 
+/**
+ * One half of a pattern (`app_*`), ready to match a database or collection name.
+ * Shaped like a `RegExp` (`test`) so callers read the same, but matched without one:
+ * see {@link compileWildcard}.
+ */
+export interface WildcardMatcher {
+  /** True when the whole of `text` matches the wildcard. */
+  test(text: string): boolean;
+}
+
 /** A validated pattern, ready to match. */
 interface CompiledPattern {
   readonly source: string;
-  readonly database: RegExp;
-  readonly collection: RegExp;
+  readonly database: WildcardMatcher;
+  readonly collection: WildcardMatcher;
   /** The database name when the database half has no wildcard (e.g. `admin` in `admin.x`). */
   readonly literalDatabase: string | undefined;
 }
@@ -106,7 +116,12 @@ function matchesPattern(pattern: CompiledPattern, database: string, collection: 
 /** Validates one pattern and turns each half into an anchored regular expression. */
 function compilePattern(pattern: NamespacePattern): CompiledPattern {
   if (pattern === "*") {
-    return { source: pattern, database: /^.*$/s, collection: /^.*$/s, literalDatabase: undefined };
+    return {
+      source: pattern,
+      database: MATCH_ANYTHING,
+      collection: MATCH_ANYTHING,
+      literalDatabase: undefined,
+    };
   }
   const problem = patternProblem(pattern);
   if (problem !== undefined) {
@@ -121,8 +136,8 @@ function compilePattern(pattern: NamespacePattern): CompiledPattern {
   const { database, collection } = splitNamespace(pattern);
   return {
     source: pattern,
-    database: wildcardToRegExp(database),
-    collection: wildcardToRegExp(collection),
+    database: compileWildcard(database),
+    collection: compileWildcard(collection),
     literalDatabase: database.includes("*") ? undefined : database,
   };
 }
@@ -144,14 +159,52 @@ function patternProblem(pattern: unknown): string | undefined {
   return undefined;
 }
 
-/** `app_*` → /^app_.*$/s, with every other character matched literally. */
-function wildcardToRegExp(wildcard: string): RegExp {
-  const parts = wildcard.split("*").map(escapeRegExp);
-  // The `s` flag lets `.*` cross any character; names never contain newlines, but a
-  // wildcard should not silently stop matching if one ever did.
-  return new RegExp(`^${parts.join(".*")}$`, "s");
-}
+/** The matcher for a lone `*`: every name, including the empty one. */
+const MATCH_ANYTHING: WildcardMatcher = { test: () => true };
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+/**
+ * Compiles a wildcard (`*` matches any run of characters, including none; every other
+ * character matches itself) into a matcher that runs in linear time.
+ *
+ * Why not a regular expression: `a*a*a*…!` turned into `/^a.*a.*a.*…!$/` makes
+ * JavaScript's backtracking engine try every way of splitting the name between the
+ * `.*`s, which is exponential in the number of stars. A pattern with a dozen stars
+ * then blocks the event loop for seconds, and no timeout or abort signal can
+ * interrupt it. With `*` as the only wildcard, this greedy algorithm is exact:
+ *
+ *   1. the text before the first `*` must be a prefix of the name, and the text after
+ *      the last `*` a suffix (the two must not overlap);
+ *   2. every literal piece between stars is found left to right with `indexOf`, each
+ *      search starting where the previous piece ended. Taking the leftmost match is
+ *      always safe: it leaves the most room for the pieces after it.
+ *
+ * Repeated stars (`a**b`) leave empty pieces between them, which are skipped: they
+ * mean the same as one star.
+ */
+export function compileWildcard(wildcard: string): WildcardMatcher {
+  const pieces = wildcard.split("*");
+  // No star at all: a plain name, compared as it is.
+  if (pieces.length === 1) return { test: (text) => text === wildcard };
+
+  const prefix = pieces[0] ?? "";
+  const suffix = pieces[pieces.length - 1] ?? "";
+  const middle = pieces.slice(1, -1).filter((piece) => piece.length > 0);
+  let shortest = prefix.length + suffix.length;
+  for (const piece of middle) shortest += piece.length;
+
+  return {
+    test(text: string): boolean {
+      if (text.length < shortest) return false;
+      if (!text.startsWith(prefix) || !text.endsWith(suffix)) return false;
+      // The middle pieces must all fit between the prefix and the suffix.
+      const end = text.length - suffix.length;
+      let position = prefix.length;
+      for (const piece of middle) {
+        const found = text.indexOf(piece, position);
+        if (found === -1 || found + piece.length > end) return false;
+        position = found + piece.length;
+      }
+      return true;
+    },
+  };
 }

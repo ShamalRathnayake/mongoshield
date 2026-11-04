@@ -2,6 +2,8 @@ import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { toPartRange } from "../engine/backup-parts.ts";
 import { isMongoShieldError } from "../errors.ts";
+import { silentLogger } from "../logger.ts";
+import { conditionalWritesUnsupportedError } from "../storage/conditional-writes.ts";
 import { memoryStorage } from "../storage/memory.ts";
 import type { PutOptions, StorageAdapter } from "../storage/types.ts";
 import { storedFieldOrder } from "./field-order.ts";
@@ -319,6 +321,26 @@ describe("readManifest and writeManifest", () => {
     await writeManifest(recording(false), sampleManifest());
     expect(seen[0]).toMatchObject({ ifNoneMatch: "*", contentType: "application/json" });
     expect(seen[1]).not.toHaveProperty("ifNoneMatch");
+  });
+
+  it("retry without the condition, with a warning, when the store turns out not to support it", async () => {
+    const seen: (PutOptions | undefined)[] = [];
+    const warnings: string[] = [];
+    const base = memoryStorage();
+    // Like an S3-compatible store that answers a conditional put with 501.
+    const noConditionals: StorageAdapter = {
+      ...base,
+      put: (key: string, body: Readable | Uint8Array, options?: PutOptions) => {
+        seen.push(options);
+        if (options?.ifNoneMatch) throw conditionalWritesUnsupportedError(key);
+        return base.put(key, body, options);
+      },
+    };
+    const logger = { ...silentLogger, warn: (message: string) => warnings.push(message) };
+    await writeManifest(noConditionals, sampleManifest(), { logger });
+    expect(seen.map((options) => options?.ifNoneMatch)).toEqual(["*", undefined]);
+    expect(warnings).toHaveLength(1);
+    expect(await readManifest(base, sampleManifest().id)).toBeDefined();
   });
 
   it("report a corrupt manifest with its location", async () => {

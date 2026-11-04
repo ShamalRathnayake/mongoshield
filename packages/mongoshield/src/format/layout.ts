@@ -227,16 +227,45 @@ const SAFE_CHARACTER = /[A-Za-z0-9_.-]/;
 const MAX_SEGMENT_LENGTH = 180;
 
 /**
+ * File names Windows reserves for devices, matched case-insensitively against the
+ * part before the first dot: `con`, `CON.bson` and `nul.metadata.json` all open a
+ * device instead of a file (or fail), on local disks and on SMB shares served by
+ * Windows. COM0-9 and LPT0-9 are listed; the superscript variants (`COM¹`) are
+ * non-ASCII and therefore percent-encoded anyway.
+ */
+const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+
+/**
+ * Percent-encodes the last character of a Windows reserved name at the start of
+ * `segment` (`con` → `co%6E`, `NUL.x` → `NU%4C.x`), so the name is no longer
+ * reserved. Decoding percent escapes still gives the original name back, so it
+ * reads like any other encoded character. Every other segment is returned as is.
+ */
+export function escapeWindowsReservedName(segment: string): string {
+  const dot = segment.indexOf(".");
+  const stem = dot === -1 ? segment : segment.slice(0, dot);
+  if (!WINDOWS_RESERVED_STEM.test(stem)) return segment;
+  const lastIndex = stem.length - 1;
+  const escaped = `%${stem.charCodeAt(lastIndex).toString(16).toUpperCase().padStart(2, "0")}`;
+  return `${stem.slice(0, lastIndex)}${escaped}${segment.slice(stem.length)}`;
+}
+
+/**
  * Makes a database or collection name safe to use as one path segment.
  *
  * - Unsafe characters (`/`, spaces, `$`, non-ASCII, …) become `%XX` per UTF-8 byte,
  *   like URL encoding, so common names stay readable: `users` stays `users`.
  * - Names made only of dots (`.`, `..`) are fully encoded so they cannot act as
  *   relative path segments.
+ * - Windows device names (`con`, `nul`, `aux`, `com1`, …, also followed by a dot
+ *   and more) get their last character encoded (`con` → `co%6E`), so backups of
+ *   such databases and collections work on Windows disks and shares too.
  * - Very long names are cut and given a hash suffix to stay unique.
  *
  * The encoding does not need to be reversible: the manifest maps every
- * namespace to its file keys.
+ * namespace to its file keys. (Apart from the shortening it is, by decoding the
+ * percent escapes.) Old backups keep the keys they were written with; only new
+ * backups of reserved names get the escaped form.
  */
 export function encodeNameSegment(name: string): string {
   if (name.length === 0) {
@@ -255,6 +284,7 @@ export function encodeNameSegment(name: string): string {
       }
     }
   }
+  encoded = escapeWindowsReservedName(encoded);
 
   if (encoded.length > MAX_SEGMENT_LENGTH) {
     const hash = createHash("sha256").update(name, "utf8").digest("hex").slice(0, 16);

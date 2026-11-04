@@ -15,6 +15,9 @@
  * `wx` flag: an export never overwrites anything, and two collections whose file
  * names collide (`Users` / `users` on a case-insensitive filesystem) fail loudly
  * instead of one silently replacing the other.
+ *
+ * The files hold decrypted documents, so they are readable by their owner only
+ * (`0600`, directories `0700`; see EXPORT_FILE_MODE), whatever the process umask.
  */
 
 import { createWriteStream } from "node:fs";
@@ -28,6 +31,7 @@ import { mapWithConcurrency } from "../engine/pool.ts";
 import type { StoredBackupSource } from "../engine/read-pipeline.ts";
 import { MongoShieldError } from "../errors.ts";
 import { createCountingStream } from "../format/hashing.ts";
+import { escapeWindowsReservedName } from "../format/layout.ts";
 import type { Logger } from "../logger.ts";
 import { collectionFileStem } from "./dump-names.ts";
 import {
@@ -41,6 +45,15 @@ import {
   type ExportNamespace,
 } from "./export-data.ts";
 import { createBucketPacker, timeSeriesSettings } from "./timeseries-buckets.ts";
+
+/**
+ * Exported files hold decrypted documents: owner read/write only. A mode on create is
+ * still narrowed by the umask, never widened, so it cannot end up more open than this.
+ */
+export const EXPORT_FILE_MODE = 0o600;
+
+/** Directories of an export: owner only, so file names (collection names) stay private too. */
+export const EXPORT_DIRECTORY_MODE = 0o700;
 
 /** What the directory writer needs. */
 export interface DirectoryExportTarget {
@@ -96,7 +109,7 @@ async function exportNamespace(
   const { entry } = namespace;
   assertSafeDatabaseName(entry.db);
   const databaseDirectory = join(target.directory, entry.db);
-  await mkdir(databaseDirectory, { recursive: true });
+  await mkdir(databaseDirectory, { recursive: true, mode: EXPORT_DIRECTORY_MODE });
   const stem = collectionFileStem(entry.collection);
   const extension = target.gzip ? ".gz" : "";
 
@@ -170,7 +183,7 @@ async function writeUsersAndRoles(target: DirectoryExportTarget, created: string
   for (const file of files) {
     assertSafeDatabaseName(file.db);
     const directory = join(target.directory, file.db);
-    await mkdir(directory, { recursive: true });
+    await mkdir(directory, { recursive: true, mode: EXPORT_DIRECTORY_MODE });
     const contents = [
       ["system.users", file.users],
       ["system.roles", file.roles],
@@ -206,9 +219,8 @@ async function writeFile(
   const compress = target.gzip ? [createCompressor("gzip")] : [];
   created.push(path);
   try {
-    await pipeline([source, ...transforms, ...compress, createWriteStream(path, { flags: "wx" })], {
-      signal: target.signal,
-    });
+    const file = createWriteStream(path, { flags: "wx", mode: EXPORT_FILE_MODE });
+    await pipeline([source, ...transforms, ...compress, file], { signal: target.signal });
   } catch (error) {
     if (Reflect.get(Object(error), "code") === "EEXIST") {
       // Not ours: never delete a file this export did not create.
@@ -244,7 +256,8 @@ async function prepareDirectory(directory: string): Promise<void> {
       },
     );
   }
-  await mkdir(directory, { recursive: true });
+  // Only directories created here get the mode; an existing empty one keeps its own.
+  await mkdir(directory, { recursive: true, mode: EXPORT_DIRECTORY_MODE });
 }
 
 /**
@@ -258,6 +271,17 @@ function assertSafeDatabaseName(db: string): void {
       "MS_INTEGRITY_FAILED",
       `The backup names a database "${db}", which is not a valid MongoDB database name.`,
       { hint: "The manifest was modified. Export from another backup." },
+    );
+  }
+  // mongorestore reads the database name from the directory name without unescaping
+  // it, so a reserved name cannot be escaped like collection file names are.
+  if (process.platform === "win32" && escapeWindowsReservedName(db) !== db) {
+    throw new MongoShieldError(
+      "MS_CONFIG_INVALID",
+      `The database "${db}" cannot be exported as a directory on Windows: "${db}" is a reserved device name there.`,
+      {
+        hint: "Export with --format archive instead (restore with mongorestore --archive), or export on Linux or macOS.",
+      },
     );
   }
 }

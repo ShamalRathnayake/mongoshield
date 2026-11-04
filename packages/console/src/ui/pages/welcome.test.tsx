@@ -72,7 +72,7 @@ describe("the welcome page", () => {
     expect(screen.queryByRole("button", { name: "localhost:27017" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "This computer (console in Docker)" }));
     expect((screen.getByLabelText("Connection string") as HTMLTextAreaElement).value).toBe(
-      "mongodb://host.docker.internal:27017",
+      "mongodb://host.docker.internal:27017/?directConnection=true",
     );
     // Typing localhost anyway: a hint with a one-click fix.
     const field = screen.getByLabelText("Connection string");
@@ -81,7 +81,7 @@ describe("the welcome page", () => {
     expect(screen.getByText("localhost is the console's own container here")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Use host.docker.internal" }));
     expect((field as HTMLTextAreaElement).value).toBe(
-      "mongodb://host.docker.internal:27017/?appName=x",
+      "mongodb://host.docker.internal:27017/?appName=x&directConnection=true",
     );
   });
 
@@ -100,7 +100,7 @@ describe("the welcome page", () => {
       );
     await waitFor(() => expect(creates()).toHaveLength(1));
     expect((creates()[0]?.body as { uri?: string } | undefined)?.uri).toBe(
-      "mongodb://host.docker.internal:27017",
+      "mongodb://host.docker.internal:27017/?directConnection=true",
     );
   });
 

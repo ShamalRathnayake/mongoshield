@@ -96,8 +96,8 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
   const multipartBody = () => Readable.from([Buffer.alloc(11 * 1024 * 1024, 7)]);
 
   describe("checksum modes", () => {
-    it("with the SDK default, S3Mock refuses multipart completions and the error says what to set", async () => {
-      const storage = ownClientStorage();
+    it("with WHEN_SUPPORTED (the SDK default), S3Mock refuses multipart completions and the error says what to set", async () => {
+      const storage = ownClientStorage({ requestChecksumCalculation: "WHEN_SUPPORTED" });
       try {
         // Single-part uploads carry their checksum in the request and work.
         await storage.put("small", Buffer.from("x"));
@@ -112,6 +112,17 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
       }
     });
 
+    it("by default with a custom endpoint, multipart uploads work: checksums are only sent when required", async () => {
+      const storage = ownClientStorage();
+      try {
+        const info = await storage.put("big", multipartBody());
+        expect(info.size).toBe(11 * 1024 * 1024);
+        expect((await storage.head("big"))?.size).toBe(11 * 1024 * 1024);
+      } finally {
+        await storage.close?.();
+      }
+    });
+
     it("with requestChecksumCalculation WHEN_REQUIRED, multipart uploads work without a custom client", async () => {
       const storage = ownClientStorage({ requestChecksumCalculation: "WHEN_REQUIRED" });
       try {
@@ -119,6 +130,26 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
         expect(info.size).toBe(11 * 1024 * 1024);
         expect(info.etag).toMatch(/-3$/);
         expect((await storage.head("big"))?.size).toBe(11 * 1024 * 1024);
+      } finally {
+        await storage.close?.();
+      }
+    });
+  });
+
+  describe("conditional writes on an endpoint that is not AWS or R2", () => {
+    it("probes the store once, then refuses to overwrite with If-None-Match", async () => {
+      // A localhost endpoint is "some S3-compatible store": the adapter probes it.
+      const storage = ownClientStorage();
+      try {
+        await storage.put("locks/a", Buffer.from("first"), { ifNoneMatch: "*" });
+        const second = await storage
+          .put("locks/a", Buffer.from("second"), { ifNoneMatch: "*" })
+          .catch((reason: unknown) => reason);
+        expect(isMongoShieldError(second, "MS_STORAGE_PRECONDITION_FAILED")).toBe(true);
+        // The probe object is gone again.
+        const keys: string[] = [];
+        for await (const info of storage.list("locks/")) keys.push(info.key);
+        expect(keys).toEqual(["locks/a"]);
       } finally {
         await storage.close?.();
       }

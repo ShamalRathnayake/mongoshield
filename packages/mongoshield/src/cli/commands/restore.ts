@@ -16,6 +16,12 @@
  * backup's namespaces and names the incrementals replayed after it. `--at` with an
  * incremental's id stops inside its chain; `--at` alone uses the change journal, or an
  * incremental chain that reaches the time when the journal does not.
+ *
+ * `--at` with the journal takes its base backup from the source's deployment:
+ * `--source-cluster`, else the configured source's identity. Without either (or when
+ * the source cannot be reached), the newest suitable base decides, with a warning when
+ * the storage location holds bases of several deployments. A dry run also reads the
+ * journal range, so everything the replay could refuse shows up before any real run.
  */
 
 import { findChainCovering } from "../../catalog/chain.ts";
@@ -24,7 +30,12 @@ import type { MongoShieldConfigInput } from "../../config/schema.ts";
 import { assertNoConflicts } from "../../engine/restore-plan.ts";
 import { isMongoShieldError, MongoShieldError } from "../../errors.ts";
 import { type ClusterTime, isIncrementalManifest } from "../../format/manifest.ts";
-import { planPointInTimeRestore, toJournalTime } from "../../journal/index.ts";
+import {
+  type PointInTimePlan,
+  planPointInTimeRestore,
+  toJournalTime,
+} from "../../journal/index.ts";
+import { preflightJournal } from "../../journal/replay.ts";
 import type {
   RestoreMode,
   RestoreOptions,
@@ -104,6 +115,12 @@ export const restoreCommand: CommandSpec = {
       valueName: "<time>",
       description:
         "Point-in-time recovery: an ISO date (2026-11-14T03:17:42Z) or a cluster time (t:i). Needs the change journal, or an incremental chain reaching that time",
+    },
+    "source-cluster": {
+      type: "string",
+      valueName: "<clusterId[/instanceId]>",
+      description:
+        "With --at: use base backups of this deployment (as `mongoshield inspect` shows its source). Default: the configured source's",
     },
     "dry-run": { type: "boolean", description: "Show the plan and stop; write nothing" },
     "identity-file": identityFileOption,
@@ -433,6 +450,11 @@ function printRestoreResult(context: CommandContext, result: RestoreResult): voi
   out.result(
     `${out.style("green", "✔")} Restored ${plural(result.documentsRestored, "document")} from ${result.plan.backupId} into ${plural(result.plan.entries.length, "namespace")} in ${formatDuration(result.durationMs)}.`,
   );
+  if (result.documentsSkipped !== undefined) {
+    out.result(
+      `  Skipped ${plural(result.documentsSkipped, "document")} whose _id was already in the target.`,
+    );
+  }
   const pointInTime = result.pointInTime;
   const chain = result.plan.chain;
   if (pointInTime) {
@@ -495,9 +517,13 @@ async function baseRestoreOptions(
   // An incremental's chain is cut at `at` by the planner itself (chainForPointInTime
   // only lets incremental ids through).
   if (options.backup !== "latest") return options;
-  const pointInTime = await planPointInTimeRestore(cli.shield.storage, options.at, {
-    signal: context.signal,
-  });
+  // The same base the library will pick: one that suits this restore's selection and
+  // comes from the deployment chainForPointInTime settled on.
+  const pointInTime = await planPointInTimeRestore(
+    cli.shield.storage,
+    options.at,
+    planOptions(context, options),
+  );
   context.out.info(
     `Point in time: base backup ${pointInTime.baseBackupId}, then ${pointInTime.segments.length} journal segment(s) replayed up to ${formatClusterTime(pointInTime.at)}.`,
   );
@@ -533,9 +559,20 @@ async function chainForPointInTime(
     );
     return options;
   }
+  const identity = await sourceIdentityFor(context, cli);
   try {
-    await planPointInTimeRestore(cli.shield.storage, at, { signal: context.signal });
-    return options;
+    const plan = await planPointInTimeRestore(
+      cli.shield.storage,
+      at,
+      planOptions(context, { ...options, ...identity }),
+    );
+    for (const warning of plan.warnings) context.out.warn(warning);
+    // A dry run never reaches the library's pre-flight (shield.ts), so it reads the
+    // journal range here: what the replay would refuse is refused now.
+    if (options.dryRun === true) await preflightFor(context, cli, options, plan);
+    // Pin the deployment, so the restore itself plans with the same base.
+    const settled = identity.sourceIdentity ?? plan.baseDeployment;
+    return settled === undefined ? options : { ...options, sourceIdentity: settled };
   } catch (error) {
     if (!isMongoShieldError(error, "MS_CHANGE_HISTORY_LOST")) throw error;
     const covering = findChainCovering(entries, toJournalTime(at));
@@ -545,6 +582,87 @@ async function chainForPointInTime(
     );
     return { ...options, backup: covering.id };
   }
+}
+
+/** The planner options of a restore: its selection and, when known, its deployment. */
+function planOptions(
+  context: CommandContext,
+  options: Pick<RestoreOptions, "include" | "exclude" | "sourceIdentity">,
+): Parameters<typeof planPointInTimeRestore>[2] {
+  const identity = options.sourceIdentity;
+  return {
+    signal: context.signal,
+    include: options.include,
+    exclude: options.exclude,
+    ...(identity === undefined
+      ? {}
+      : { clusterId: identity.clusterId, instanceId: identity.instanceId }),
+  };
+}
+
+/**
+ * The deployment `--at` takes its base backup from: `--source-cluster`, else the
+ * configured source's identity, else none (the planner picks and warns). A source
+ * that cannot be reached only costs a warning: restoring after losing it is normal.
+ */
+async function sourceIdentityFor(
+  context: CommandContext,
+  cli: CliShield,
+): Promise<Pick<RestoreOptions, "sourceIdentity">> {
+  const flag = context.flags.string("source-cluster");
+  if (flag !== undefined) return { sourceIdentity: parseSourceCluster(flag) };
+  if (!cli.config.source?.uri) return {};
+  try {
+    return { sourceIdentity: await cli.shield.sourceIdentity({ signal: context.signal }) };
+  } catch (error) {
+    if (isMongoShieldError(error, "MS_ABORTED")) throw error;
+    context.out.warn(
+      "Could not reach the configured source to tell which deployment's base backups to use; using the newest suitable base. Pass --source-cluster to choose.",
+    );
+    return {};
+  }
+}
+
+/** `--source-cluster <clusterId>[/<instanceId>]`. */
+function parseSourceCluster(raw: string): {
+  readonly clusterId: string;
+  readonly instanceId?: string;
+} {
+  const [clusterId = "", instanceId, ...rest] = raw.split("/");
+  if (clusterId === "" || instanceId === "" || rest.length > 0) {
+    throw usageError(
+      `--source-cluster ${raw} is not a deployment id: pass <clusterId> or <clusterId>/<instanceId>.`,
+      NAME,
+    );
+  }
+  return instanceId === undefined ? { clusterId } : { clusterId, instanceId };
+}
+
+/**
+ * Reads the journal range of a point-in-time plan once and checks what the replay
+ * would refuse (journal/replay.ts `preflightJournal`): broken or unreadable segments,
+ * and namespaces the journal changes that the base backup does not cover.
+ */
+async function preflightFor(
+  context: CommandContext,
+  cli: CliShield,
+  options: RestoreOptions,
+  plan: PointInTimePlan,
+): Promise<void> {
+  const checked = await preflightJournal({
+    storage: cli.shield.storage,
+    from: plan.baseTime,
+    to: plan.at,
+    baseNamespaces: plan.baseNamespaces,
+    baseSelection: plan.baseSelection,
+    include: options.include,
+    exclude: options.exclude,
+    rename: options.rename,
+    mode: options.mode,
+    decryption: options.decryption,
+    signal: context.signal,
+  });
+  context.out.info(`Journal checked: ${plural(checked.summary.events, "event")} to replay.`);
 }
 
 /** `{ t: 1794538804, i: 3 }` → `2026-11-14T03:00:04Z (1794538804:3)`. */

@@ -15,6 +15,18 @@ describe("toStreamError", () => {
     }
   });
 
+  it("makes a change stream the server cannot open at all fatal, not retried", () => {
+    // MongoDB 5.0 does not know showExpandedEvents (40415); standalone servers (40573).
+    for (const code of [40415, 40573]) {
+      const error = toStreamError(
+        new MongoServerError({ message: "unknown field showExpandedEvents", code }),
+        after,
+      );
+      expect(error.code).toBe("MS_UNSUPPORTED_TOPOLOGY");
+      expect(error.hint).toContain("6.0");
+    }
+  });
+
   it("explains missing privileges and passes everything else on", () => {
     expect(toStreamError(new MongoServerError({ message: "no", code: 13 }), after).code).toBe(
       "MS_PERMISSION_DENIED",

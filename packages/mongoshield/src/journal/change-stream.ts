@@ -51,6 +51,15 @@ export const INTERNAL_DATABASES = ["admin", "config", "local"] as const;
 /** Server error code for "not authorized". */
 const UNAUTHORIZED_CODE = 13;
 
+/**
+ * Server error codes for a change stream this server cannot open at all, whatever the
+ * retry: 40415 an unknown `$changeStream` field (`showExpandedEvents` before MongoDB
+ * 6.0), 40324 an unknown stage, 40573 `$changeStream` outside a replica set, 115
+ * CommandNotSupported. The writer checks the server version before it opens the
+ * stream; these catch what that check cannot see (a compatible database, a proxy).
+ */
+const UNSUPPORTED_STREAM_CODES: ReadonlySet<number> = new Set([40415, 40324, 40573, 115]);
+
 /** Shown in the server's `currentOp`, so operators can tell what the cursor is. */
 const STREAM_COMMENT = "mongoshield journal";
 
@@ -182,6 +191,18 @@ export function toStreamError(error: unknown, after: ClusterTime): MongoShieldEr
         {
           cause: error,
           hint: "The journal needs the changeStream and find actions on every database (e.g. the readAnyDatabase role).",
+        },
+      );
+    }
+    // MS_UNSUPPORTED_TOPOLOGY is fatal for the writer: retrying cannot fix it.
+    if (UNSUPPORTED_STREAM_CODES.has(error.code)) {
+      return new MongoShieldError(
+        "MS_UNSUPPORTED_TOPOLOGY",
+        `The server cannot open the change stream the journal needs: ${error.message}`,
+        {
+          cause: error,
+          hint: "The journal needs a replica set or sharded cluster running MongoDB 6.0 or later (it records DDL events with showExpandedEvents). Upgrade the deployment, or take scheduled backups without the journal.",
+          details: { serverCode: error.code },
         },
       );
     }

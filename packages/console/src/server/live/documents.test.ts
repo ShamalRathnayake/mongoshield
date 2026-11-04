@@ -160,6 +160,23 @@ describe("parsing what users type", () => {
     expect(parseQueryObject('{"a": 1}', "The filter")).toEqual({ a: new Int32(1) });
   });
 
+  it("finds server-side JavaScript hidden inside DBRefs and code scopes", () => {
+    // Extended JSON turns these objects into DBRef / Code instances, not plain objects.
+    expect(() =>
+      parseQueryObject('{"a": {"$ref": "c", "$id": 1, "$where": "sleep(1000)"}}', "The filter"),
+    ).toThrow("$where");
+    expect(() =>
+      parseQueryObject(
+        '{"a": {"$ref": "c", "$id": {"x": {"$function": {"body": "1"}}}}}',
+        "The filter",
+      ),
+    ).toThrow("$function");
+    expect(() =>
+      parseQueryObject('{"a": {"$code": "1", "$scope": {"$where": "1"}}}', "The filter"),
+    ).toThrow("$where");
+    expect(parseQueryObject('{"a": {"$ref": "c", "$id": 1}}', "The filter")).toBeDefined();
+  });
+
   it("accepts sorts of 1 and -1 only", () => {
     expect(parseSort('{"a": 1, "b": -1}')).toEqual({ a: 1, b: -1 });
     expect(parseSort(undefined)).toBeUndefined();

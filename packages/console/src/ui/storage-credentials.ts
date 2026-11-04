@@ -7,7 +7,7 @@
  *
  *   s3://    AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
  *   gs://    GOOGLE_CREDENTIALS_JSON (a service account key file, as JSON)
- *   az://    AZURE_STORAGE_CONNECTION_STRING
+ *   az://    AZURE_STORAGE_CONNECTION_STRING, AZURE_STORAGE_SAS_TOKEN (as KEY=value lines)
  *   sftp://  SFTP_PRIVATE_KEY, SFTP_PASSPHRASE
  *   local    none
  *
@@ -68,7 +68,7 @@ export const EMPTY_CREDENTIALS: CredentialValues = {
 export const CREDENTIAL_NAMES: Readonly<Record<StorageScheme, readonly string[]>> = {
   s3: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
   gs: ["GOOGLE_CREDENTIALS_JSON"],
-  az: ["AZURE_STORAGE_CONNECTION_STRING"],
+  az: ["AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_SAS_TOKEN"],
   sftp: ["SFTP_PRIVATE_KEY", "SFTP_PASSPHRASE"],
   file: [],
   memory: [],

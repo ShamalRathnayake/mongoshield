@@ -32,6 +32,7 @@ import {
 import { abortError, isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { documentId, inStoredOrder } from "../format/field-order.ts";
 import type { StoredFile } from "../format/manifest.ts";
+import type { Logger } from "../logger.ts";
 import { parseBackedUpDocument } from "./find-parse.ts";
 import { mapWithConcurrency } from "./pool.ts";
 import { openDocumentStream, type StoredBackupSource } from "./read-pipeline.ts";
@@ -100,6 +101,11 @@ export interface WriteDocumentsOptions {
    * and to note references for subsetting). May modify the documents in place.
    */
   readonly transformBatch?: ((documents: Document[]) => Promise<Document[]>) | undefined;
+  /**
+   * Where to warn when `insert-skip-duplicates` skipped documents on duplicate key
+   * errors that name no index (MongoDB-compatible engines; see classifyDuplicateKey).
+   */
+  readonly logger?: Logger | undefined;
 }
 
 /** Everything `loadDocuments` needs. */
@@ -115,6 +121,11 @@ export interface LoadResult {
   readonly documents: number;
   /** Documents read from the backup (including skipped duplicates). */
   readonly documentsRead: number;
+  /**
+   * Documents not written because a document with the same `_id` was already in the
+   * target (`insert-skip-duplicates` only). Not part of `documents`.
+   */
+  readonly duplicatesSkipped: number;
   /** Raw BSON bytes read from the backup. */
   readonly bytes: number;
 }
@@ -142,6 +153,8 @@ export async function writeDocuments(options: WriteDocumentsOptions): Promise<Lo
   const batches = batchDocuments(options.documents, options.batchLimits ?? DEFAULT_BATCH_LIMITS);
   let documents = 0;
   let documentsRead = 0;
+  let duplicatesSkipped = 0;
+  let duplicatesUnattributed = 0;
   let bytes = 0;
 
   /** One insert worker: takes the next batch until there are none left. */
@@ -153,8 +166,10 @@ export async function writeDocuments(options: WriteDocumentsOptions): Promise<Lo
       const batch = next.value;
       const parsed = parseBatch(batch.documents);
       const transformed = options.transformBatch ? await options.transformBatch(parsed) : parsed;
-      const written = await writeBatch(options, transformed);
-      documents += written;
+      const outcome = await writeBatch(options, transformed);
+      documents += outcome.written;
+      duplicatesSkipped += outcome.skipped;
+      duplicatesUnattributed += outcome.unattributed;
       documentsRead += batch.documents.length;
       bytes += batch.bytes;
       options.onProgress?.(documents, bytes);
@@ -170,8 +185,10 @@ export async function writeDocuments(options: WriteDocumentsOptions): Promise<Lo
   } finally {
     // Closes the data file streams when a worker failed before reading everything.
     await batches.return(undefined);
+    // Once per collection, also when the load failed later on.
+    if (duplicatesUnattributed > 0) warnUnattributedDuplicates(options, duplicatesUnattributed);
   }
-  return { documents, documentsRead, bytes };
+  return { documents, documentsRead, duplicatesSkipped, bytes };
 }
 
 // ---------------------------------------------------------------------------
@@ -241,16 +258,30 @@ function parseBatch(raw: readonly Buffer[]): Document[] {
 // Writing
 // ---------------------------------------------------------------------------
 
-/** Writes one batch in the requested mode and returns how many documents it stored. */
-async function writeBatch(options: WriteDocumentsOptions, documents: Document[]): Promise<number> {
+/** What one written batch did. */
+interface BatchOutcome {
+  /** Documents stored (inserted, or upserted/replaced). */
+  readonly written: number;
+  /** Documents skipped because their `_id` was already in the target. */
+  readonly skipped: number;
+  /** Of `skipped`: duplicate key errors that did not say which index (see classifyDuplicateKey). */
+  readonly unattributed: number;
+}
+
+/** Writes one batch in the requested mode and returns what it stored and skipped. */
+async function writeBatch(
+  options: WriteDocumentsOptions,
+  documents: Document[],
+): Promise<BatchOutcome> {
   throwIfAborted(options.signal);
   // A transform may leave nothing to write; the driver rejects empty batches.
-  if (documents.length === 0) return 0;
+  if (documents.length === 0) return { written: 0, skipped: 0, unattributed: 0 };
   // After the transform (which reads and masks plain objects), so masked values are
   // written in stored order too.
   const ordered = documents.map((document) => inStoredOrder(document));
   try {
-    if (options.mode === "upsert") return await upsertBatch(options, ordered);
+    if (options.mode === "upsert")
+      return { written: await upsertBatch(options, ordered), skipped: 0, unattributed: 0 };
     return await insertBatch(options, ordered);
   } catch (error) {
     throw toWriteError(options.collection, error);
@@ -269,20 +300,28 @@ function writeOptions(options: WriteDocumentsOptions) {
 /**
  * Unordered insertMany. `forceServerObjectId` stops the driver from adding an `_id`
  * to documents that have none, so documents are restored exactly as backed up.
- * In `insert-skip-duplicates` mode, duplicate key errors (11000) are expected and
- * ignored, and ONLY those: any other write error still fails the restore.
+ * In `insert-skip-duplicates` mode, duplicate `_id` errors are expected and the
+ * documents skipped (and counted as such), and ONLY those: a duplicate on another
+ * unique index, or any other write error, still fails the restore.
  */
-async function insertBatch(options: WriteDocumentsOptions, documents: Document[]): Promise<number> {
+async function insertBatch(
+  options: WriteDocumentsOptions,
+  documents: Document[],
+): Promise<BatchOutcome> {
   try {
     const result = await options.collection.insertMany(documents, {
       ...writeOptions(options),
       forceServerObjectId: true,
     });
-    return result.insertedCount;
+    return { written: result.insertedCount, skipped: 0, unattributed: 0 };
   } catch (error) {
-    const ignoreDuplicates = options.mode === "insert-skip-duplicates";
-    if (ignoreDuplicates && error instanceof MongoBulkWriteError && onlyDuplicates(error)) {
-      return error.insertedCount;
+    const duplicates =
+      options.mode === "insert-skip-duplicates" ? duplicateIdErrorsOnly(error) : undefined;
+    if (duplicates !== undefined && error instanceof MongoBulkWriteError) {
+      const unattributed = duplicates.filter(
+        (item) => classifyDuplicateKey(item) === "unattributed",
+      ).length;
+      return { written: error.insertedCount, skipped: duplicates.length, unattributed };
     }
     throw error;
   }
@@ -313,11 +352,126 @@ async function upsertBatch(options: WriteDocumentsOptions, documents: Document[]
   return result.matchedCount + result.upsertedCount + result.insertedCount;
 }
 
-/** True when every write error is a duplicate key and the write concern was met. */
-function onlyDuplicates(error: MongoBulkWriteError): boolean {
-  if (error.result.getWriteConcernError() !== undefined) return false;
+/**
+ * The write errors of a failed insert batch when every one of them is a duplicate
+ * `_id` (see {@link isDuplicateIdError}) and the write concern was met; `undefined`
+ * when anything else went wrong, which must fail the restore.
+ */
+export function duplicateIdErrorsOnly(error: unknown): readonly WriteError[] | undefined {
+  if (!(error instanceof MongoBulkWriteError)) return undefined;
+  if (error.result.getWriteConcernError() !== undefined) return undefined;
   const writeErrors = asArray(error.writeErrors);
-  return writeErrors.length > 0 && writeErrors.every((item) => item.code === DUPLICATE_KEY_CODE);
+  if (writeErrors.length === 0 || !writeErrors.every(isDuplicateIdError)) return undefined;
+  return writeErrors;
+}
+
+/**
+ * True for a duplicate key error (E11000) on the `_id` index, and only there, as far
+ * as can be told: see {@link classifyDuplicateKey}. An error that does not say which
+ * index it hit (`"unattributed"`) also counts, as it did before indexes were told apart.
+ */
+export function isDuplicateIdError(item: DuplicateKeyErrorShape): boolean {
+  const kind = classifyDuplicateKey(item);
+  return kind === "id" || kind === "unattributed";
+}
+
+/**
+ * The parts of a write error that tell which index a duplicate key hit: the code and
+ * message the driver keeps, and the server's `keyPattern` / `keyValue` where they
+ * survive (on a MongoServerError, or on the raw `err` record of a WriteError).
+ */
+export interface DuplicateKeyErrorShape {
+  readonly code: number;
+  readonly errmsg?: string | undefined;
+  /** The unique index's key, e.g. `{ _id: 1 }` (absent from the driver's WriteError). */
+  readonly keyPattern?: unknown;
+  /** The duplicate value by field, e.g. `{ _id: 7 }` (absent from the driver's WriteError). */
+  readonly keyValue?: unknown;
+}
+
+/**
+ * Which index a duplicate key error is about:
+ * - `"id"`: the `_id` index (or a clustered collection's `_id`);
+ * - `"other-index"`: any other unique index;
+ * - `"unattributed"`: a duplicate key error that does not say;
+ * - `undefined`: not a duplicate key error at all.
+ *
+ * "Skip documents whose `_id` exists" must not swallow a collision on any other unique
+ * index (a `username` index the application created before the restore): that
+ * document's `_id` is NOT in the target, so skipping it would lose it silently.
+ *
+ * Read in order of reliability:
+ * 1. `keyPattern` (or else `keyValue`), the structured fields modern servers send:
+ *    an `_id`-only key is the `_id` index. The driver drops them from bulk write
+ *    errors, but keeps them on a MongoServerError and may pass them on one day.
+ * 2. The index name in the message (`index: _id_` is always the `_id` index; no
+ *    other index can take that name):
+ *      E11000 duplicate key error collection: app.users index: _id_ dup key: { _id: 1 }
+ *      E11000 duplicate key error collection: app.users index: username_1 dup key: { … }
+ * 3. Without an index name, the duplicate key itself, as clustered collections (whose
+ *    `_id` is the clustered key and has no index) report it:
+ *      E11000 duplicate key error collection: app.events dup key: { _id: 1 } found value: …
+ * 4. Nothing of that: MongoDB-compatible engines (Azure Cosmos DB, Amazon DocumentDB,
+ *    FerretDB) word the error their own way, for example "E11000 duplicate key error
+ *    collection: app.users Failed _id or unique index constraint". Such errors are
+ *    `"unattributed"`: skip-duplicates treats them as duplicate `_id`s (as it always
+ *    did) but counts them and warns once per collection (see writeDocuments).
+ */
+export function classifyDuplicateKey(
+  item: DuplicateKeyErrorShape,
+): "id" | "other-index" | "unattributed" | undefined {
+  if (item.code !== DUPLICATE_KEY_CODE) return undefined;
+  const structured = structuredKeyFields(item);
+  if (structured !== undefined) return isIdOnly(structured) ? "id" : "other-index";
+
+  const message = item.errmsg ?? "";
+  const index = INDEX_NAME.exec(message)?.[1];
+  if (index !== undefined) return index === ID_INDEX_NAME ? "id" : "other-index";
+
+  const firstKeyField = DUP_KEY_FIRST_FIELD.exec(message)?.[1];
+  if (firstKeyField !== undefined) return firstKeyField === "_id" ? "id" : "other-index";
+  return "unattributed";
+}
+
+/** The name MongoDB always gives the `_id` index. */
+const ID_INDEX_NAME = "_id_";
+
+/** `index: <name>` in an E11000 message: the index the duplicate hit. */
+const INDEX_NAME = /\bindex: ([^\s]+)/;
+
+/** `dup key: { <field>:` in an E11000 message: the first field of the duplicate key. */
+const DUP_KEY_FIRST_FIELD = /\bdup key: \{\s*"?([^\s:"]+)"?\s*:/;
+
+/**
+ * The field names of the error's `keyPattern` (preferred) or `keyValue`, looked for on
+ * the error itself and on a WriteError's raw `err` record; `undefined` when neither is
+ * a document.
+ */
+function structuredKeyFields(item: DuplicateKeyErrorShape): string[] | undefined {
+  const raw: unknown = Reflect.get(item, "err");
+  for (const field of ["keyPattern", "keyValue"]) {
+    for (const source of [item, raw]) {
+      if (typeof source !== "object" || source === null) continue;
+      const value: unknown = Reflect.get(source, field);
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        return Object.keys(value);
+      }
+    }
+  }
+  return undefined;
+}
+
+/** True for the key fields of the `_id` index: exactly `["_id"]`. */
+function isIdOnly(fields: readonly string[]): boolean {
+  return fields.length === 1 && fields[0] === "_id";
+}
+
+/** Warns, once per collection, about duplicates skipped without knowing their index. */
+function warnUnattributedDuplicates(options: WriteDocumentsOptions, count: number): void {
+  options.logger?.warn(
+    "Skipped documents on duplicate key errors that do not name the index; they were taken as duplicate _ids. On a MongoDB-compatible engine, check that no other unique index caused them",
+    { ns: options.collection.namespace, documents: count },
+  );
 }
 
 /** The driver reports one write error as an object and several as an array. */
@@ -358,7 +512,9 @@ function toWriteError(collection: Collection, error: unknown): unknown {
 /** The first real write error of a bulk failure, or the error message. */
 function describeWriteFailure(error: unknown): string {
   if (error instanceof MongoBulkWriteError) {
-    const first = asArray(error.writeErrors).find((item) => item.code !== DUPLICATE_KEY_CODE);
+    // Duplicate `_id`s are expected in some modes; the first OTHER error explains more
+    // (a duplicate on another unique index names that index).
+    const first = asArray(error.writeErrors).find((item) => !isDuplicateIdError(item));
     if (first !== undefined) return `${first.errmsg ?? "write error"} (code ${first.code})`;
   }
   return error instanceof Error ? error.message : String(error);

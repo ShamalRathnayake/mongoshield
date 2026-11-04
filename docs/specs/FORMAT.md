@@ -112,7 +112,14 @@ Database and collection names are turned into single key segments by
    `a/b` → `a%2Fb`, `my db` → `my%20db`, `café` → `caf%C3%A9`, `%` → `%25`.
 3. A name made only of dots (`.`, `..`, …) is encoded entirely (`..` → `%2E%2E`) so it
    can never act as a relative path segment.
-4. If the encoded segment is longer than 180 characters, it is cut to 163 characters
+4. A Windows device name — `con`, `prn`, `aux`, `nul`, `com0`-`com9` or `lpt0`-`lpt9`,
+   in any case, alone or before a dot (`con.x`) — gets the last character of that name
+   encoded: `con` → `co%6E`, `NUL.x` → `NU%4C.x`. Windows cannot create files with
+   these names (`con.bson` opens the console device), on local disks and on SMB
+   shares. Written by MongoShield releases after 2.0.1; older backups of such names keep
+   their unescaped keys, which stay valid because readers only use the keys the
+   manifest lists.
+5. If the encoded segment is longer than 180 characters, it is cut to 163 characters
    and `~` plus the first 16 hex characters of the SHA-256 of the original name is
    appended, giving exactly 180 characters. With the longest suffix
    (`.000.bson.zst.age`) a file name stays well under the 255-byte limit of common
@@ -323,7 +330,8 @@ data files           changes in (P0, P1]      changes in (P1, P2]
   in full ones. `totals` count these entries and the changes file.
 - `selection` (written by every backup, full or incremental) records the
   include/exclude patterns. A writer MUST only continue a parent from the same
-  deployment (`source.clusterId`) with the same selection and no `query`.
+  deployment (`source.clusterId`, and `source.instanceId` when both record one; see
+  "Source identity") with the same selection and no `query`.
 - Each incremental is a self-contained backup in every other respect: its own
   compression, its own encryption (its own key envelope for passphrase and KMS
   backups), its own `immutableUntil`, labels and commit protocol.
@@ -348,6 +356,22 @@ exists and is complete, `consistency.from` equals the parent's end time exactly,
 same `source.clusterId`. A reader MUST refuse to restore a broken chain rather than
 restore part of it (`MS_BACKUP_NOT_FOUND` for a missing or incomplete member,
 `MS_INTEGRITY_FAILED` for links that do not line up).
+
+**Source identity.** `source.clusterId` is 32 hex characters of SHA-256 over
+`replicaSet:<set name>` for replica sets, `sharded:<config.version clusterId>` for
+sharded clusters (or the mongos host list when that is unreadable), and the host list
+for anything else. Two replica sets with the same name (`rs0` is a common default)
+therefore share a `clusterId`. Since 2.0.2 writers also record `source.instanceId` for
+replica sets: SHA-256 (first 32 hex characters) over `replicaSetId:<settings.replicaSetId
+as 24 hex characters>`, the ObjectId the server generates when the set is initiated. It
+is read with `replSetGetConfig` (the `clusterMonitor` role) or from
+`local.system.replset`, and left out when the user may read neither (MongoShield then
+logs a warning) and on Atlas, whose generated replica set names are unique already. Two sources are the same deployment when their
+`clusterId`s are equal and, **only when both record one**, their `instanceId`s are equal
+too. A manifest or checkpoint without `instanceId` (older writers, or no privilege)
+matches on `clusterId` alone, exactly as before, so existing chains, checkpoints and
+guard baselines keep working; this is why the field needed no format version bump.
+Readers that do not know the field ignore it.
 
 **Restoring a chain.** The restore's **state member** is the newest incremental of the
 chain whose `consistency.to` is at or before the restore's time (without a point in
@@ -411,6 +435,7 @@ database and collection names, document counts, sizes and labels.
 | `source.topology` | string | `standalone`, `replicaSet`, `sharded` or `unknown` |
 | `source.serverVersion` | string | MongoDB server version, e.g. `8.0.4` |
 | `source.clusterId` | string, optional | stable, non-secret identifier of the source deployment (a hash, never a URI) |
+| `source.instanceId` | string, optional | replica sets only: a hash of the set's `settings.replicaSetId`, which tells apart two sets with the same name (see "Source identity"); since 2.0.2 |
 | `consistency.mode` | string | `none`, `snapshot` or `converge` |
 | `consistency.from`, `consistency.to` | `{ t, i }`, optional | cluster times (BSON Timestamp seconds and increment) bounding the data |
 | `consistency.warning` | string, optional | set when a stronger mode was requested but could not be used, or (converge) known limits that apply to this backup |
@@ -533,8 +558,20 @@ mongodump-layout directory. Readers that ignore them can still restore every bac
 
 ```
 annotations/<id>/rekey/<time>.json    rekey records: new digests and recipients after a rekey
+annotations/<id>/leases/<purpose>-<random>.json   use leases: the backup is being read or written
 erasures/<time>-<random>.json         the GDPR erasure ledger (append-only)
 ```
+
+- **Use leases** (`{ backupId, purpose, owner, host, pid, acquiredAt, expiresAt }`,
+  purpose `restore`, `verify`, `drill` or `backup`) are written while a restore, verify
+  or drill reads the backup, or while a backup run writes it, renewed every third of their
+  length (5 minutes by default) and deleted afterwards. Pruning tools SHOULD keep a backup
+  with an unexpired lease, and check again right before deleting it
+  (src/catalog/use-leases.ts). A reader that ignores them loses nothing; an old pruner
+  that ignores them behaves as before.
+- Verification records may carry `chainScope: "links"`: the incremental was verified with
+  `chain: "links"` (its own files only). Retention counts it as verified only when every
+  earlier member of its chain passed a verification or drill of its own.
 
 - **Rekey records** (see [ENCRYPTION.md](ENCRYPTION.md#rekeying)) list, per rewritten
   file, its previous and new size and SHA-256, and the backup's `encryption.recipients`

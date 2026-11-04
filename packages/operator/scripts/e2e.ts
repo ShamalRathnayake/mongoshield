@@ -204,6 +204,10 @@ function installOperator(helm: string, context: string): void {
     "jobImage.pullPolicy=IfNotPresent",
     "--set",
     "logLevel=debug",
+    // The test reads /metrics through the API server's service proxy, which cannot send
+    // the bearer token; the token check itself is covered by src/http/server.test.ts.
+    "--set",
+    "metrics.auth.enabled=false",
     "--wait",
     "--timeout",
     "180s",

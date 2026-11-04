@@ -118,6 +118,19 @@ describe("optionalStringMap", () => {
       /Every value of "map"/,
     );
   });
+
+  it("refuses empty or blank values only when asked to", () => {
+    expect(optionalStringMap({ map: { a: "" } }, "map")).toEqual({ a: "" });
+    for (const value of ["", "   "]) {
+      expectInvalid(
+        () => optionalStringMap({ map: { a: value } }, "map", { nonEmptyValues: true }),
+        /The value of "a" in "map" is empty/,
+      );
+    }
+    expect(optionalStringMap({ map: { a: "x" } }, "map", { nonEmptyValues: true })).toEqual({
+      a: "x",
+    });
+  });
 });
 
 describe("queryInt", () => {

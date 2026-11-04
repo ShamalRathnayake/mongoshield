@@ -6,16 +6,19 @@
 //   - converge backups work with the regex-only change stream filter the tier needs,
 //     and capture a change made during the backup;
 //   - users and roles are refused before anything is read or written;
-//   - restores use the gentler concurrency.
+//   - restores use the gentler concurrency;
+//   - incremental backups and the change journal use the regex-only filter too, and
+//     incrementals read at the gentler pace (they used to skip every adaptation).
 
-import type { Document } from "mongodb";
+import { type Document, MongoClient } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runBackup } from "../../src/engine/backup.ts";
 import { runRestore } from "../../src/engine/restore.ts";
 import { isMongoShieldError } from "../../src/errors.ts";
 import type { LogFields, Logger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
-import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
+import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
+import { startTestJournal, waitForJournalToCatchUp } from "./journal-test-utils.ts";
 
 // Every deployment this file connects to "is" an Atlas Free cluster.
 vi.mock("../../src/mongo/atlas.ts", async (importOriginal) => {
@@ -194,5 +197,98 @@ describe("restores into an Atlas Free/Flex cluster", () => {
     expect(isMongoShieldError(error) && error.hint).toContain("atlas dbusers list");
     const names = await client().db(restored).listCollections().toArray();
     expect(names).toEqual([]);
+  });
+});
+
+describe("incremental backups and the journal on an Atlas Free/Flex cluster", () => {
+  // A second client that records the change streams it opens, to see their filters.
+  const watching = new MongoClient(mongoUri(), { monitorCommands: true });
+  const pipelines: Document[][] = [];
+  watching.on("commandStarted", (event) => {
+    const pipeline: unknown = event.command.pipeline;
+    if (event.commandName === "aggregate" && Array.isArray(pipeline)) pipelines.push(pipeline);
+  });
+  afterAll(async () => {
+    await watching.close();
+  });
+
+  /** The server-side `$match` of every change stream opened since the last call. */
+  function changeStreamFilters(): Document[] {
+    const filters = pipelines
+      .filter((pipeline) => pipeline[0]?.$changeStream !== undefined)
+      .map((pipeline) => pipeline[1]?.$match)
+      .filter((match): match is Document => match !== undefined);
+    pipelines.length = 0;
+    return filters;
+  }
+
+  /** True when a filter uses regular expressions and no `$in` / `$nin` (what the tier needs). */
+  function isRegexOnly(filter: Document): boolean {
+    const text = JSON.stringify(filter);
+    let hasRegex = false;
+    const visit = (value: unknown): void => {
+      if (value instanceof RegExp) hasRegex = true;
+      else if (Array.isArray(value)) value.forEach(visit);
+      else if (typeof value === "object" && value !== null) Object.values(value).forEach(visit);
+    };
+    visit(filter);
+    return hasRegex && !text.includes("$in") && !text.includes("$nin");
+  }
+
+  const context = (logger: Logger, storage: ReturnType<typeof memoryStorage>) => ({
+    client: watching,
+    storage,
+    logger,
+    compression: "zstd" as const,
+    encryption: undefined,
+  });
+
+  it("takes incrementals with the regex-only filter and the gentler pace", async () => {
+    const storage = memoryStorage();
+    await runBackup(context(recordingLogger(), storage), { ...own, consistency: "converge" });
+    changeStreamFilters();
+    await customers(database).insertOne({ _id: "carol" });
+
+    const logger = recordingLogger();
+    const result = await runBackup(context(logger, storage), { ...own, incremental: true });
+    expect(result.manifest.chain?.length).toBe(1);
+    expect(result.manifest.changes?.events).toBeGreaterThanOrEqual(1);
+    const filters = changeStreamFilters();
+    expect(filters.length).toBeGreaterThan(0);
+    expect(filters.every(isRegexOnly)).toBe(true);
+    expect(
+      logger.lines.some((line) => line.includes("parallelism 2, reads limited to 4 MiB/s")),
+    ).toBe(true);
+    await customers(database).deleteOne({ _id: "carol" });
+  });
+
+  it("refuses incremental users and roles up front, even with fallbackToFull", async () => {
+    const storage = memoryStorage();
+    const error: unknown = await runBackup(context(recordingLogger(), storage), {
+      ...own,
+      incremental: { fallbackToFull: true },
+      includeUsersAndRoles: true,
+    }).catch((caught: unknown) => caught);
+    expect(isMongoShieldError(error, "MS_UNSUPPORTED_TOPOLOGY")).toBe(true);
+    expect(await storedKeys(storage)).toEqual([]);
+  });
+
+  it("journals changes with the regex-only filter", async () => {
+    const storage = memoryStorage();
+    const logger = recordingLogger();
+    changeStreamFilters();
+    const journal = await startTestJournal(watching, storage, database, { logger });
+    try {
+      await customers(database).insertOne({ _id: "dave" });
+      await waitForJournalToCatchUp(watching, storage);
+      expect(journal.status().eventsWritten).toBeGreaterThanOrEqual(1);
+    } finally {
+      await journal.stop();
+      await customers(database).deleteOne({ _id: "dave" });
+    }
+    const filters = changeStreamFilters();
+    expect(filters.length).toBeGreaterThan(0);
+    expect(filters.every(isRegexOnly)).toBe(true);
+    expect(logger.lines.some((line) => line.includes("Atlas Free/Flex tier detected"))).toBe(true);
   });
 });

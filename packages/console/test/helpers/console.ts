@@ -109,7 +109,10 @@ export async function startConsole(options: StartOptions = {}): Promise<TestCons
   const app = createConsoleApp(services, {
     heartbeatMs: 50,
     // No real network in tests: the public IP lookup answers with a documentation address.
-    onboarding: { fetchPublicIp: async () => new Response("203.0.113.7\n"), inContainer: false },
+    onboarding: {
+      fetchPublicIp: async () => new Response("203.0.113.7\n"),
+      container: { kind: "none" },
+    },
     ...options.app,
   });
   const transcript = options.transcript ?? [];

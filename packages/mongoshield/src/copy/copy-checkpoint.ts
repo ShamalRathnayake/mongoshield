@@ -30,7 +30,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Binary, type Document, type MongoClient } from "mongodb";
 import { z } from "zod";
@@ -44,6 +44,7 @@ import { isEmbeddedDocument } from "../mask/values.ts";
 import { splitNamespace } from "../mongo/index.ts";
 import type { SubsetConfig } from "../subset/index.ts";
 import type { CopyOptions } from "../types.ts";
+import { renameWithRetry } from "../util/rename.ts";
 
 /** Identifies the file format; a reader refuses anything else. */
 export const COPY_CHECKPOINT_FORMAT = "mongoshield-copy-checkpoint";
@@ -401,7 +402,7 @@ async function writeAtomically(path: string, text: string): Promise<void> {
   const temporary = `${path}.${randomBytes(4).toString("hex")}.tmp`;
   try {
     await writeFile(temporary, text, { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, path);
+    await renameWithRetry(temporary, path);
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;

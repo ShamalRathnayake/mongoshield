@@ -6,6 +6,7 @@
  *                             it creates an SSO-only account)
  *   PUT    /api/users/:id    rename, change role, or set a new password
  *   DELETE /api/users/:id
+ *   POST   /api/users/:id/sign-out   end every session of the user (not the caller's own)
  *
  * Safety rules: the last admin can be neither demoted nor deleted (the console
  * would become unmanageable), you cannot delete yourself, and changing a
@@ -143,6 +144,32 @@ export function userRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
       outcome: "success",
     });
     return c.json({ ok: true as const });
+  });
+
+  // "Sign out everywhere": after a lost laptop or a leaked cookie. Sessions read the
+  // live user record, so role changes need no sign-out; a stolen session does.
+  app.post("/api/users/:id/sign-out", async (c) => {
+    const principal = requireRole(c, "admin");
+    const id = c.req.param("id");
+    const outcome = await store.update((state) => {
+      const target = state.users.find((user) => user.id === id);
+      if (target === undefined) throw notFound("The user");
+      // Your own sign-out keeps the session you are using right now.
+      const kept = state.sessions.filter(
+        (session) => session.userId !== id || session.idHash === principal.sessionHash,
+      );
+      const revoked = state.sessions.length - kept.length;
+      state.sessions = kept;
+      return { username: target.username, revoked };
+    });
+    await recordAudit(services, {
+      actor: principal,
+      action: "user.sign_out",
+      target: outcome.username,
+      outcome: "success",
+      details: { sessions: outcome.revoked },
+    });
+    return c.json({ revoked: outcome.revoked });
   });
 }
 

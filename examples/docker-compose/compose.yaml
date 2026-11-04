@@ -97,6 +97,11 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+    # Lets MONGODB_URI point at a MongoDB on the host machine
+    # (mongodb://host.docker.internal:27017/?directConnection=true) on Linux Docker Engine
+    # too; Docker Desktop and OrbStack provide the name already.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       MONGODB_URI: mongodb://mongo:27017/?replicaSet=rs0
       # MinIO credentials, read by the AWS SDK. Use a dedicated MinIO user in real setups.
@@ -109,7 +114,9 @@ services:
       MONGOSHIELD_STORAGE: ${MONGOSHIELD_STORAGE:-}
     volumes:
       # The image's working directory is /app, where the CLI looks for its config.
-      - ./mongoshield.config.json:/app/mongoshield.config.json:ro
+      # `z`: on SELinux hosts (Fedora, RHEL) Docker relabels the file so the container
+      # may read it; ignored elsewhere.
+      - ./mongoshield.config.json:/app/mongoshield.config.json:ro,z
       # Local backups (used when MONGOSHIELD_STORAGE=/backups). The image prepares
       # /backups for its non-root user, so the volume is writable as-is.
       - backups:/backups

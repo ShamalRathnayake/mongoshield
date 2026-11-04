@@ -49,6 +49,7 @@ import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
 import { ConsoleError, invalid, notFound } from "../errors.ts";
+import { UNSAFE_TARGET_HINT, unsafeWebhookReason } from "../network-targets.ts";
 import { readJson } from "../security.ts";
 import {
   asObject,
@@ -418,6 +419,11 @@ function parseNotify(
       return { ...kept, type };
     }
     if (!/^https?:\/\//i.test(url)) throw invalid(`"notify[${index}].url" must be an http(s) URL.`);
+    // No webhooks into the cloud's metadata service (blind SSRF), see network-targets.ts.
+    const unsafe = unsafeWebhookReason(url, services.settings.allowUnsafeTargets === true);
+    if (unsafe !== undefined) {
+      throw invalid(`"notify[${index}].url" is refused: ${unsafe}.`, UNSAFE_TARGET_HINT);
+    }
     return {
       type,
       url: sealNotifyUrl(services.store, planId, url),

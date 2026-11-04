@@ -170,7 +170,9 @@ describe("shield.restore with at", () => {
       rename: { [`${source}.*`]: `${target}.*` },
     });
     expect(result.dryRun).toBe(true);
-    expect(result.pointInTime).toMatchObject({ baseBackupId: baseId, events: 0 });
+    // The journal range was read (the pre-flight), but nothing was replayed.
+    expect(result.pointInTime).toMatchObject({ baseBackupId: baseId });
+    expect(result.pointInTime?.events).toBeGreaterThan(0);
     expect(await collectionNames(client(), target)).toEqual([]);
   });
 
@@ -219,6 +221,23 @@ describe("mongoshield restore --at", () => {
     ]);
     expect(run.code, run.stderr).toBe(0);
     await expectSnapshotAtT(viaCli);
+  });
+
+  it("only takes base backups of the deployment --source-cluster names", async () => {
+    const run = await cli([
+      "restore",
+      "--from",
+      storageDir,
+      "--to-uri",
+      mongoUri(),
+      "--at",
+      atFlag(beforeDisaster),
+      "--source-cluster",
+      "some-other-deployment",
+      "--dry-run",
+    ]);
+    expect(run.code).not.toBe(0);
+    expect(run.stderr).toContain("it was taken from another deployment");
   });
 
   it("refuses a backup id next to --at", async () => {
@@ -282,5 +301,57 @@ describe("shield.prune with a journal", () => {
 
     const after = await loadJournalCoverage(shield.storage);
     expect(after.segments.map((segment) => segment.key)).toEqual([newest?.key]);
+  });
+});
+
+describe("point-in-time refusals come before any write", () => {
+  it("refuses a base that does not cover what the journal changes, leaving the target as it was", async () => {
+    const narrowSource = uniqueDb("spitr_narrow_src");
+    const narrowTarget = uniqueDb("spitr_narrow_dst");
+    const dir = await mkdtemp(join(tmpdir(), "mongoshield-pitr-narrow-"));
+    const storage = fileStorage({ path: dir });
+    const narrow = new MongoShield({ source: { uri: mongoUri() }, storage });
+    try {
+      const db = client().db(narrowSource);
+      const orders = db.collection<{ _id: number; qty: number }>("orders");
+      await db.collection<{ _id: number; name: string }>("users").insertOne({ _id: 1, name: "a" });
+      await orders.insertOne({ _id: 1, qty: 1 });
+      let at: ClusterTime;
+      const journal = await startTestJournal(client(), storage, narrowSource);
+      try {
+        // The only base backs up `users` alone; the journal also changes `orders`.
+        await narrow.backup({ include: [`${narrowSource}.users`], consistency: "converge" });
+        await orders.updateOne({ _id: 1 }, { $inc: { qty: 1 } });
+        at = await readClusterTime(client());
+        await waitForJournalToCatchUp(client(), storage);
+      } finally {
+        await journal.stop();
+      }
+
+      // The live data a drop-mode restore would replace first.
+      const live = client().db(narrowTarget).collection<{ _id: string; name: string }>("users");
+      await live.insertOne({ _id: "live", name: "must survive the refusal" });
+      const options = {
+        backup: "latest",
+        at,
+        mode: "drop",
+        rename: { [`${narrowSource}.*`]: `${narrowTarget}.*` },
+      } as const;
+      for (const dryRun of [true, false]) {
+        await expect(narrow.restore({ ...options, dryRun })).rejects.toMatchObject({
+          code: "MS_CHANGE_HISTORY_LOST",
+          details: { uncoveredNamespaces: [`${narrowSource}.orders`] },
+        });
+      }
+      expect(await live.find().toArray()).toEqual([
+        { _id: "live", name: "must survive the refusal" },
+      ]);
+    } finally {
+      await narrow.close();
+      for (const database of [narrowSource, narrowTarget]) {
+        await client().db(database).dropDatabase();
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

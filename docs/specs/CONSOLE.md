@@ -17,7 +17,8 @@ console still runs no arbitrary commands, shell or server-side JavaScript, and b
 aggregations.
 
 ```bash
-docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console
+docker run -p 127.0.0.1:8080:8080 --add-host=host.docker.internal:host-gateway \
+  -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console
 # Open http://localhost:8080: create the admin, paste a connection string, Back up now.
 ```
 
@@ -65,7 +66,7 @@ packages/console          npm: @mongoshield/console (bin: mongoshield-console)
    without a token during the setup window (15 minutes after start by default,
    `MONGOSHIELD_SETUP_WINDOW_MINUTES`, 0 to turn it off); the page and the log say so,
    and the setup is audited with the client address. The single-use setup token printed
-   to the logs (`/setup?token=…`, valid 24 hours) works at any time, and is the only way in
+   to the logs (`/setup?token=…`, valid 1 hour; a restart prints a new one) works at any time, and is the only way in
    after the window. `MONGOSHIELD_ADMIN_USERNAME` + `MONGOSHIELD_ADMIN_PASSWORD(_FILE)`
    create the admin at start instead (only while no user exists).
 2. **Passwords** are hashed with scrypt (N=2^17). Sessions use a random 256-bit id in an
@@ -85,8 +86,40 @@ packages/console          npm: @mongoshield/console (bin: mongoshield-console)
    typing the connection's name to confirm.
 6. **Headers:** a strict CSP (no inline scripts), `X-Frame-Options: DENY`, `Referrer-Policy:
    no-referrer`, and HSTS when served over TLS.
-7. **Release gate:** the checklist in `docs/console-security.md` follows OWASP ASVS
+7. **Host names:** the API answers only to IP addresses, loopback names, single-label and
+   private names (`.local`, `.internal`, `.svc`, `.lan`, `.home.arpa`), the host of
+   `MONGOSHIELD_PUBLIC_URL` and the names in `MONGOSHIELD_ALLOWED_HOSTS`; anything else
+   gets `421 CONSOLE_UNKNOWN_HOST`. This stops DNS rebinding (a web page whose public name
+   suddenly resolves to the console). See "Behind a reverse proxy" below.
+8. **Targets the console contacts:** webhooks and storage endpoints may not point at cloud
+   metadata or link-local addresses, an Azure location without usable stored credentials
+   (no connection string and no SAS token carrying `sig=`: the console's managed identity)
+   only talks to Azure Storage domains, and connection strings
+   using `MONGODB-OIDC` with an `ENVIRONMENT` property (the console's workload token) are
+   refused; `MONGOSHIELD_ALLOW_UNSAFE_TARGETS=true` lifts these rules.
+9. **Release gate:** the checklist in `docs/console-security.md` follows OWASP ASVS
    level 1, and every item is covered by an automated test where possible.
+
+## Behind a reverse proxy
+
+| Variable | Meaning |
+|---|---|
+| `MONGOSHIELD_PUBLIC_URL` | The address people open, e.g. `https://backups.example.com`. Its origin is always accepted by the cross-site check, its host by the Host check. A path (`https://example.com/mongoshield`) serves the console under that sub-path |
+| `MONGOSHIELD_ALLOWED_HOSTS` | More host names the console answers to, comma-separated: `backups.example.com`, `*.example.com` (subdomains), or `*` (turn the Host check off) |
+| `MONGOSHIELD_TRUSTED_PROXIES` | IP addresses or CIDR ranges of the proxies in front of the console. Only requests from them have their `X-Forwarded-For` (client address for rate limits and the audit log) and `X-Forwarded-Host` (the host for the cross-site and Host checks) believed. Unset: those headers are ignored |
+| `MONGOSHIELD_ALLOW_UNSAFE_TARGETS` | `true`: allow metadata/link-local webhooks and storage endpoints, the console's own cloud identity with foreign endpoints, and `MONGODB-OIDC` `ENVIRONMENT` connection strings (see Security, 8) |
+
+Without `MONGOSHIELD_TRUSTED_PROXIES` every client behind a proxy shares the proxy's
+address, so the per-address login limit (10 failures in 15 minutes) applies to all of
+them together; the per-username limit still applies per account.
+
+**Sub-paths.** With `MONGOSHIELD_PUBLIC_URL=https://example.com/mongoshield` the console
+routes `/mongoshield/api/…` like `/api/…` (so the proxy may strip the prefix or pass it
+on), redirects `/mongoshield` to `/mongoshield/`, and the OIDC callback defaults to
+`https://example.com/mongoshield/api/oidc/callback`. The UI uses relative asset and API
+URLs. Limitation: the session cookie keeps `Path=/` (the `__Host-` prefix requires it),
+so two consoles under different sub-paths of the same host share one cookie name and
+sign each other out; give each console its own host name.
 
 ## First run
 
@@ -170,7 +203,8 @@ A half-configured setup (a client id without an issuer, a misspelt `MONGOSHIELD_
 variable, an http redirect URL) stops the console at startup.
 
 **Flow.** `GET /api/oidc/login` creates a pending login in memory (random `state`,
-`nonce` and PKCE verifier; 10 minutes; at most 1000 pending), stores its id in a
+`nonce` and PKCE verifier; 10 minutes; at most 1000 pending, at most 100 per client
+address, and room is made at the expense of the address holding the most), stores its id in a
 `SameSite=Lax`, `HttpOnly` cookie (`__Host-` prefixed when cookies are secure) and
 redirects to the provider. `GET /api/oidc/callback` consumes the pending login of that
 cookie (single use), checks `state` (and RFC 9207 `iss` when sent), redeems the code at
@@ -194,11 +228,15 @@ only.
 
 **Accounts.** An identity is bound to a console account by issuer + `sub`, never by
 name. At the first sign-in the console looks for an unlinked SSO-only account (no
-password: created by an admin, or by the trusted proxy when both SSO modes are on) with
-the identity's username (`preferred_username`, else a verified `email`, else `sub`, else
-a stable `oidc-<hash>`) and links it; a password account with that name is never taken
-over. Without a match, auto-provisioning creates an SSO-only account; with it off, the
-sign-in is refused. Admins can create SSO-only accounts in the Users page (leave the
+password: created by an admin, or by the trusted proxy when both SSO modes are on) whose
+username is the identity's **verified** email (`email_verified: true`; a missing claim
+counts as unverified; compared case-insensitively) or its exact `sub`, and links it.
+`preferred_username` never links an account: many providers let users change it. New
+accounts are named `preferred_username`, else the verified `email`, else `sub`, else a
+stable `oidc-<hash>`; an existing account with that name is never taken over
+(`CONSOLE_OIDC_ACCOUNT_CONFLICT`). Without a match, auto-provisioning creates an SSO-only
+account; with it off, the sign-in is refused. To prepare an account for someone, name it
+after their email address (or their subject id). Admins can create SSO-only accounts in the Users page (leave the
 password empty) whenever OIDC or the proxy is configured. With a role claim, the role
 follows the provider at every sign-in (the last admin is never demoted); without one,
 roles are managed in the console. Logout ends the console session only (no
@@ -430,7 +468,7 @@ larger documents are read-only here.
 | Resource | Endpoints |
 |---|---|
 | session | `POST /session` (login) · `DELETE /session` · `GET /session` (with `setup: { tokenRequired, windowEndsAt }` before setup) · `POST /setup` (token optional during the setup window) |
-| users | CRUD (admin) |
+| users | CRUD · `POST /users/:id/sign-out` (ends every session of the user, the caller's own excepted) (admin) |
 | connections | CRUD · `POST /connections/check` (a pasted string, before saving; admin) · `POST /connections/:id/test` (connects and checks privileges) · `GET /connections/:id/namespaces` (database/collection tree with counts, sizes and index counts) · `PUT /connections/:id/live-edits` (admin) |
 | live data | `GET /live/:id/collection?ns=` · `GET /live/:id/documents?ns=&filter=&projection=&sort=&skip=&limit=&ejson=` · `GET /live/:id/sample?ns=&filter=&size=` · `GET /live/:id/export?ns=&filter=&projection=&sort=&format=&limit=&ejson=` (operator) · `POST /live/:id/documents` (insert) · `PUT /live/:id/documents` (replace) · `POST /live/:id/documents/delete` · `POST /live/:id/bulk/preview` · `POST /live/:id/bulk` (job) (`data:write`) |
 | live edits | `GET /live-edits?connectionId=&limit=&before=` · `GET /live-edits/:id` (operator, audited) · `POST /live-edits/:id/undo` (`data:write`) |
@@ -441,8 +479,8 @@ larger documents are read-only here.
 | browse | `GET /…/:backupId/documents?ns=&filter=&limit=&after=&ejson=` · `GET /…/:backupId/sample?ns=&filter=&size=` · `GET /…/:backupId/export?ns=&filter=&format=&limit=&ejson=` (operator, read-only, uses `findInBackup`) |
 | restore | `POST /restore/plan` (dry run) · `POST /restore` (job) · `POST /restore/preview` (job) · `GET /restore/preview/:id` · `GET /restore/preview/:id/documents?ns=&category=&limit=&after=` · `POST /restore/preview/:id/document` |
 | jobs | `GET /jobs` · `GET /jobs/:id` · `GET /jobs/:id/events` (SSE) · `POST /jobs/:id/cancel` |
-| audit | `GET /audit` |
-| config | `GET /config/export` (as `mongoshield.config.ts`, secrets left as env references) · `POST /config/import` (dry run, then apply) |
+| audit | `GET /audit` (viewer; client addresses and usernames typed at failed sign-ins are shown to admins only) |
+| config | `GET /config/export` (admin; as `mongoshield.config.ts`, secrets left as env references) · `POST /config/import` (dry run, then apply) |
 | oidc | `GET /oidc/login` · `GET /oidc/callback` (browser redirects, not JSON) |
 | health | `GET /healthz` · `GET /metrics` (Prometheus text format) |
 
