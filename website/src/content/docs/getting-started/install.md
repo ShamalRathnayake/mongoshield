@@ -57,7 +57,8 @@ used in tests need nothing extra.
 
 The CLI and config file name storage with a URL. Credentials never go in the URL; each
 service uses its usual credential chain (AWS environment and profiles, Google
-Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or agent).
+Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or agent,
+a Dropbox refresh token in `MONGOSHIELD_DROPBOX_TOKEN`).
 
 | URL | Storage |
 |---|---|
@@ -67,6 +68,7 @@ Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or a
 | `az://account/container/prefix` | Azure Blob Storage |
 | `sftp://user@host:port/path?fingerprint=SHA256:…` | SFTP |
 | `gdrive://folder` | Google Drive (token in `MONGOSHIELD_GDRIVE_TOKEN`, from `mongoshield login gdrive`) |
+| `dropbox://folder` | Dropbox (App folder; token from `mongoshield login dropbox` in `MONGOSHIELD_DROPBOX_TOKEN`) |
 
 An `endpoint=…` parameter is a plain `https://host[:port]`: one with user info or a query
 string (an Azure SAS token, presigned S3 parameters) is refused, because those are

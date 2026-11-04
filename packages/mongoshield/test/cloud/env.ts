@@ -13,7 +13,7 @@
  * DefaultAzureCredential), which is what lets CI use short-lived OIDC credentials
  * instead of stored keys. A target whose variables are set but whose credentials
  * are missing therefore fails loudly instead of skipping: that is a broken setup,
- * not an opted-out one. The only exceptions are R2, SFTP and Google Drive, whose
+ * not an opted-out one. The only exceptions are R2, SFTP, Google Drive and Dropbox, whose
  * credentials cannot come from a default chain and so are listed as required variables.
  *
  * This file never prints a variable's *value*, only names. See
@@ -101,6 +101,7 @@ export const CLOUD_TARGET_VARIABLES = {
   azureBlob: ["MONGOSHIELD_TEST_AZURE_ACCOUNT_URL", "MONGOSHIELD_TEST_AZURE_CONTAINER"],
   azureImmutable: ["MONGOSHIELD_TEST_AZURE_ACCOUNT_URL", "MONGOSHIELD_TEST_AZURE_LOCK_CONTAINER"],
   azureKeyVault: ["MONGOSHIELD_TEST_AZURE_KEY_URL"],
+  dropbox: ["MONGOSHIELD_TEST_DROPBOX_CLIENT_ID", "MONGOSHIELD_TEST_DROPBOX_TOKEN"],
   sftp: [
     "MONGOSHIELD_TEST_SFTP_HOST",
     "MONGOSHIELD_TEST_SFTP_USERNAME",

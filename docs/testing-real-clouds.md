@@ -24,6 +24,7 @@ restore round trip, and KMS round trips against real services:
 | Azure Key Vault | as AWS KMS |
 | SFTP (a remote server) | conformance + round trip |
 | Google Drive | conformance + round trip (`gdrive://`, a real Google account) |
+| Dropbox (an App folder app) | conformance + round trip |
 
 The tests live in `packages/mongoshield/test/cloud/` (one file per provider) and
 the workflow in `.github/workflows/cloud.yml`.
@@ -84,7 +85,7 @@ R2 and SFTP take their keys from the variables below.
 
 Variables are not secret (bucket names, key ids, URLs); in GitHub they are
 **repository variables** (Settings → Secrets and variables → Actions → *Variables*).
-Only R2, SFTP and Google Drive need **secrets**. Locally, everything is an environment variable
+Only R2, SFTP, Google Drive and Dropbox need **secrets**. Locally, everything is an environment variable
 with the same name.
 
 The jobs in `cloud.yml` decide whether to run with a job-level `if:` on a variable.
@@ -123,6 +124,8 @@ must be **repository** variables, not `cloud-tests` environment variables.
 | `MONGOSHIELD_TEST_GDRIVE_CLIENT_ID` | variable | Google Drive | OAuth client id (type "TVs and Limited Input devices"); enables the Google Drive job |
 | `MONGOSHIELD_TEST_GDRIVE_CLIENT_SECRET` | **secret** | Google Drive | that client's secret |
 | `MONGOSHIELD_TEST_GDRIVE_TOKEN` | **secret** | Google Drive | refresh token from `mongoshield login gdrive` with that client |
+| `MONGOSHIELD_TEST_DROPBOX_CLIENT_ID` | variable | Dropbox | the test app's app key; enables the Dropbox job |
+| `MONGOSHIELD_TEST_DROPBOX_TOKEN` | **secret** | Dropbox | a refresh token for that app (`mongoshield login dropbox`) |
 | `MONGOSHIELD_TEST_PREFIX` | variable (optional) | all | top-level prefix, default `mongoshield-ci` |
 
 In the tables and commands below, replace `ShamalRathnayake/mongoshield` with your
@@ -134,7 +137,7 @@ fork if you run this elsewhere.
    Every job in `cloud.yml` uses it, and the cloud trust policies below accept only
    tokens issued for it, so no other workflow (and no pull request) can assume the
    test roles. Optionally add a required reviewer or restrict it to `main`.
-2. **Secrets** (R2, SFTP and Google Drive only): add them as environment secrets of `cloud-tests`
+2. **Secrets** (R2, SFTP, Google Drive and Dropbox only): add them as environment secrets of `cloud-tests`
    (or repository secrets).
 3. **Variables:** add the repository variables from the table for the providers you
    set up. A provider without its gate variable shows up as *skipped*.
@@ -613,6 +616,26 @@ in the account's My Drive, and deletes the files it wrote. Drive has no lifecycl
 rules; empty per-run folders can be left behind by a killed run, so delete old ones
 from drive.google.com now and then. The token is used weekly, so it never reaches
 Google's six-month expiry for unused tokens.
+
+## Dropbox
+
+Use a separate Dropbox account for the tests (a free Basic account is enough), so a
+broken test can never touch real files.
+
+1. [App Console](https://www.dropbox.com/developers/apps) → *Create app* → *Scoped
+   access* → *App folder*, named e.g. `mongoshield-cloud-tests`. Give it the scopes and
+   settings from [the Dropbox guide](guides/dropbox.md#use-your-own-dropbox-app)
+   (`files.metadata.read`, `files.content.read`, `files.content.write`,
+   `account_info.read`; public clients on; both redirect URIs).
+2. Get a refresh token while signed in as the test account:
+   `MONGOSHIELD_DROPBOX_CLIENT_ID=<app key> npx mongoshield login dropbox`.
+3. Variable `MONGOSHIELD_TEST_DROPBOX_CLIENT_ID` (the app key) and secret
+   `MONGOSHIELD_TEST_DROPBOX_TOKEN` (the refresh token).
+
+Everything goes under `Apps/<app>/mongoshield-ci/<run>/`. The tests delete their files,
+and the run's folder is deleted at the end (the adapter itself never deletes folders).
+Deleted files stay in the account's *Deleted files* for 30 days but do not count
+against its quota. The 2 GB of a Basic account is plenty: a run writes a few MB.
 
 ## When a cloud test fails
 
