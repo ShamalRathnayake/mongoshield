@@ -17,6 +17,13 @@ import { CONFIG_PRESETS, type ConfigPresetName } from "../../config/presets.ts";
 export interface InitAnswers {
   /** Storage URL or directory, e.g. `./backups` or `s3://bucket/prefix`. */
   readonly storage: string;
+  /**
+   * The destination's comment lines above `storage:` (init-destinations.ts), without
+   * `//` or indentation. A generic comment is used when absent.
+   */
+  readonly storageComment?: readonly string[];
+  /** Config lines the destination needs after `storage:`, without indentation. */
+  readonly extraConfig?: readonly string[];
   /** Name of the environment variable holding the connection string. */
   readonly uriEnv: string;
   /** Public age recipient to encrypt for; omit for unencrypted backups. */
@@ -45,9 +52,7 @@ export function generateConfigText(answers: InitAnswers): string {
     ...sourceComment(answers.preset),
     `  source: { uri: process.env.${answers.uriEnv} },`,
     "",
-    "  // Where backups are stored: a directory, or s3://bucket/prefix",
-    "  // (S3 credentials come from the usual AWS environment/profile, never from here).",
-    `  storage: ${JSON.stringify(answers.storage)},`,
+    ...storageSection(answers),
     "",
     ...compressionSection(),
     "",
@@ -59,6 +64,19 @@ export function generateConfigText(answers: InitAnswers): string {
     "});",
     "",
   ].join("\n");
+}
+
+/** The comment above `storage:`, the line itself, and the destination's extra lines. */
+function storageSection(answers: InitAnswers): string[] {
+  const comment = answers.storageComment ?? [
+    "Where backups are stored: a directory, or s3://bucket/prefix",
+    "(S3 credentials come from the usual AWS environment/profile, never from here).",
+  ];
+  return [
+    ...comment.map((line) => `  // ${line}`),
+    `  storage: ${JSON.stringify(answers.storage)},`,
+    ...(answers.extraConfig ?? []).map((line) => `  ${line}`),
+  ];
 }
 
 /**

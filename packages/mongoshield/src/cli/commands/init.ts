@@ -1,14 +1,23 @@
 /**
  * `mongoshield init`: create `mongoshield.config.ts` (and optionally a key pair).
  *
- * On a terminal it asks a few questions; with --yes, or without a terminal
- * (CI), it uses the flags and sensible defaults. The generated config never
- * contains secrets: the connection string is read from an environment
- * variable, and the only key in it is the public age recipient.
+ * On a terminal it asks where backups go (a menu with Google Drive first, see
+ * init-destinations.ts), a few follow-up questions for that destination, the
+ * connection string variable and encryption. With --yes, or without a terminal (CI),
+ * it uses the flags (`--storage`, `--destination`, …) and sensible defaults. The
+ * generated config never contains secrets: the connection string is read from an
+ * environment variable, credentials come from the environment, and the only key in it
+ * is the public age recipient. The next steps say which secrets the destination needs
+ * (`mongoshield login gdrive` and MONGOSHIELD_GDRIVE_TOKEN, B2's application key, …).
  *
  * `--preset atlas-free` (or `atlas-flex`) writes a config ready for an Atlas Free or
  * Flex cluster: the preset, a gentle read pace and a retention policy for small
  * clusters, plus Atlas-specific next steps (database user, IP access list).
+ *
+ * The flow is: answers (wizard or flags) → key pair → config file → InitOutcome →
+ * next steps. `init --github` (a later release) plugs in after the config is written:
+ * it receives the same InitOutcome (destination, its secrets and login provider, the
+ * recipient and key file) and sets up the workflow instead of printing next steps.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -25,6 +34,15 @@ import { assertValidRecipient, generateIdentity } from "../../crypto/index.ts";
 import { MongoShieldError } from "../../errors.ts";
 import { usageError } from "../args.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
+import {
+  type DestinationSetup,
+  destinationById,
+  destinationForStorage,
+  INIT_DESTINATION_IDS,
+  INIT_DESTINATIONS,
+  type InitDestination,
+  type InitPrompter,
+} from "./init-destinations.ts";
 import { generateConfigText, type InitAnswers } from "./init-template.ts";
 import { identityFileText, writeIdentityFile } from "./keygen.ts";
 
@@ -46,9 +64,11 @@ export const initCommand: CommandSpec = {
   name: NAME,
   summary: "Create mongoshield.config.ts (interactive)",
   description: [
-    "Asks where to store backups, which environment variable holds the connection",
-    "string, and whether to encrypt (optionally generating a key pair). With --yes",
-    "or without a terminal it uses the flags below and their defaults.",
+    "Asks where to store backups (Google Drive, OneDrive, Dropbox, GitHub artifacts,",
+    "Backblaze B2, Cloudflare R2 or any storage URL), which environment variable holds",
+    "the connection string, and whether to encrypt (optionally generating a key pair),",
+    "then prints the next steps for that destination. With --yes or without a terminal",
+    "it uses the flags below and their defaults.",
     "--preset atlas-free (or atlas-flex) writes a config for an Atlas Free or Flex cluster.",
   ].join("\n"),
   options: {
@@ -57,11 +77,18 @@ export const initCommand: CommandSpec = {
       valueName: "<name>",
       description: `Start from a preset for your deployment: ${CONFIG_PRESET_NAMES.join(", ")}`,
     },
+    destination: {
+      type: "string",
+      valueName: "<name>",
+      choices: INIT_DESTINATION_IDS,
+      description: "Where backups go, without the menu (needs --storage unless it has a default)",
+    },
     storage: {
       type: "string",
       valueName: "<storage-url>",
       defaultText: DEFAULTS.storage,
-      description: "Where backups will be stored: ./dir or s3://bucket/prefix",
+      description:
+        "Where backups will be stored: ./dir, gdrive://folder, b2://bucket/prefix?region=…, s3://…",
     },
     "uri-env": {
       type: "string",
@@ -89,12 +116,36 @@ export const initCommand: CommandSpec = {
       command: "mongoshield init --yes --storage s3://acme-backups/prod --keygen",
     },
     {
+      description: "Backblaze B2 (10 GB free, no card)",
+      command:
+        'mongoshield init --yes --storage "b2://acme-backups/prod?region=us-west-004" --keygen',
+    },
+    {
       description: "A config for an Atlas Free (M0) cluster, encrypted with a new key",
       command: "mongoshield init --preset atlas-free --keygen",
     },
   ],
   run: runInitCommand,
 };
+
+/**
+ * What `init` produced, for the next steps (and for `init --github`, which sets the
+ * destination's secrets and writes the workflow from it).
+ */
+export interface InitOutcome {
+  readonly configPath: string;
+  readonly storage: string;
+  readonly destination: InitDestination;
+  readonly setup: DestinationSetup;
+  readonly uriEnv: string;
+  /** The public key backups are encrypted for, if any. */
+  readonly recipient: string | undefined;
+  /** Where the generated secret key was written, if one was generated. */
+  readonly keyFile: string | undefined;
+  readonly preset: ConfigPresetName | undefined;
+  /** Whether the person answered questions (versus flags and defaults). */
+  readonly interactive: boolean;
+}
 
 async function runInitCommand(context: CommandContext): Promise<number> {
   const configPath = resolve(context.io.cwd, CONFIG_FILE);
@@ -114,38 +165,58 @@ async function runInitCommand(context: CommandContext): Promise<number> {
     recipient = generated.recipient;
   }
 
+  const { destination, storage } = answers;
   const template: InitAnswers = {
-    storage: answers.storage,
+    storage,
     uriEnv: answers.uriEnv,
+    storageComment: destination.configComment(storage),
+    ...(destination.extraConfig === undefined
+      ? {}
+      : { extraConfig: destination.extraConfig(storage) }),
     ...(recipient ? { recipient } : {}),
     ...(keyFile ? { keyFile: displayPath(context, keyFile) } : {}),
     ...(answers.preset ? { preset: answers.preset } : {}),
   };
   await writeFile(configPath, generateConfigText(template), { flag: "wx" });
 
+  const outcome: InitOutcome = {
+    configPath,
+    storage,
+    destination,
+    setup: destination.setup(storage),
+    uriEnv: answers.uriEnv,
+    recipient,
+    keyFile,
+    preset: answers.preset,
+    interactive,
+  };
+  // `init --github` continues from `outcome` here (a later release).
+
   if (context.out.settings.json) {
     context.out.json({
       configFile: configPath,
-      storage: answers.storage,
+      storage,
+      destination: destination.id,
       uriEnv: answers.uriEnv,
       ...(recipient ? { recipient } : {}),
       ...(keyFile ? { identityFile: keyFile } : {}),
       ...(answers.preset ? { preset: answers.preset } : {}),
+      ...(outcome.setup.secrets.length === 0
+        ? {}
+        : { secrets: outcome.setup.secrets.map((secret) => secret.name) }),
+      ...(outcome.setup.loginProvider === undefined
+        ? {}
+        : { loginProvider: outcome.setup.loginProvider }),
     });
     return 0;
   }
-  await printNextSteps(context, {
-    configPath,
-    uriEnv: answers.uriEnv,
-    keyFile,
-    interactive,
-    preset: answers.preset,
-  });
+  await printNextSteps(context, outcome);
   return 0;
 }
 
 /** Everything the wizard decides. */
 interface WizardAnswers {
+  readonly destination: InitDestination;
   readonly storage: string;
   readonly uriEnv: string;
   readonly encryption: EncryptionChoice;
@@ -155,8 +226,11 @@ interface WizardAnswers {
   readonly preset: ConfigPresetName | undefined;
 }
 
-/** Non-interactive mode: flags, then defaults. */
-function answersFromFlags(context: CommandContext): WizardAnswers {
+/**
+ * Non-interactive mode: flags, then defaults. `lenient` (the wizard's defaults) lets
+ * a `--destination` without a usable `--storage` through: the wizard asks for it.
+ */
+function answersFromFlags(context: CommandContext, lenient = false): WizardAnswers {
   const { flags } = context;
   const recipient = flags.string("recipient");
   if (recipient && flags.boolean("keygen")) {
@@ -168,13 +242,63 @@ function answersFromFlags(context: CommandContext): WizardAnswers {
   checkVariableName(uriEnv);
 
   return {
-    storage: nonEmpty(flags.string("storage")) ?? DEFAULTS.storage,
+    ...destinationFromFlags(context, lenient),
     uriEnv,
     encryption: flags.boolean("keygen") ? "generate" : recipient ? "existing" : "none",
     recipient,
     keyFile: flags.string("key-file") ?? DEFAULTS.keyFile,
     preset: presetFlag(flags.string("preset")),
   };
+}
+
+/**
+ * The destination and storage from `--destination` and `--storage`. Without
+ * `--destination`, the storage URL's scheme picks the destination (`b2://…` → B2);
+ * without either, a `./backups` directory.
+ */
+function destinationFromFlags(
+  context: CommandContext,
+  lenient: boolean,
+): {
+  destination: InitDestination;
+  storage: string;
+} {
+  const storage = nonEmpty(context.flags.string("storage"));
+  const id = context.flags.string("destination");
+  // The parser has checked the value against the destination ids already.
+  const chosen = id === undefined ? undefined : destinationById(id);
+  if (chosen === undefined) {
+    const location = storage ?? DEFAULTS.storage;
+    return { destination: destinationForStorage(location), storage: location };
+  }
+  if (lenient) {
+    // The wizard asks for the storage; only the menu's starting point matters here.
+    return { destination: chosen, storage: storage ?? chosen.defaultStorage ?? "" };
+  }
+  if (storage !== undefined) {
+    if (!belongsTo(chosen, storage)) {
+      throw usageError(
+        `--storage ${storage} is not a ${chosen.label} location. Use ${chosen.storageForm}.`,
+        NAME,
+      );
+    }
+    return { destination: chosen, storage };
+  }
+  if (chosen.defaultStorage === undefined) {
+    throw usageError(`--destination ${chosen.id} needs --storage ${chosen.storageForm}.`, NAME);
+  }
+  return { destination: chosen, storage: chosen.defaultStorage };
+}
+
+/**
+ * Whether `storage` can be `destination`'s storage. GitHub artifacts are a directory
+ * the workflow uploads, so any directory fits.
+ */
+function belongsTo(destination: InitDestination, storage: string): boolean {
+  if (destination.id === "github-artifacts") {
+    return destinationById("directory")?.matches(storage) === true;
+  }
+  return destination.matches(storage);
 }
 
 /** Validates --preset against the known preset names. */
@@ -189,7 +313,9 @@ function presetFlag(value: string | undefined): ConfigPresetName | undefined {
 
 /** The interactive wizard. Flags given on the command line become the defaults. */
 async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
-  const defaults = answersFromFlags(context);
+  const defaults = answersFromFlags(context, true);
+  const storageFlag = nonEmpty(context.flags.string("storage"));
+  const destinationFlag = context.flags.string("destination");
   const common = {
     output: context.io.stderr,
     signal: context.signal,
@@ -197,16 +323,47 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   };
   intro("mongoshield init", common);
 
-  const storage = answered(
+  // The menu starts on what the flags said, else on the first entry (Google Drive).
+  const firstEntry = INIT_DESTINATIONS[0]?.id ?? "directory";
+  const destinationId = answered(
     common,
-    await text({
+    await select({
       ...common,
-      message: "Where should backups be stored?",
-      placeholder: "./backups or s3://bucket/prefix",
-      initialValue: defaults.storage,
-      validate: (value) => (value && value.trim() !== "" ? undefined : "Enter a directory or URL."),
+      message: "Where should backups go?",
+      initialValue:
+        storageFlag !== undefined || destinationFlag !== undefined
+          ? defaults.destination.id
+          : firstEntry,
+      options: INIT_DESTINATIONS.map((destination) => ({
+        value: destination.id,
+        label: destination.label,
+      })),
     }),
-  ).trim();
+  );
+  const chosen = destinationById(destinationId) ?? defaults.destination;
+  const prompter: InitPrompter = {
+    async text(question) {
+      const answer = answered(
+        common,
+        await text({
+          ...common,
+          message: question.message,
+          ...(question.placeholder === undefined ? {} : { placeholder: question.placeholder }),
+          ...(question.initialValue === undefined ? {} : { initialValue: question.initialValue }),
+          ...(question.validate === undefined
+            ? {}
+            : { validate: (value) => question.validate?.(value ?? "") }),
+        }),
+      );
+      return answer.trim();
+    },
+  };
+  // A --storage value pre-fills the follow-up answers when it is for this destination.
+  const current =
+    storageFlag !== undefined && belongsTo(chosen, storageFlag) ? storageFlag : undefined;
+  const storage = (await chosen.ask(prompter, current)).trim();
+  // Typing a URL into the directory question still gets that URL's next steps.
+  const destination = belongsTo(chosen, storage) ? chosen : destinationForStorage(storage);
 
   const uriEnv = answered(
     common,
@@ -256,7 +413,15 @@ async function askQuestions(context: CommandContext): Promise<WizardAnswers> {
   }
 
   outro("Writing your configuration…", common);
-  return { storage, uriEnv, encryption, recipient, keyFile, preset: defaults.preset };
+  return {
+    destination,
+    storage,
+    uriEnv,
+    encryption,
+    recipient,
+    keyFile,
+    preset: defaults.preset,
+  };
 }
 
 /**
@@ -296,39 +461,32 @@ async function refuseIfConfigExists(cwd: string): Promise<void> {
   }
 }
 
-/** What to do now, including the key-safety reminders. */
-async function printNextSteps(
-  context: CommandContext,
-  facts: {
-    configPath: string;
-    uriEnv: string;
-    keyFile: string | undefined;
-    interactive: boolean;
-    preset: ConfigPresetName | undefined;
-  },
-): Promise<void> {
+/** What to do now: the destination's setup, then the usual commands and key reminders. */
+async function printNextSteps(context: CommandContext, outcome: InitOutcome): Promise<void> {
   const { out } = context;
-  out.success(`Created ${facts.configPath}`);
-  if (facts.keyFile) {
-    out.success(`Created the secret key ${facts.keyFile} (readable only by you)`);
+  out.success(`Created ${outcome.configPath}`);
+  if (outcome.keyFile) {
+    out.success(`Created the secret key ${outcome.keyFile} (readable only by you)`);
     out.warn(
       "Keep an offline copy of the secret key (password manager, safe). Without it, encrypted backups cannot be restored.",
     );
-    await remindGitignore(context, facts.keyFile);
+    await remindGitignore(context, outcome.keyFile);
   }
+  for (const note of outcome.setup.notes ?? []) out.warn(note);
 
   const steps = [
-    ...(facts.preset === undefined ? [] : ATLAS_SETUP_STEPS),
-    facts.preset === undefined
-      ? `export ${facts.uriEnv}="mongodb://…"     # or set it in your secret manager`
-      : `export ${facts.uriEnv}="mongodb+srv://…/?compressors=zlib"     # or set it in your secret manager`,
+    ...(outcome.preset === undefined ? [] : ATLAS_SETUP_STEPS),
+    ...outcome.setup.steps,
+    outcome.preset === undefined
+      ? `export ${outcome.uriEnv}="mongodb://…"     # or set it in your secret manager`
+      : `export ${outcome.uriEnv}="mongodb+srv://…/?compressors=zlib"     # or set it in your secret manager`,
     "mongoshield backup",
     "mongoshield list",
     "mongoshield verify",
   ];
-  if (facts.keyFile) {
+  if (outcome.keyFile) {
     steps.push(
-      `mongoshield restore --identity-file ${displayPath(context, facts.keyFile)} --rename 'app.*=app_restored.*'`,
+      `mongoshield restore --identity-file ${displayPath(context, outcome.keyFile)} --rename 'app.*=app_restored.*'`,
     );
   }
   out.result("Next steps:");
