@@ -162,13 +162,15 @@ export async function startFakeGdriveServer(): Promise<FakeGdriveServer> {
   const clientId = "fake-client-id.apps.googleusercontent.com";
   const clientSecret = "fake-client-secret";
   let refreshToken = `1//fake-refresh-${randomBytes(6).toString("hex")}`;
-  let clock = Date.parse("2026-11-05T00:00:00.000Z");
+  // Starts at the real time (the conformance suite checks lastModified against the
+  // clock) and only moves forward, by at least a second per write.
+  let clock = Date.now();
   let nextId = 1;
   let endpoint = "";
 
   /** Strictly increasing timestamps, so "newest" is never a tie. */
   function now(): string {
-    clock += 1000;
+    clock = Math.max(clock + 1000, Date.now());
     return new Date(clock).toISOString();
   }
 

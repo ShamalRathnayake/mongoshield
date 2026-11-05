@@ -25,6 +25,7 @@ restore round trip, and KMS round trips against real services:
 | SFTP (a remote server) | conformance + round trip |
 | Google Drive | conformance + round trip (`gdrive://`, a real Google account) |
 | Dropbox (an App folder app) | conformance + round trip |
+| OneDrive (a personal account) | conformance + round trip + token rotation through the Actions cache |
 
 The tests live in `packages/mongoshield/test/cloud/` (one file per provider) and
 the workflow in `.github/workflows/cloud.yml`.
