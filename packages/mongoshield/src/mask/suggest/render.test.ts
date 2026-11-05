@@ -109,10 +109,16 @@ describe("renderRulesSnippet", () => {
 describe("renderMaskModule", () => {
   it("writes a mask module that loads and validates", async () => {
     const file = join(directory, "mask.ts");
-    // The module imports `mongoshield`; point it at the source for the test.
+    // The module imports `defineMask` from `mongoshield`. Point it at a stub with the
+    // same body (the identity function, src/mask/config.ts) rather than at
+    // src/index.ts: jiti would load a second, differently transpiled copy of the whole
+    // library, and merging the two copies' coverage marks covered code as uncovered
+    // in every file index.ts reaches.
+    const stub = join(directory, "mongoshield-stub.mjs");
+    await writeFile(stub, "export const defineMask = (config) => config;\n");
     const source = renderMaskModule(GROUPS).replace(
       'from "mongoshield"',
-      `from ${JSON.stringify(join(import.meta.dirname, "../../index.ts"))}`,
+      `from ${JSON.stringify(stub)}`,
     );
     await writeFile(file, source);
     const jiti = createJiti(import.meta.url, { moduleCache: false });
