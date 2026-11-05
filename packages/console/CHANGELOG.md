@@ -1,5 +1,75 @@
 # @mongoshield/console
 
+## 2.1.0
+
+### Minor Changes
+
+- [#72](https://github.com/ShamalRathnayake/mongoshield/pull/72) [`3444b11`](https://github.com/ShamalRathnayake/mongoshield/commit/3444b115d7fba6e57eb591cd5148b501896881d3) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Storage for everyone: a storage-scheme registry, B2 and R2 presets, a free-space check and a new `init` menu.
+  
+  - **Storage-scheme registry.** `registerStorageScheme(scheme, factory, { owner?, replace? })` adds `<scheme>://` URLs that `resolveStorage`, the CLI, config files and the console understand. The first-party schemes use the same registry; registering an existing scheme fails unless `replace: true`. `registeredStorageSchemes()` and `isStorageSchemeRegistered()` list and check them, and `resolveStorage(url, { env })` injects the environment factories read credentials from. `assertValidKey`, `assertValidPrefix` and `throwIfAborted` are exported for adapter authors.
+  - **Contract test kit.** `mongoshield/testing/storage` exports `describeStorageConformance(name, setup, { describe, it, beforeEach, afterEach })`, the storage conformance suite every built-in adapter passes. It works with Vitest, Jest and node:test and adds no dependency. See `docs/guides/community-storage-adapters.md` and `examples/community-storage-adapter`.
+  - **Backblaze B2 and Cloudflare R2.** `b2://bucket/prefix?region=us-west-004` and `r2://<accountId>/bucket/prefix` (and `b2Storage` / `r2Storage` from `mongoshield/storage/s3`) configure the S3 adapter with each service's endpoint, region, addressing style and `WHEN_REQUIRED` checksums. B2 credentials are an application key (`AWS_ACCESS_KEY_ID` = keyID, `AWS_SECRET_ACCESS_KEY` = applicationKey). The GitHub Action installs the S3 SDK for them, and the console accepts them with stored keys.
+  - **Free-space check.** Adapters may implement `space()` (total, used, free and trash bytes); the file adapter does. Before the first write, a backup refuses with `MS_STORAGE_INSUFFICIENT_SPACE` when the previous full backup would not fit, warns past 80% full (logs, `warnings` and a `storage:space` progress event), counts the trash as used, and skips the check when the storage reports nothing.
+  - **`mongoshield init` asks where backups go**: Google Drive, Dropbox, GitHub artifacts, Backblaze B2, Cloudflare R2, then a directory and every storage URL, with the next steps and secrets for each choice. `--destination` picks one without the menu.
+  - **`mongoshield login <provider>`** signs in to Google Drive (a device code) or Dropbox (a browser sign-in with PKCE), prints the refresh token once with the secret it belongs in, and `--gh` stores it with `gh secret set` instead. MongoShield ships its own Google and Dropbox OAuth apps, so no app of your own is needed; `MONGOSHIELD_<PROVIDER>_CLIENT_ID` (and `_CLIENT_SECRET`) still override them.
+
+- [#71](https://github.com/ShamalRathnayake/mongoshield/pull/71) [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Console security hardening.
+  
+  - **DNS rebinding:** the API now answers only to IP addresses, loopback, single-label and private names (`.local`, `.internal`, `.svc`, `.lan`, `.home.arpa`), the host of `MONGOSHIELD_PUBLIC_URL` and the new `MONGOSHIELD_ALLOWED_HOSTS` (`*` turns the check off). Other host names get `421 CONSOLE_UNKNOWN_HOST`, so a web page can no longer claim a fresh console during the setup window. **If you open the console by a public DNS name without setting `MONGOSHIELD_PUBLIC_URL`, set it (or `MONGOSHIELD_ALLOWED_HOSTS`).**
+  - **Reverse proxies:** new `MONGOSHIELD_TRUSTED_PROXIES` (IPs or CIDR ranges). Only from those peers are `X-Forwarded-For` (rate limits, audit) and `X-Forwarded-Host` (origin check) believed. The cross-site refusal now points at `MONGOSHIELD_PUBLIC_URL`.
+  - **Sub-paths:** `MONGOSHIELD_PUBLIC_URL=https://example.com/mongoshield` serves the console under that path (relative UI assets and API calls, prefixed routes, OIDC redirects and callback).
+  - **Sign-in:** attempts are counted before the password check (parallel guesses are limited); setup is rate-limited per address only; throttled logins are audited at most once per address and minute; the sign-in page warns about plain HTTP with Secure cookies, like the setup page.
+  - **OIDC:** prepared accounts are linked only by a verified email (`email_verified: true`) or the exact subject, never by `preferred_username`; a looping client can only evict its own pending sign-ins.
+  - **Roles:** the config export needs `admin`; non-admins see the audit log without client addresses and without usernames typed at failed sign-ins. Admins can sign a user out everywhere (`POST /api/users/:id/sign-out`, a "Sign out" button on the Users page).
+  - **Setup token:** valid for 1 hour instead of 24.
+  - **Secrets:** errors and job logs are scrubbed of storage credentials, SFTP keys, webhook URLs, the webhook secret, the OIDC client secret, the proxy secret and the metrics token too. Connection previews hide `proxyPassword`. Azure SAS tokens are refused in `endpoint=` (use the new encrypted `AZURE_STORAGE_SAS_TOKEN` credential) and hidden in old locations.
+  - **Targets:** webhooks and storage endpoints may not point at cloud metadata or link-local addresses, Azure's managed identity is used only with Azure Storage endpoints, and connection strings using `MONGODB-OIDC` with `ENVIRONMENT` are refused, unless `MONGOSHIELD_ALLOW_UNSAFE_TARGETS=true`.
+  - **Data safety:** restores into existing data checksum every file first (like the CLI), and a restore's unfinished namespaces are saved with the job so a crash still names what may be partial. Local storage cannot overlap the console's own files or the live edit journal.
+  - **Injection:** the exported `mongoshield.config.ts` escapes `*/`, U+2028 and U+2029; the live browser finds `$where` and friends inside DBRefs and code scopes too.
+
+### Patch Changes
+
+- [#71](https://github.com/ShamalRathnayake/mongoshield/pull/71) [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Console networking fixes for the environments people really run it in:
+  
+  - `host.docker.internal` is only offered when it resolves inside the console. On Linux Docker Engine without `--add-host` the console now explains `--add-host=host.docker.internal:host-gateway` instead, a refused `host.docker.internal` points at mongod's `bindIp`, and the quick fill and the automatic localhost rewrite add `directConnection=true` for a single host, so a single-node replica set on the host connects instead of timing out.
+  - The console detects whether it runs in Docker Desktop, Docker Engine, Podman (`host.containers.internal`), Kubernetes or a container on the host's network, and tailors suggestions and hints: `localhost` is kept in Kubernetes and with host networking.
+  - `mongodb+srv://` lookups that time out or fail at the DNS server are reported as a DNS resolver problem with the standard connection string as the fix, not as "the cluster may be deleted".
+  - Hosts are treated as production unless they are clearly this machine: `.local`, `.internal` (Kubernetes Services, AWS and GCP internal names) and single-label names are no longer guessed to be test databases.
+  - A data directory the console may not write (a bind-mounted host folder) gives a clear message with the `chown -R 65532:65532` fix instead of a stack trace.
+  - `secret.key` with group access (a Kubernetes `fsGroup` mount makes it 0660) is accepted; access for other users is still refused.
+  - The printed setup link uses `MONGOSHIELD_PUBLIC_URL` when set, and otherwise says that a `-p` port mapping changes it.
+  - The console listens on `::` (IPv6 and IPv4) by default, falling back to `0.0.0.0` where IPv6 is unavailable. `HOST` still overrides it.
+
+- [#71](https://github.com/ShamalRathnayake/mongoshield/pull/71) [`3d2105f`](https://github.com/ShamalRathnayake/mongoshield/commit/3d2105ffade653aa6f0fb0c5ba6fa3696807381c) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - On a Node.js without zstd (before 22.15), new plans start on gzip, the plan editor
+  shows zstd as unavailable, and the server refuses to save a zstd plan whose backups
+  could never run. The GitHub Action no longer fails in repositories whose
+  `package.json` names pnpm or yarn as their package manager.
+
+- [#71](https://github.com/ShamalRathnayake/mongoshield/pull/71) [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - "Back up now" plans and imported configs without a `compression` setting use zstd only
+  where the console's Node.js has it, and gzip otherwise, instead of failing every backup
+  on Node 22.12-22.14.
+
+- [#71](https://github.com/ShamalRathnayake/mongoshield/pull/71) [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Retention and incremental chains now tell apart two replica sets that share a set
+  name (for example staging and prod both called `rs0`). Prune scopes accept an
+  `instanceId` next to `clusterId`, the new `shield.sourceIdentity()` returns both,
+  and the CLI's `prune` and the console's plan retention use it. A chain whose
+  parent came from a different replica set with the same name is reported as a
+  mismatch. Backups written before `instanceId` existed keep matching as before.
+
+- [#71](https://github.com/ShamalRathnayake/mongoshield/pull/71) [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f) Thanks [@ShamalRathnayake](https://github.com/ShamalRathnayake)! - Console: Azure storage locations with empty or `sig`-less credentials are refused
+  when saved, and an unusable stored credential never falls back to the console's
+  managed identity, so the endpoint guard can't be bypassed. Restores no longer plan
+  twice before running.
+  
+  Operator: while job images are restricted, a plan's `spec.job.env` can't set
+  code-loading variables (`NODE_OPTIONS` beyond heap and warning flags, `LD_*`,
+  `DYLD_*`) or the operator's own connection variables, and `spec.job.envFrom` is
+  refused unless `MONGOSHIELD_ALLOW_JOB_ENV_FROM` (Helm `jobPolicy.allowEnvFrom`) is
+  set. Those names are also pinned last in every pod, so a referenced Secret can't
+  inject them.
+- Updated dependencies [[`3444b11`](https://github.com/ShamalRathnayake/mongoshield/commit/3444b115d7fba6e57eb591cd5148b501896881d3), [`dc25354`](https://github.com/ShamalRathnayake/mongoshield/commit/dc25354904ed9539c8a18e8c1d5ec32d793eda83), [`8a226be`](https://github.com/ShamalRathnayake/mongoshield/commit/8a226be565f66b3d75484cf586776307562c62b6), [`87357ce`](https://github.com/ShamalRathnayake/mongoshield/commit/87357ce06eafea4e5c39cd5086d84e6dde89625b), [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f), [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f), [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f), [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f), [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f), [`5dde6c7`](https://github.com/ShamalRathnayake/mongoshield/commit/5dde6c797daa9db434226552d62f756ad964dd1f)]:
+  - mongoshield@2.1.0
+
 ## 2.0.1
 
 ### Patch Changes
