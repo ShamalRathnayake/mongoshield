@@ -103,6 +103,7 @@ import type {
   SignalOptions,
   StorageAdapter,
   StorageCapabilities,
+  StorageSpace,
 } from "./types.ts";
 
 /** Options for {@link onedriveStorage}. */
@@ -157,14 +158,11 @@ export interface OneDriveStorageOptions {
   readonly now?: () => Date;
 }
 
-/** Drive space in bytes, as `space()` reports it. */
-export interface OneDriveSpace {
-  readonly total?: number;
-  readonly used?: number;
-  readonly free?: number;
-  /** Bytes in the recycle bin, which count against the quota. */
-  readonly trash?: number;
-}
+/**
+ * Drive space, as `space()` reports it: the shared StorageSpace (bytes). Graph's
+ * `used` includes the recycle bin (`deleted`), which counts against the quota.
+ */
+export type OneDriveSpace = StorageSpace;
 
 /** The OneDrive adapter: a StorageAdapter plus `space()` and `warnings()`. */
 export interface OneDriveStorage extends StorageAdapter {
@@ -812,10 +810,10 @@ export function onedriveStorage(options: OneDriveStorageOptions): OneDriveStorag
       const quota = drive.quota;
       if (quota === undefined) return undefined;
       return {
-        ...(quota.total === undefined ? {} : { total: quota.total }),
-        ...(quota.used === undefined ? {} : { used: quota.used }),
-        ...(quota.remaining === undefined ? {} : { free: quota.remaining }),
-        ...(quota.deleted === undefined ? {} : { trash: quota.deleted }),
+        ...(quota.total === undefined ? {} : { totalBytes: quota.total }),
+        ...(quota.used === undefined ? {} : { usedBytes: quota.used }),
+        ...(quota.remaining === undefined ? {} : { freeBytes: quota.remaining }),
+        ...(quota.deleted === undefined ? {} : { trashBytes: quota.deleted }),
       };
     } catch (error) {
       // The app-folder permission may not cover the drive resource: not reported.

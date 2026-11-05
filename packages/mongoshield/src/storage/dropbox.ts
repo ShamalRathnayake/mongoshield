@@ -94,6 +94,7 @@ import type {
   SignalOptions,
   StorageAdapter,
   StorageCapabilities,
+  StorageSpace,
 } from "./types.ts";
 
 /** 1 MiB, for readable size constants. */
@@ -185,13 +186,12 @@ export interface DropboxStorageOptions {
   };
 }
 
-/** Free-space figures in bytes, as returned by {@link DropboxStorage.space}. */
-export interface DropboxSpace {
-  readonly total?: number;
-  readonly used?: number;
-  readonly free?: number;
-  readonly trash?: number;
-}
+/**
+ * Free-space figures, as returned by {@link DropboxStorage.space}: the shared
+ * StorageSpace (bytes). Dropbox does not count deleted files against the quota, so
+ * there is no `trashBytes`.
+ */
+export type DropboxSpace = StorageSpace;
 
 /** The Dropbox adapter: a `StorageAdapter` plus `space()`. */
 export interface DropboxStorage extends StorageAdapter {
@@ -922,7 +922,7 @@ function spaceOf(usage: Record<string, unknown>): DropboxSpace | undefined {
   const allocation = recordOf(usage.allocation);
   const allocated = numberField(allocation, "allocated");
   if (allocation[".tag"] === "individual" && allocated !== undefined && used !== undefined) {
-    return { total: allocated, used, free: Math.max(0, allocated - used) };
+    return { totalBytes: allocated, usedBytes: used, freeBytes: Math.max(0, allocated - used) };
   }
   if (allocation[".tag"] === "team" && allocated !== undefined) {
     // Team members share the team pool and may also have their own limit (0 = none).
@@ -931,11 +931,15 @@ function spaceOf(usage: Record<string, unknown>): DropboxSpace | undefined {
     const memberLimit = numberField(allocation, "user_within_team_space_allocated") ?? 0;
     if (memberLimit > 0 && used !== undefined) {
       const memberFree = Math.max(0, memberLimit - used);
-      return { total: memberLimit, used, free: Math.min(memberFree, teamFree) };
+      return {
+        totalBytes: memberLimit,
+        usedBytes: used,
+        freeBytes: Math.min(memberFree, teamFree),
+      };
     }
-    return { total: allocated, used: teamUsed, free: teamFree };
+    return { totalBytes: allocated, usedBytes: teamUsed, freeBytes: teamFree };
   }
-  return used === undefined ? undefined : { used };
+  return used === undefined ? undefined : { usedBytes: used };
 }
 
 /** An API error answer from Dropbox: status, `error_summary` and the parsed body. */

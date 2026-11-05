@@ -91,6 +91,14 @@ export interface StorageSpace {
 export interface StorageCapabilities {
   /** `put(..., { ifNoneMatch: "*" })` is supported. Needed for storage-based locks. */
   readonly conditionalWrites: boolean;
+  /**
+   * `false`: this storage can never hold a storage lock, by design (Google Drive
+   * allows two files with the same name), so `schedule.lock` defaults to `"none"`
+   * here and runs rely on something else to not overlap (the GitHub workflow's
+   * `concurrency:`). Absent or `true`: the default stays `"storage"`, which fails
+   * loudly where conditional writes turn out not to work.
+   */
+  readonly storageLock?: boolean;
   /** `get(..., { range })` is supported. */
   readonly rangeReads: boolean;
   /**

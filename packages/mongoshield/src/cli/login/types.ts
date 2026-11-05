@@ -24,6 +24,12 @@ export type LoginInstructions =
       /** Browser flow: open `url` in a browser on this machine. */
       readonly kind: "open-url";
       readonly url: string;
+      /**
+       * True when the browser will not come back to this machine by itself (over SSH,
+       * in a Codespace, or no free local port): the provider then shows a code to paste
+       * into `readCode`.
+       */
+      readonly paste?: boolean;
     };
 
 /** What a provider's `login` receives. */
@@ -38,6 +44,13 @@ export interface LoginContext {
   readonly port?: number;
   /** The `fetch` to use; tests inject one. */
   readonly fetch?: typeof fetch;
+  /**
+   * Reads one line the person pastes (a code, or the URL the browser landed on). The
+   * signal fires once the answer is no longer needed. Absent without a terminal.
+   */
+  readonly readCode?: (options: { readonly signal: AbortSignal }) => Promise<string>;
+  /** OneDrive only: also allow work and school accounts (experimental, `--business`). */
+  readonly business?: boolean;
 }
 
 /** What a successful login produces. */

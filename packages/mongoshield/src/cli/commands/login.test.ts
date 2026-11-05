@@ -105,6 +105,7 @@ describe("mongoshield login", () => {
   });
 
   it.each([
+    [["login", "fakedrive", "--business"], "--business only applies to onedrive"],
     [["login", "fakedrive", "--repo", "acme/web"], "--repo only applies with --gh"],
     [["login", "fakedrive", "--port", "70000"], "--port must be a whole number"],
     [["login", "fakedrive", "extra"], "Unexpected argument: extra"],

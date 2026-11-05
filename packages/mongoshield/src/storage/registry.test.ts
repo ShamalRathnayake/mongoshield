@@ -141,15 +141,35 @@ describe("registerStorageScheme", () => {
   });
 
   it.each([
-    ["gdrive://mongoshield-backups", "Google Drive"],
-    ["onedrive://backups", "OneDrive"],
-    ["dropbox://backups", "Dropbox"],
-  ])("reserves the drive scheme of %s until its release, failing clearly", async (url, service) => {
-    const error = await resolveStorage(url).catch((reason: unknown) => reason);
-    expect(isMongoShieldError(error, "MS_NOT_IMPLEMENTED")).toBe(true);
-    expect(String(error)).toContain(service);
-    configError(() => registerStorageScheme(url.split(":")[0] ?? "", () => memoryStorage()));
-  });
+    ["gdrive://mongoshield-backups", "gdrive", "GDRIVE"],
+    ["onedrive://backups", "onedrive", "ONEDRIVE"],
+    ["dropbox://backups", "dropbox", "DROPBOX"],
+  ])(
+    "resolves %s to the first-party drive adapter, which no package can replace",
+    async (url, kind, name) => {
+      // The adapter is only built here, never used, so fake credentials are enough.
+      const env = {
+        [`MONGOSHIELD_${name}_TOKEN`]: "fake-refresh-token",
+        [`MONGOSHIELD_${name}_CLIENT_ID`]: "fake-client-id",
+        [`MONGOSHIELD_${name}_CLIENT_SECRET`]: "fake-client-secret",
+      };
+      const storage = await resolveStorage(url, { env });
+      expect(storage.kind).toBe(kind);
+      expect(storage.location).not.toContain("fake-refresh-token");
+      configError(() => registerStorageScheme(kind, () => memoryStorage()));
+    },
+  );
+
+  it.each(["gdrive://backups", "onedrive://backups", "dropbox://backups"])(
+    "refuses %s without its token, naming the login command",
+    async (url) => {
+      const error = await resolveStorage(url, { env: {} }).catch((reason: unknown) => reason);
+      expect(isMongoShieldError(error)).toBe(true);
+      expect(
+        String(isMongoShieldError(error) ? `${error.message} ${error.hint}` : error),
+      ).toContain("login");
+    },
+  );
 
   it.each(["", "pcloud://", "1drive", "p cloud", "p_cloud"])(
     "rejects the scheme name %j",

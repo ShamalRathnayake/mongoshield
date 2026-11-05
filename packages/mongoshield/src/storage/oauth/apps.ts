@@ -133,11 +133,13 @@ export const OAUTH_APPS: Readonly<Record<OAuthProviderId, OAuthApp>> = {
       authorization: "https://www.dropbox.com/oauth2/authorize",
       token: "https://api.dropboxapi.com/oauth2/token",
     },
+    // The same least-privilege set as DROPBOX_SCOPES (dropbox-auth.ts), which the
+    // login actually requests; files.metadata.write is not needed.
     scopes: [
-      "files.metadata.read",
-      "files.metadata.write",
+      "account_info.read",
       "files.content.read",
       "files.content.write",
+      "files.metadata.read",
     ],
     // "offline" asks for a refresh token instead of a short-lived access token only.
     authorizationParams: { token_access_type: "offline" },
@@ -153,6 +155,13 @@ export interface OAuthClient {
   /** Where the id came from, for messages: MongoShield's app or the user's own. */
   readonly source: "shipped" | "environment";
 }
+
+/** Each provider's guide, under docs/guides/ (named for people, not by scheme). */
+const GUIDES: Readonly<Record<OAuthProviderId, string>> = {
+  gdrive: "google-drive.md",
+  onedrive: "onedrive.md",
+  dropbox: "dropbox.md",
+};
 
 /**
  * The client for `provider`: `MONGOSHIELD_<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET` when
@@ -183,7 +192,7 @@ export function resolveOAuthClient(
         hint:
           `Register your own ${app.displayName} OAuth app and set ${app.env.clientId}` +
           (app.flow === "device" && provider === "gdrive" ? ` and ${app.env.clientSecret}` : "") +
-          `, or use a release that ships one. See docs/guides/${provider}.md.`,
+          `, or use a release that ships one. See docs/guides/${GUIDES[provider]}.`,
         details: { provider },
       },
     );

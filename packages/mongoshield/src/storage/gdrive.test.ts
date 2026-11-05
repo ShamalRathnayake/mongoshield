@@ -489,15 +489,15 @@ describe("gdrive storage", () => {
       const storage = storageFor();
       await storage.put("a.bin", Buffer.alloc(200));
       expect(await storage.space()).toEqual({
-        total: 15_000,
-        used: 1_700,
-        free: 13_300,
-        trash: 500,
+        totalBytes: 15_000,
+        usedBytes: 1_700,
+        freeBytes: 13_300,
+        trashBytes: 500,
       });
     });
 
     it("omits total and free for unlimited accounts", async () => {
-      expect(await storageFor().space()).toEqual({ used: 0, trash: 0 });
+      expect(await storageFor().space()).toEqual({ usedBytes: 0, trashBytes: 0 });
     });
   });
 

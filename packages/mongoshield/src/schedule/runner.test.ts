@@ -29,7 +29,12 @@ import { type MemoryStorage, memoryStorage } from "../storage/memory.ts";
 import type { BackupOptions, BackupResult, VerifyReport } from "../types.ts";
 import { createLockOwner } from "./lock.ts";
 import { storageLock } from "./lock-storage.ts";
-import { runScheduledJob, type ScheduledJobOptions, type ScheduledShield } from "./runner.ts";
+import {
+  defaultLockKind,
+  runScheduledJob,
+  type ScheduledJobOptions,
+  type ScheduledShield,
+} from "./runner.ts";
 
 const SHA = "0".repeat(64);
 const FAST: ScheduledJobOptions = { retryDelays: { baseDelayMs: 1, maxDelayMs: 2 } };
@@ -1013,5 +1018,19 @@ describe("runScheduledJob retention scopes (jobs sharing one storage location)",
       { id: report.backup?.id },
     );
     expect(await listBackups(storage)).toHaveLength(2);
+  });
+});
+
+describe("defaultLockKind", () => {
+  const capabilities = { conditionalWrites: false, rangeReads: true, objectLock: false };
+
+  it("is none for storage that says it can never hold a storage lock (Google Drive)", () => {
+    const storage = { ...memoryStorage(), capabilities: { ...capabilities, storageLock: false } };
+    expect(defaultLockKind(storage)).toBe("none");
+  });
+
+  it("stays storage otherwise, so missing conditional writes still fail loudly", () => {
+    expect(defaultLockKind({ ...memoryStorage(), capabilities })).toBe("storage");
+    expect(defaultLockKind(memoryStorage())).toBe("storage");
   });
 });

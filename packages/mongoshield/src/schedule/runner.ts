@@ -60,6 +60,7 @@ import { notifyRun } from "../notify/index.ts";
 import { redactMongoUri, redactSecrets } from "../redact.ts";
 import type { MongoShield } from "../shield.ts";
 import { resolveStorage } from "../storage/resolve.ts";
+import type { StorageAdapter } from "../storage/types.ts";
 import type {
   BackupOptions,
   BackupResult,
@@ -195,7 +196,7 @@ export async function runScheduledJob(
     durationMs: 0,
     host: hostname(),
     storage: shield.storage.location,
-    lock: { kind: config.schedule?.lock ?? "storage" },
+    lock: { kind: config.schedule?.lock ?? defaultLockKind(shield.storage) },
   };
 
   let step: RunStep = "setup";
@@ -205,7 +206,7 @@ export async function runScheduledJob(
   let timeout: Timeout | undefined;
 
   try {
-    const settings = resolveSettings(config, options);
+    const settings = resolveSettings(config, options, shield.storage);
     const context: RunContext = { shield, config, options, settings, logger, draft };
     if (options.applyJitter && settings.jitterMs > 0) {
       const delayMs = Math.round((options.random ?? Math.random)() * settings.jitterMs);
@@ -687,8 +688,21 @@ function scopeLabelsOf(
 // Setup
 // ---------------------------------------------------------------------------
 
+/**
+ * The lock a run takes when `schedule.lock` is not set: `"storage"`, except on storage
+ * that says it can never hold one (`capabilities.storageLock === false`, Google
+ * Drive), where it is `"none"`.
+ */
+export function defaultLockKind(storage: StorageAdapter): "storage" | "none" {
+  return storage.capabilities.storageLock === false ? "none" : "storage";
+}
+
 /** Applies the defaults documented in the config schema. */
-function resolveSettings(config: MongoShieldConfig, options: ScheduledJobOptions): RunSettings {
+function resolveSettings(
+  config: MongoShieldConfig,
+  options: ScheduledJobOptions,
+  storage: StorageAdapter,
+): RunSettings {
   const schedule = config.schedule;
   const timeoutMinutes = schedule?.timeoutMinutes;
   const verify = options.verify ?? schedule?.verify ?? "fast";
@@ -696,7 +710,7 @@ function resolveSettings(config: MongoShieldConfig, options: ScheduledJobOptions
   // `verify` option can still ask for a drill; fail during setup, before any backup.
   if (verify === "drill" && config.drill === undefined) throw missingDrillSectionError();
   return {
-    lock: schedule?.lock ?? "storage",
+    lock: schedule?.lock ?? defaultLockKind(storage),
     verify,
     drill: config.drill,
     prune: options.prune ?? schedule?.prune ?? true,

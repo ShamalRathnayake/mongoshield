@@ -121,9 +121,10 @@ cache and warns from day 75 (see `docs/guides/onedrive.md`).
 
 ## Shipping the IDs
 
-1. Put the values in the shipped-apps file in `packages/mongoshield/src/storage/` (the file
-   that holds the per-provider client IDs; it says where each value goes): the Google client
-   ID and secret, the Dropbox App key and the Microsoft Application (client) ID.
+1. Put the values in `packages/mongoshield/src/storage/oauth/apps.ts` (`OAUTH_APPS`, each
+   empty value is marked `TODO(maintainer)`): the Google client ID and secret, the
+   Microsoft Application (client) ID and the Dropbox App key. Every adapter and
+   `mongoshield login` read them from there.
 2. Run `pnpm --filter mongoshield test`.
 3. Add the real-account test variables from `docs/testing-real-clouds.md` and run the Cloud
    workflow once (Actions → Cloud → Run workflow).

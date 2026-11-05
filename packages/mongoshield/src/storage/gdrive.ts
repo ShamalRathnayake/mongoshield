@@ -83,6 +83,7 @@ import type {
   SignalOptions,
   StorageAdapter,
   StorageCapabilities,
+  StorageSpace,
 } from "./types.ts";
 
 /** Options for {@link gdriveStorage}. */
@@ -125,13 +126,11 @@ export interface GdriveStorageOptions {
   readonly fetch?: typeof fetch;
 }
 
-/** What `space()` reports, in bytes. Fields the provider does not report are absent. */
-export interface StorageSpace {
-  readonly total?: number;
-  readonly used?: number;
-  readonly free?: number;
-  readonly trash?: number;
-}
+/**
+ * What `space()` reports: the shared StorageSpace (bytes). Drive's `usage` already
+ * counts the trash, as `usedBytes` must.
+ */
+export type { StorageSpace };
 
 /**
  * Capabilities plus `storageLock`, a flag proposed for `StorageCapabilities`: `false`
@@ -1419,10 +1418,10 @@ function quotaOf(about: unknown): StorageSpace | undefined {
   const used = number("usage");
   const trash = number("usageInDriveTrash");
   return {
-    ...(total === undefined ? {} : { total }),
-    ...(used === undefined ? {} : { used }),
-    ...(total !== undefined && used !== undefined ? { free: Math.max(0, total - used) } : {}),
-    ...(trash === undefined ? {} : { trash }),
+    ...(total === undefined ? {} : { totalBytes: total }),
+    ...(used === undefined ? {} : { usedBytes: used }),
+    ...(total !== undefined && used !== undefined ? { freeBytes: Math.max(0, total - used) } : {}),
+    ...(trash === undefined ? {} : { trashBytes: trash }),
   };
 }
 

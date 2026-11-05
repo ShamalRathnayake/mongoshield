@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { KEYS, plain, runTestCli } from "../../../test/helpers/cli.ts";
 import { generateIdentity } from "../../crypto/index.ts";
 import { resolveStorage } from "../../storage/resolve.ts";
+import { githubStorageChoice } from "./init.ts";
 import { INIT_DESTINATIONS, type InitDestinationId } from "./init-destinations.ts";
 
 /** Keys that move the destination menu from its first entry to `id` and choose it. */
@@ -630,5 +631,69 @@ describe("mongoshield init for Backblaze B2 (no card) and Cloudflare R2", () => 
     });
     expect(run.stdout).toContain("Manage API tokens");
     expect(plain(run.stderr)).toContain("R2 asks for a payment card");
+  });
+});
+
+describe("init --github", () => {
+  it.each([
+    [["init", "--github", "--keygen"], "--keygen does not apply with --github"],
+    [
+      ["init", "--github", "--recipient", generateIdentity().recipient],
+      "--recipient does not apply with --github",
+    ],
+  ])("refuses %j: CI backups always get a new key pair", async (args, message) => {
+    const run = await runTestCli(args);
+    expect(run.code).toBe(2);
+    expect(plain(run.stderr)).toContain(message);
+  });
+
+  it("maps each destination to the storage initGithub sets up", () => {
+    const destination = (id: InitDestinationId) => {
+      const found = INIT_DESTINATIONS.find((entry) => entry.id === id);
+      if (found === undefined) throw new Error(`no destination ${id}`);
+      return found;
+    };
+    const setupOf = (id: InitDestinationId, storage: string) => destination(id).setup(storage);
+
+    expect(
+      githubStorageChoice(
+        destination("github-artifacts"),
+        "./backups",
+        setupOf("github-artifacts", "./backups"),
+        {},
+        undefined,
+      ),
+    ).toEqual({ kind: "github-artifacts" });
+
+    const gdrive = "gdrive://mongoshield-backups";
+    expect(
+      githubStorageChoice(destination("gdrive"), gdrive, setupOf("gdrive", gdrive), {}, "token-1"),
+    ).toEqual({
+      kind: "gdrive",
+      url: gdrive,
+      refreshToken: "token-1",
+    });
+
+    // Other drives are plain URLs whose token becomes a repository secret.
+    const dropbox = "dropbox://mongoshield-backups";
+    expect(
+      githubStorageChoice(
+        destination("dropbox"),
+        dropbox,
+        setupOf("dropbox", dropbox),
+        {
+          MONGOSHIELD_DROPBOX_TOKEN: "token-2",
+        },
+        "token-2",
+      ),
+    ).toEqual({ kind: "url", url: dropbox, secrets: { MONGOSHIELD_DROPBOX_TOKEN: "token-2" } });
+
+    // Secrets that are not set here are left out (initGithub says how to add them).
+    const b2 = "b2://acme/prod?region=us-west-004";
+    expect(githubStorageChoice(destination("b2"), b2, setupOf("b2", b2), {}, undefined)).toEqual({
+      kind: "url",
+      url: b2,
+      secrets: {},
+    });
   });
 });

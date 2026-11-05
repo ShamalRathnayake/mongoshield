@@ -411,7 +411,7 @@ describe("onedriveStorage", () => {
         size: 1000,
       });
       const space = await storage.space();
-      expect(space?.trash).toBe(1000);
+      expect(space?.trashBytes).toBe(1000);
     });
 
     it("ignores a key that names a folder instead of deleting the folder", async () => {
@@ -445,7 +445,12 @@ describe("onedriveStorage", () => {
       await storage.put("a.bin", Buffer.alloc(1000));
       await storage.put("b.bin", Buffer.alloc(500));
       await storage.delete(["b.bin"]);
-      expect(await storage.space()).toEqual({ total: 10_000, used: 1500, free: 8500, trash: 500 });
+      expect(await storage.space()).toEqual({
+        totalBytes: 10_000,
+        usedBytes: 1500,
+        freeBytes: 8500,
+        trashBytes: 500,
+      });
     });
 
     it("returns undefined when Graph does not report the quota to this app", async () => {

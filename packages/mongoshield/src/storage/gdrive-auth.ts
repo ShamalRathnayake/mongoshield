@@ -33,6 +33,7 @@
  */
 
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
+import { OAUTH_APPS } from "./oauth/apps.ts";
 
 /** The only scope MongoShield asks for: files this app created, nothing else in the drive. */
 export const GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
@@ -47,13 +48,14 @@ export const GDRIVE_CLIENT_ENV = {
 } as const;
 
 /**
- * The OAuth client MongoShield ships. Empty until the maintainer registers the
- * Google Cloud project's "TVs and Limited Input devices" client; until then users
- * must bring their own through {@link GDRIVE_CLIENT_ENV}.
+ * The OAuth client MongoShield ships, kept with the other providers' in
+ * src/storage/oauth/apps.ts. Empty until the maintainer registers the Google Cloud
+ * project's "TVs and Limited Input devices" client; until then users must bring
+ * their own through {@link GDRIVE_CLIENT_ENV}.
  */
-const SHIPPED_CLIENT_ID = "";
+const SHIPPED_CLIENT_ID = OAUTH_APPS.gdrive.clientId;
 /** Installed-app client secrets are not confidential (see the header comment). */
-const SHIPPED_CLIENT_SECRET = "";
+const SHIPPED_CLIENT_SECRET = OAUTH_APPS.gdrive.clientSecret;
 
 /** Google's device authorization endpoint. */
 export const GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code";

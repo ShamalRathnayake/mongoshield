@@ -48,8 +48,10 @@ describe.skipIf(!gdrive.configured)(gdrive.title, { timeout: CLOUD_TEST_TIMEOUT_
 
   it("reports the account's quota", async () => {
     const space = await storageFor(`${CLOUD_RUN_PREFIX}/gdrive/space`).space();
-    expect(space?.used).toBeGreaterThanOrEqual(0);
+    expect(space?.usedBytes).toBeGreaterThanOrEqual(0);
     // Free accounts have a limit (15 GB shared with Gmail and Photos).
-    if (space?.total !== undefined) expect(space.free).toBeLessThanOrEqual(space.total);
+    if (space?.totalBytes !== undefined) {
+      expect(space.freeBytes).toBeLessThanOrEqual(space.totalBytes);
+    }
   });
 });

@@ -660,6 +660,9 @@ version in every manifest, and newer releases keep reading older backups
 | | Storage | URL | Install |
 |:-:|:--|:--|:--|
 | 📁 | Local folder, NFS, SMB | `./backups` | built in |
+| 🟢 | Google Drive (15 GB free) | `gdrive://mongoshield-backups` | built in; `mongoshield login gdrive` |
+| 🔵 | OneDrive (5 GB free, personal accounts) | `onedrive://mongoshield-backups` | built in; `mongoshield login onedrive` |
+| 📦 | Dropbox (2 GB free) | `dropbox://mongoshield-backups` | built in; `mongoshield login dropbox` |
 | 🟠 | AWS S3 | `s3://bucket/prefix?region=eu-west-1` | `npm i @aws-sdk/client-s3 @aws-sdk/lib-storage` |
 | 🔥 | Backblaze B2 (10 GB free, no card) | `b2://bucket/prefix?region=us-west-004` | same as S3 |
 | ☁️ | Cloudflare R2 (10 GB free, needs a card) | `r2://<accountId>/bucket/prefix` | same as S3 |
@@ -670,9 +673,15 @@ version in every manifest, and newer releases keep reading older backups
 | 🧩 | Anything else | `<scheme>://…` from a community package | see [writing a storage adapter](./docs/guides/community-storage-adapters.md) |
 
 `npx mongoshield init` asks where backups go, with the free options first, and prints the
-next steps for the choice ([B2 and R2 guide](./docs/guides/b2-and-r2.md)). Before each
-backup, storage that knows its size (a local disk) is checked: a backup that clearly will
-not fit is refused, and one past 80% full warns. The console image includes every SDK and
+next steps for the choice. `npx mongoshield init --github` goes all the way: it signs in to
+the drive, writes a nightly GitHub Actions workflow, sets the repository secrets and runs the
+first backup ([Atlas Free + Netlify in 10 minutes](./docs/guides/atlas-free-netlify.md)).
+Guides: [Google Drive](./docs/guides/google-drive.md) ·
+[OneDrive](./docs/guides/onedrive.md) · [Dropbox](./docs/guides/dropbox.md) ·
+[B2 and R2](./docs/guides/b2-and-r2.md). The drives need no SDK: MongoShield only sees its
+own folder (Google: only the files it created), and the token stays in your secrets.
+Before each backup, storage that knows its size (a local disk, the drives) is checked: a
+backup that clearly will not fit is refused, and one past 80% full warns. The console image includes every SDK and
 the CLI image includes S3. The GitHub Action installs the SDK that its `storage` input needs.
 
 Encryption uses [age](https://age-encryption.org): public keys (`age1…`), a passphrase, a key
@@ -964,6 +973,9 @@ Schemes, parameters and credentials.
 | Google Cloud Storage | `gs://bucket/prefix` | `projectId`, `retention` | Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default login`, the metadata server |
 | Azure Blob | `az://account/container/prefix` | `endpoint`, `retention` | `AZURE_STORAGE_CONNECTION_STRING`, else `DefaultAzureCredential` (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, …, managed identity, `az login`) |
 | SFTP | `sftp://user@host:22/path` (`/~/path` = from the login directory) | `fingerprint` (repeatable), `allowUnknownHostKey` | `MONGOSHIELD_SFTP_KEY_FILE` and/or `SSH_AUTH_SOCK` |
+| Google Drive | `gdrive://<folder>` (inside a `MongoShield` folder in My Drive) | `chunkSizeMiB` | `MONGOSHIELD_GDRIVE_TOKEN` from `mongoshield login gdrive`; no storage lock (Drive allows duplicate names), so `schedule.lock` defaults to `none` |
+| OneDrive | `onedrive://<folder>` (inside `Apps/MongoShield`) | `fragmentSizeMiB`, `business=true` (work and school accounts, experimental) | `MONGOSHIELD_ONEDRIVE_TOKEN` from `mongoshield login onedrive`; optional `MONGOSHIELD_ONEDRIVE_TOKEN_STATE` (the Action keeps the rotated token there) |
+| Dropbox | `dropbox://<folder>` (inside `Apps/MongoShield`) | none | `MONGOSHIELD_DROPBOX_TOKEN` from `mongoshield login dropbox` |
 | Memory | `memory://name` | none | none: one store per name per process (for tests) |
 
 | Parameter | Values | What it does |
@@ -1284,10 +1296,12 @@ Durations take `ms` `s` `m` `h`, e.g. `90s` or `1h30m`. Flags marked "repeatable
 | `--uri-env` | `<VAR>` | `init`: variable holding the connection string (default `MONGODB_URI`) |
 | `--keygen` | | `init`: make a key pair and encrypt with it |
 | `--recipient` | `<age1…>` | `init`: encrypt for an existing public key |
-| `--key-file` | `<path>` | `init`: where `--keygen` writes the private key (default `./mongoshield.key`) |
+| `--key-file` | `<path>` | `init`: where `--keygen` (or `--github`) writes the private key (default `./mongoshield.key`) |
+| `--github` | | `init`: set up nightly backups in GitHub Actions: sign in, key pair and recovery kit, config, workflow, repository secrets, first run |
 | `--gh` | | `login`: store the token as a repository secret with `gh secret set` instead of printing it |
 | `--repo` | `<owner/name>` | `login --gh`: the repository (default: the one in the current directory) |
 | `--port` | `<port>` | `login`: the local port for a browser sign-in (Dropbox) |
+| `--business` | | `login onedrive`: also allow work and school accounts (experimental) |
 
 `version` has only the global flags.
 

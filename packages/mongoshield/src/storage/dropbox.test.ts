@@ -517,7 +517,7 @@ describe("dropbox storage", () => {
       try {
         const storage = adapterOn(own);
         await storage.put("a", Buffer.alloc(100));
-        expect(await storage.space()).toEqual({ total: 1000, used: 100, free: 900 });
+        expect(await storage.space()).toEqual({ totalBytes: 1000, usedBytes: 100, freeBytes: 900 });
       } finally {
         await own.close();
       }
@@ -536,7 +536,7 @@ describe("dropbox storage", () => {
       });
       try {
         const storage = adapterOn(team);
-        expect(await storage.space()).toEqual({ total: 500, used: 0, free: 50 });
+        expect(await storage.space()).toEqual({ totalBytes: 500, usedBytes: 0, freeBytes: 50 });
       } finally {
         await team.close();
       }

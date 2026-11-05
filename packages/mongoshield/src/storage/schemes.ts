@@ -11,6 +11,9 @@
  *   memory  memory://name                           in-process store (tests)
  *   b2      b2://bucket/prefix?region=us-west-004   Backblaze B2 (S3 preset)
  *   r2      r2://<accountId>/bucket/prefix          Cloudflare R2 (S3 preset)
+ *   gdrive  gdrive://<folder>                       Google Drive (MONGOSHIELD_GDRIVE_TOKEN)
+ *   onedrive onedrive://<folder>                    OneDrive (MONGOSHIELD_ONEDRIVE_TOKEN)
+ *   dropbox dropbox://<folder>                      Dropbox (MONGOSHIELD_DROPBOX_TOKEN)
  *
  * New schemes are appended, so the order of the older ones (and every hint that
  * lists them) stays the same.
@@ -18,22 +21,22 @@
  * resolve.ts documents every parameter and credential. Each factory receives the
  * parsed URL and the environment to read credentials from (StorageSchemeContext).
  *
- *   gdrive, onedrive, dropbox   reserved for the drive adapters: until their releases
- *                               replace the placeholders below, they fail with
- *                               MS_NOT_IMPLEMENTED
+ * The drive schemes (gdrive, onedrive, dropbox) call their providers' REST APIs with
+ * `fetch` and need no SDK; each adapter documents its own URL parameters.
  *
  * Adding a first-party scheme: write its factory, add it to SUPPORTED_STORAGE_SCHEMES
  * and to FIRST_PARTY_STORAGE_SCHEMES below. The `satisfies` check makes the list and
- * the factories impossible to get out of step. The drive releases only replace their
- * own placeholder line.
+ * the factories impossible to get out of step.
  */
 
 import { fileURLToPath } from "node:url";
-import { MongoShieldError } from "../errors.ts";
 import { azureStorage } from "./azure.ts";
+import { dropboxStorageFromUrl } from "./dropbox.ts";
 import { fileStorage } from "./file.ts";
 import { gcsStorage } from "./gcs.ts";
+import { gdriveStorageFromUrl } from "./gdrive.ts";
 import { type MemoryStorage, memoryStorage } from "./memory.ts";
+import { onedriveStorageFromUrl } from "./onedrive.ts";
 import type { StorageSchemeContext, StorageSchemeFactory } from "./registry.ts";
 import { s3Storage } from "./s3.ts";
 import { b2Storage, R2_JURISDICTIONS, type R2Jurisdiction, r2Storage } from "./s3-presets.ts";
@@ -490,21 +493,6 @@ function isAzureStorageHost(hostname: string): boolean {
 }
 
 /**
- * The factory of a drive scheme whose adapter ships in a later release: the scheme is
- * reserved (no package can claim it by accident, and `init` can already write it), and
- * using it fails with a clear MS_NOT_IMPLEMENTED instead of "unsupported scheme".
- */
-function notYetAvailable(service: string, scheme: string): StorageSchemeFactory {
-  return () => {
-    throw new MongoShieldError(
-      "MS_NOT_IMPLEMENTED",
-      `${service} storage (${scheme}://) is not available in this release of MongoShield yet.`,
-      { hint: "Upgrade MongoShield, or choose another storage location for now." },
-    );
-  };
-}
-
-/**
  * The factory of every first-party scheme. Keys are exactly SUPPORTED_STORAGE_SCHEMES
  * (checked by `satisfies`); the registry looks schemes up here.
  *
@@ -528,12 +516,11 @@ export const FIRST_PARTY_STORAGE_SCHEMES = {
 
   r2: r2StorageOf,
 
-  // gdrive://<folder>: the Google Drive release replaces this placeholder with its factory.
-  gdrive: notYetAvailable("Google Drive", "gdrive"),
+  // The drive adapters read their tokens from the environment (copied: they take a
+  // mutable ProcessEnv, the registry hands out a read-only view).
+  gdrive: ({ parsed, env }) => gdriveStorageFromUrl(parsed, { ...env }),
 
-  // onedrive://<folder>: the OneDrive release replaces this placeholder with its factory.
-  onedrive: notYetAvailable("OneDrive", "onedrive"),
+  onedrive: ({ parsed, env }) => onedriveStorageFromUrl(parsed, { ...env }),
 
-  // dropbox://<folder>: the Dropbox release replaces this placeholder with its factory.
-  dropbox: notYetAvailable("Dropbox", "dropbox"),
+  dropbox: ({ parsed, env }) => dropboxStorageFromUrl(parsed, { ...env }),
 } as const satisfies Record<FirstPartyStorageScheme, StorageSchemeFactory>;

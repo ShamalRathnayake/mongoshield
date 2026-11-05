@@ -35,6 +35,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { redactSecrets } from "../redact.ts";
+import { OAUTH_APPS } from "./oauth/apps.ts";
 
 /** The repository/CI secret that holds the Dropbox refresh token. */
 export const DROPBOX_SECRET_NAME = "MONGOSHIELD_DROPBOX_TOKEN";
@@ -46,10 +47,11 @@ export const DROPBOX_CLIENT_ID_ENV = "MONGOSHIELD_DROPBOX_CLIENT_ID";
 export const DROPBOX_CLIENT_SECRET_ENV = "MONGOSHIELD_DROPBOX_CLIENT_SECRET";
 
 /**
- * The app key of MongoShield's own Dropbox app. Empty until the app is registered;
- * until then users must bring their own with {@link DROPBOX_CLIENT_ID_ENV}.
+ * The app key of MongoShield's own Dropbox app, kept with the other providers' in
+ * src/storage/oauth/apps.ts. Empty until the app is registered; until then users must
+ * bring their own with {@link DROPBOX_CLIENT_ID_ENV}.
  */
-export const DROPBOX_SHIPPED_CLIENT_ID = "";
+export const DROPBOX_SHIPPED_CLIENT_ID = OAUTH_APPS.dropbox.clientId;
 
 /**
  * The least-privilege scopes MongoShield asks for (an App folder app):

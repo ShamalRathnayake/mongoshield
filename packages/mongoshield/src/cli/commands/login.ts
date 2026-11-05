@@ -15,6 +15,7 @@
  * The providers live in src/cli/login/; `runLogin` is exported for `init --github`.
  */
 
+import { createInterface } from "node:readline/promises";
 import { usageError } from "../args.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
 import { ghSecretSetCommand, setGitHubSecret } from "../github/secrets.ts";
@@ -49,6 +50,10 @@ export const loginCommand: CommandSpec = {
       type: "string",
       valueName: "<port>",
       description: "Browser sign-in (Dropbox): the local port to receive the answer on",
+    },
+    business: {
+      type: "boolean",
+      description: "OneDrive: also allow work and school accounts (experimental)",
     },
   },
   examples: [
@@ -129,11 +134,17 @@ export async function runLogin(
   provider: LoginProvider,
 ): Promise<LoginResult> {
   const port = context.flags.integer("port", { min: 1, max: 65_535 });
+  if (context.flags.boolean("business") && provider.id !== "onedrive") {
+    throw usageError("--business only applies to onedrive.", NAME);
+  }
+  const readCode = pastedCodeReader(context);
   const result = await provider.login({
     env: context.io.env,
     signal: context.signal,
     show: (instructions) => showInstructions(context, provider, instructions),
     ...(port === undefined ? {} : { port }),
+    ...(readCode === undefined ? {} : { readCode }),
+    ...(context.flags.boolean("business") ? { business: true } : {}),
   });
   context.addSecret(result.refreshToken);
   return result;
@@ -156,12 +167,39 @@ function showInstructions(
             : [`(or open ${instructions.verificationUriComplete}).`]),
           `The code expires at ${instructions.expiresAt.toLocaleTimeString()}. Waiting for approval…`,
         ]
-      : [
-          `To sign in to ${provider.displayName}, open this link in a browser on this machine:`,
-          `  ${out.style("cyan", instructions.url)}`,
-          "Waiting for the browser to come back…",
-        ];
+      : instructions.paste === true
+        ? [
+            `To sign in to ${provider.displayName}, open this link in any browser:`,
+            `  ${out.style("cyan", instructions.url)}`,
+            "Then paste the code it shows here and press Enter:",
+          ]
+        : [
+            `To sign in to ${provider.displayName}, open this link in a browser on this machine:`,
+            `  ${out.style("cyan", instructions.url)}`,
+            "Waiting for the browser to come back… (or paste the code or the address the",
+            "browser ended up on, and press Enter)",
+          ];
   out.stderr(`${lines.join("\n")}\n`);
+}
+
+/**
+ * Reads one pasted line from the terminal, for sign-ins that show a code (Dropbox over
+ * SSH). Undefined without an interactive terminal: nobody could answer. The read stops
+ * when the provider no longer needs it (the browser came back by itself).
+ */
+function pastedCodeReader(
+  context: CommandContext,
+): ((options: { readonly signal: AbortSignal }) => Promise<string>) | undefined {
+  const { stdin } = context.io;
+  if (stdin === undefined || !context.out.interactive) return undefined;
+  return async ({ signal }) => {
+    const lines = createInterface({ input: stdin, terminal: false });
+    try {
+      return (await lines.question("", { signal })).trim();
+    } finally {
+      lines.close();
+    }
+  };
 }
 
 /** The provider named on the command line. */

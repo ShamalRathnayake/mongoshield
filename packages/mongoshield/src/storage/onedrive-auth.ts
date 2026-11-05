@@ -34,6 +34,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { redactSecrets } from "../redact.ts";
 import { numberProperty, propertyOf, stringProperty } from "./adapter-utils.ts";
+import { OAUTH_APPS } from "./oauth/apps.ts";
 
 /** The repository secret that holds the OneDrive sign-in. */
 export const ONEDRIVE_SECRET_NAME = "MONGOSHIELD_ONEDRIVE_TOKEN";
@@ -45,10 +46,11 @@ export const ONEDRIVE_CLIENT_ENV = {
 } as const;
 
 /**
- * The client id of MongoShield's own Microsoft app registration. Empty until the app
- * is registered and published; until then `MONGOSHIELD_ONEDRIVE_CLIENT_ID` is required.
+ * The client id of MongoShield's own Microsoft app registration, kept with the other
+ * providers' in src/storage/oauth/apps.ts. Empty until the app is registered and
+ * published; until then `MONGOSHIELD_ONEDRIVE_CLIENT_ID` is required.
  */
-export const SHIPPED_ONEDRIVE_CLIENT_ID = "";
+export const SHIPPED_ONEDRIVE_CLIENT_ID = OAUTH_APPS.onedrive.clientId;
 
 /** Scopes asked for at sign-in and on every refresh (space-separated, as OAuth wants). */
 export const ONEDRIVE_SCOPES = "Files.ReadWrite.AppFolder offline_access";

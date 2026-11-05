@@ -54,8 +54,8 @@ describe.skipIf(!onedrive.configured)(onedrive.title, { timeout: CLOUD_TEST_TIME
   it("reports the drive quota, or nothing when the app-folder permission does not cover it", async () => {
     const space = await storageFor(`${CLOUD_RUN_PREFIX}/onedrive/space`).space();
     if (space !== undefined) {
-      expect(space.total).toBeGreaterThan(0);
-      expect(space.free).toBeGreaterThanOrEqual(0);
+      expect(space.totalBytes).toBeGreaterThan(0);
+      expect(space.freeBytes).toBeGreaterThanOrEqual(0);
     }
   });
 
