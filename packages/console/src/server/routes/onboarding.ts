@@ -23,20 +23,27 @@
 
 import { isIP } from "node:net";
 import type { Hono } from "hono";
-import { redactMongoUri } from "mongoshield";
+import { defaultCompression } from "mongoshield";
 import { backupJob, connectionById } from "../../jobs/tasks.ts";
 import type {
   ConnectionCheckResult,
+  ContainerEnvironment,
   PlanView,
   PublicIpResult,
   QuickBackupResult,
 } from "../../shared/api.ts";
-import { analyzeConnectionString, throughContainerHost } from "../../shared/connection-string.ts";
+import { analyzeConnectionString } from "../../shared/connection-string.ts";
 import { randomId } from "../../state/crypto.ts";
+import { previewConnectionUri } from "../../state/redact.ts";
 import type { PlanRecord, StorageRecord } from "../../state/types.ts";
 import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
-import { inspectConnection, normalizeConnectionUri, rememberCheck } from "../connection-check.ts";
+import {
+  inspectConnection,
+  normalizeConnectionUri,
+  reachedAddress,
+  rememberCheck,
+} from "../connection-check.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
 import { ConsoleError } from "../errors.ts";
 import { readJson } from "../security.ts";
@@ -62,8 +69,8 @@ const PUBLIC_IP_TIMEOUT_MS = 5_000;
 export interface OnboardingRouteOptions {
   /** Fetches the public IP service (defaults to the global `fetch`). */
   readonly fetchPublicIp?: (url: string, signal: AbortSignal) => Promise<Response>;
-  /** Whether the console runs in a container (defaults to detecting it). */
-  readonly inContainer?: boolean;
+  /** Where the console runs (defaults to detecting it, see container-environment.ts). */
+  readonly container?: ContainerEnvironment;
   /** The address to try for a refused localhost in a container (see `inspectConnection`). */
   readonly containerAddress?: (uri: string) => string | undefined;
 }
@@ -79,20 +86,20 @@ export function onboardingRoutes(
   app.post("/api/connections/check", async (c) => {
     const principal = requireRole(c, "admin");
     const body = asObject(await readJson(c));
-    const uri = normalizeConnectionUri(requiredString(body, "uri", MAX_URI_LENGTH));
+    const uri = normalizeConnectionUri(
+      requiredString(body, "uri", MAX_URI_LENGTH),
+      services.settings.allowUnsafeTargets === true,
+    );
     const info = analyzeConnectionString(uri);
     const result = await inspectConnection(uri, {
-      ...(options.inContainer === undefined ? {} : { inContainer: options.inContainer }),
+      ...(options.container === undefined ? {} : { container: options.container }),
       ...(options.containerAddress === undefined
         ? {}
         : { containerAddress: options.containerAddress }),
     });
     // Saving the connection right after this keeps what the check found out, under the
     // address that worked (the page saves that one when the console had to use the host).
-    const reached =
-      result.reachedThrough === undefined
-        ? uri
-        : ((options.containerAddress ?? throughContainerHost)(uri) ?? uri);
+    const reached = reachedAddress(uri, result, options.containerAddress) ?? uri;
     if (result.ok) rememberCheck(services, reached, deploymentOf(result, services.now()));
     const answer: ConnectionCheckResult = {
       ...result,
@@ -106,7 +113,7 @@ export function onboardingRoutes(
       actor: principal,
       action: "connection.check",
       // The redacted URI (password removed) says what was tried.
-      target: redactMongoUri(uri),
+      target: previewConnectionUri(uri),
       outcome: result.ok ? "success" : "failure",
       ...(result.problem === undefined ? {} : { details: { problem: result.problem.kind } }),
     });
@@ -226,7 +233,8 @@ function newQuickPlan(
     storageId: storage.id,
     include,
     exclude: [],
-    compression: "zstd",
+    // zstd where this Node.js has it (22.15 / 23.8 and later), gzip otherwise.
+    compression: defaultCompression(),
     encryption: managedKeyFor(services, id, undefined),
     consistency: "auto",
     verify: "fast",

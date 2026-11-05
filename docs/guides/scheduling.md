@@ -80,6 +80,11 @@ export default defineConfig({
 });
 ```
 
+`schedule.timezone` also sets the zone retention counts its hours, days, weeks, months
+and years in (scheduled runs and `mongoshield prune` alike), so `daily: 7` keeps one
+backup per local day. Without it, periods are UTC days, as before. The library takes it
+as `shield.prune({ daily: 7, timeZone: "Europe/Berlin" })`.
+
 `verify: "deep"` decrypts every file, so it needs the private key on the
 machine running backups (`decryption.identityFiles`). The default `"fast"`
 check (sizes and SHA-256 of every file) needs no key, which is why it is the
@@ -315,6 +320,21 @@ only). Skipped runs never notify. Each request has a 10-second timeout and is
 retried once (after network errors, 5xx and 429); a broken target is logged and
 never fails the run. Messages contain no connection strings or secrets.
 
+Webhook and heartbeat URLs are credentials: anyone holding them can post to the
+channel or silence the alarm. Keep them out of the config file, especially a JSON config
+in a Kubernetes ConfigMap, by naming where they come from instead:
+
+```json
+{
+  "notify": [{ "type": "slack", "url": { "env": "SLACK_WEBHOOK_URL" } }],
+  "heartbeat": { "file": "/run/secrets/heartbeat-url" }
+}
+```
+
+`{ "env": "NAME" }` reads an environment variable, `{ "file": "/path" }` a file such as a
+mounted Secret (surrounding whitespace is ignored). `MONGOSHIELD_HEARTBEAT_URL` also
+sets `heartbeat`. In a TypeScript config, `process.env.NAME` works as well.
+
 **Slack** (`type: "slack"`): an [incoming webhook](https://api.slack.com/messaging/webhooks)
 URL; the message uses blocks (summary, backup id, sizes, verify, host, error and hint).
 
@@ -365,7 +385,8 @@ function isAuthentic(rawBody, headers, secret) {
   "storage": "s3://acme-backups/prod/",
   "lock": { "kind": "storage" },
   "backup": { "id": "2026-10-21T01-15-00Z_7f3a9c", "namespaces": 12, "documents": 1840211,
-              "bytesRaw": 2147483648, "bytesStored": 402653184, "durationMs": 140000, "attempts": 1 },
+              "bytesRaw": 2147483648, "bytesStored": 402653184, "durationMs": 140000, "attempts": 1,
+              "consistency": "converge" },
   "guard": { "ok": true, "action": "fail", "baselineId": "2026-10-20T01-15-02Z_19be04", "findings": [] },
   "verify": { "mode": "fast", "ok": true, "problems": [], "attempts": 1 },
   "prune": { "deletedBackups": 1, "deletedBytes": 398458880, "kept": 14, "outOfScope": 9 }
@@ -380,6 +401,15 @@ event `backup.checkpointed`; see docs/specs/PARTS-AND-RESUME.md). A failure adds
 a drill adds the measured restore time to `verify` (`"mode": "drill", …, "rtoMs": 42000`);
 a skipped run adds `lock.heldBy` (owner, host, expiry). Sections for steps that
 did not run are absent.
+
+`backup.consistency` is the consistency the backup really used. With the default
+(`auto`) it is `none` when converge was not available (for example a user with only the
+built-in `backup` role): the run still succeeds, but `backup.warnings` says why, and such
+a backup is no base for incrementals or point-in-time recovery. `backup.warnings` (absent
+when empty) lists every problem that did not fail the run, also when an incremental job
+keeps falling back to full backups because its time series collections outgrow the
+server's snapshot window (`MS_SNAPSHOT_TOO_OLD`). The one-line summary in chat
+notifications ends with the first warning.
 
 ## Heartbeats
 

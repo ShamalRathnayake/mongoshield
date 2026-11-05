@@ -82,9 +82,14 @@ export async function openConnection(
 
   const location = redactMongoUri(uri);
   const secrets = passwordsInUri(uri);
-  const created = createClient(uri, options, { location, secrets });
+  const context: ErrorContext = {
+    location,
+    secrets,
+    singleHostDiscovery: usesSingleHostDiscovery(uri),
+  };
+  const created = createClient(uri, options, context);
   try {
-    await verifyConnection(created, { location, secrets }, options.signal);
+    await verifyConnection(created, context, options.signal);
   } catch (error) {
     // The client may hold sockets or monitors even though the ping failed.
     await created.close().catch(() => undefined);
@@ -216,6 +221,12 @@ interface ErrorContext {
   readonly location: string;
   /** Strings that must never appear in a message (passwords from the URI). */
   readonly secrets: readonly string[];
+  /**
+   * True when the URI names one host and neither `replicaSet`, `directConnection` nor
+   * `loadBalanced` (see `usesSingleHostDiscovery`): a server selection timeout then
+   * often means the driver discovered replica set members it cannot reach.
+   */
+  readonly singleHostDiscovery?: boolean;
 }
 
 /**
@@ -224,7 +235,11 @@ interface ErrorContext {
  */
 export function toConnectionError(
   error: unknown,
-  context: { readonly location: string; readonly secrets?: readonly string[] },
+  context: {
+    readonly location: string;
+    readonly secrets?: readonly string[];
+    readonly singleHostDiscovery?: boolean;
+  },
 ): MongoShieldError {
   if (error instanceof MongoShieldError) return error;
   const secrets = context.secrets ?? [];
@@ -260,12 +275,35 @@ export function toConnectionError(
   return new MongoShieldError(
     "MS_CONNECTION_FAILED",
     `Could not connect to MongoDB at ${context.location}: ${detail}`,
-    { cause: error, hint: connectionHint(error) },
+    { cause: error, hint: connectionHint(error, context.singleHostDiscovery === true) },
   );
 }
 
+/**
+ * The extra advice for a server selection timeout on a single-host URI. MongoShield
+ * never adds `directConnection` by itself: against a replica set it changes which
+ * members are used (no failover, reads only from that host), which is the user's call.
+ */
+const DIRECT_CONNECTION_HINT =
+  "If this is a single-node replica set reached through Docker, port forwarding or an SSH tunnel, add `directConnection=true` to the connection string: without it the driver connects to the member names the replica set reports (often `localhost:27017` or a container name), which may not be reachable from here.";
+
+/**
+ * True for a `mongodb://` URI with exactly one host and none of `replicaSet`,
+ * `directConnection` or `loadBalanced`. The driver then discovers the topology, and
+ * when the host is a replica set member it switches to the member names in the set's
+ * configuration. Exported for tests.
+ */
+export function usesSingleHostDiscovery(uri: string): boolean {
+  const match = /^mongodb:\/\/(?:[^@/]*@)?([^/?]*)(?:\/[^?]*)?(?:\?(.*))?$/i.exec(uri.trim());
+  if (match === null) return false;
+  const hosts = (match[1] ?? "").split(",").filter((host) => host !== "");
+  if (hosts.length !== 1) return false;
+  const query = match[2] ?? "";
+  return !/(?:^|&)(?:replicaSet|directConnection|loadBalanced)=/i.test(query);
+}
+
 /** Picks the most useful hint by looking at the root cause of a connection failure. */
-function connectionHint(error: unknown): string {
+function connectionHint(error: unknown, singleHostDiscovery = false): string {
   const codes = errorCodesInChain(error);
   const text = messagesInChain(error).join(" ");
 
@@ -279,7 +317,9 @@ function connectionHint(error: unknown): string {
     return "Nothing is accepting connections at that address. Check that mongod is running and the host and port are correct.";
   }
   if (error instanceof MongoServerSelectionError) {
-    return "No suitable server responded in time. Check that the server is running, reachable from this machine (firewalls, Atlas IP access list) and that `replicaSet` matches the deployment.";
+    const hint =
+      "No suitable server responded in time. Check that the server is running, reachable from this machine (firewalls, Atlas IP access list) and that `replicaSet` matches the deployment.";
+    return singleHostDiscovery ? `${hint} ${DIRECT_CONNECTION_HINT}` : hint;
   }
   if (error instanceof MongoNetworkError) {
     return "The network connection to MongoDB failed. Check connectivity and firewalls between this machine and the server.";

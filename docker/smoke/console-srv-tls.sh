@@ -48,6 +48,9 @@ MONGO_IP="${SUBNET_PREFIX}.10"
 CONSOLE_IP="${SUBNET_PREFIX}.20"
 DNS="ms-${RUN_ID}-dns"
 MONGO="ms-${RUN_ID}-mongo"
+# A fixed server version, the same 8.0.13 the rest of CI uses: the floating mongo:8.0 tag
+# moved on 26 Oct 2026, and a new image must not change what CI tests overnight.
+MONGO_IMAGE="${MONGO_IMAGE:-mongo:8.0.13}"
 CONSOLE="ms-${RUN_ID}-console"
 VOLUME="ms-${RUN_ID}-data"
 # Pinned: a moving tag could change the resolver's behaviour under the test.
@@ -67,6 +70,11 @@ fail() {
   exit 1
 }
 cleanup() {
+  local status=$?
+  # On failure, MongoDB's own log says why it stopped.
+  if [[ "${status}" -ne 0 ]]; then
+    docker logs --tail 40 "${MONGO}" 2>&1 | sed 's/^/  mongo| /' >&2 || true
+  fi
   docker rm -f "${CONSOLE}" "${MONGO}" "${DNS}" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUME}" >/dev/null 2>&1 || true
   docker network rm "${NETWORK}" >/dev/null 2>&1 || true
@@ -138,8 +146,10 @@ cluster0                60   IN TXT "replicaSet=rs0&authSource=admin"
 EOF
 chmod 755 "${WORK}/dns" && chmod 644 "${WORK}/dns"/*
 docker network create --subnet "${SUBNET_PREFIX}.0/24" "${NETWORK}" >/dev/null
+# Bind mounts carry `z`: on hosts with SELinux enforcing (Fedora, RHEL) Docker then
+# relabels the files so the container may read them. Elsewhere it is ignored.
 docker run -d --name "${DNS}" --network "${NETWORK}" --ip "${DNS_IP}" \
-  -v "${WORK}/dns:/etc/coredns:ro" "${COREDNS_IMAGE}" -conf /etc/coredns/Corefile >/dev/null
+  -v "${WORK}/dns:/etc/coredns:ro,z" "${COREDNS_IMAGE}" -conf /etc/coredns/Corefile >/dev/null
 
 # ---------------------------------------------------------------------------
 # mongod with TLS required, a replica set and access control
@@ -149,7 +159,7 @@ log "Starting mongod 8 with requireTLS, replica set rs0 and a user in admin"
 # A replica set with access control needs a key file for its members (one member here);
 # it is generated inside the container with the strict mode mongod insists on.
 docker run -d --name "${MONGO}" --network "${NETWORK}" --ip "${MONGO_IP}" \
-  --hostname mongo-tls.example.test -v "${WORK}/certs:/certs:ro" --entrypoint bash mongo:8.0 -c '
+  --hostname mongo-tls.example.test -v "${WORK}/certs:/certs:ro,z" --entrypoint bash "${MONGO_IMAGE}" -c '
     head -c 756 /dev/urandom | base64 > /tmp/keyfile && chmod 400 /tmp/keyfile
     exec mongod --replSet rs0 --bind_ip_all --keyFile /tmp/keyfile \
       --tlsMode requireTLS --tlsCertificateKeyFile /certs/server.pem \
@@ -179,7 +189,7 @@ docker exec "${MONGO}" mongosh --quiet "${AUTH_URI}" --eval \
 
 log "Starting ${IMAGE} with --dns ${DNS_IP} and the CA at /certs/ca.pem"
 docker run -d --name "${CONSOLE}" --network "${NETWORK}" --ip "${CONSOLE_IP}" --dns "${DNS_IP}" \
-  -p "127.0.0.1:${PORT}:8080" -v "${VOLUME}:/data" -v "${WORK}/certs/ca.pem:/certs/ca.pem:ro" \
+  -p "127.0.0.1:${PORT}:8080" -v "${VOLUME}:/data" -v "${WORK}/certs/ca.pem:/certs/ca.pem:ro,z" \
   "${IMAGE}" >/dev/null
 for _ in $(seq 1 60); do curl -fsS "${BASE}/healthz" >/dev/null 2>&1 && break; sleep 1; done
 api POST /api/setup "$(jq -n --arg p "${ADMIN_PASSWORD}" '{username: "admin", password: $p}')" >/dev/null
@@ -195,8 +205,8 @@ log "1-2. SRV + TXT + TLS with the mounted CA (raw password with @ : /)"
 RESULT="$(check "${SRV_URI}")"
 expect_json "${RESULT}" '.ok == true and .topology == "replicaSet"' \
   "the SRV connection string should connect to the replica set"
-# The name comes from the cluster's DNS name. (`.test` is a reserved testing domain, so the
-# console proposes "not production" here; for Atlas and other real domains it proposes production.)
+# The name comes from the cluster's DNS name. (Only loopback names count as test databases,
+# so the console proposes production here, as it does for Atlas and every other remote host.)
 expect_json "${RESULT}" '.suggestedName == "cluster0"' "the name should come from the SRV host"
 printf '    ok: %s\n' "$(jq -c '{ok, topology, serverVersion, suggestedName}' <<<"${RESULT}")"
 

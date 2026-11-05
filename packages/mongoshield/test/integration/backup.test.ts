@@ -30,6 +30,7 @@ import { fileStorage } from "../../src/storage/file.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
 import type { StorageAdapter } from "../../src/storage/types.ts";
 import type { ProgressEvent } from "../../src/types.ts";
+import { TEST_COMPRESSION, TEST_EXTENSION, ZSTD_UNAVAILABLE } from "../helpers/compression.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import {
   backupContext,
@@ -145,7 +146,7 @@ describe("runBackup", () => {
     expect(await readManifest(storage, manifest.id)).toEqual(manifest);
     expect(manifest).toMatchObject({
       status: "complete",
-      compression: "zstd",
+      compression: TEST_COMPRESSION,
       encryption: null,
       labels: { env: "test" },
       // The default, "auto", is "converge" on a replica set whose user may open
@@ -325,21 +326,25 @@ describe("runBackup to file storage", () => {
 });
 
 describe("runBackup options", () => {
-  it.each(["zstd", "gzip", "none"] as const)(
-    "round-trips data with %s compression",
-    async (compression) => {
-      const storage = memoryStorage();
-      const ns = `${database}.types`;
-      const { manifest } = await runBackup(backupContext(client(), storage, { compression }), {
-        include: [ns],
-      });
-      expect(manifest.compression).toBe(compression);
-      const stored = await decodeDataFile(storage, manifest, ns);
-      expect(Buffer.concat(stored).equals(Buffer.concat(await sourceDocuments(client(), ns)))).toBe(
-        true,
-      );
-    },
-  );
+  // One test per compression (not `it.each`) so the zstd case alone is skipped on a
+  // Node.js without zstd (before 22.15 / 23.8), where backups refuse it.
+  for (const compression of ["zstd", "gzip", "none"] as const) {
+    it.skipIf(compression === "zstd" && ZSTD_UNAVAILABLE)(
+      `round-trips data with ${compression} compression`,
+      async () => {
+        const storage = memoryStorage();
+        const ns = `${database}.types`;
+        const { manifest } = await runBackup(backupContext(client(), storage, { compression }), {
+          include: [ns],
+        });
+        expect(manifest.compression).toBe(compression);
+        const stored = await decodeDataFile(storage, manifest, ns);
+        expect(
+          Buffer.concat(stored).equals(Buffer.concat(await sourceDocuments(client(), ns))),
+        ).toBe(true);
+      },
+    );
+  }
 
   it("honours include and exclude patterns", async () => {
     const { manifest } = await runBackup(backupContext(client(), memoryStorage()), {
@@ -403,7 +408,7 @@ describe("runBackup with snapshot consistency", () => {
     return {
       ...inner,
       async put(key, body, options) {
-        if (key.endsWith(`/${snapshotDb}/a.bson.zst`)) {
+        if (key.endsWith(`/${snapshotDb}/a.bson${TEST_EXTENSION}`)) {
           await client()
             .db(snapshotDb)
             .collection("b")

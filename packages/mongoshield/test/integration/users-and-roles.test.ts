@@ -19,6 +19,7 @@ import type { Manifest } from "../../src/format/manifest.ts";
 import type { LogFields, Logger } from "../../src/logger.ts";
 import { silentLogger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
+import { TEST_COMPRESSION, TEST_EXTENSION } from "../helpers/compression.ts";
 import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 
 const client = useMongoClient();
@@ -114,7 +115,7 @@ beforeAll(async () => {
       client: client(),
       storage,
       logger: recordingLogger(backupWarnings),
-      compression: "zstd",
+      compression: TEST_COMPRESSION,
       encryption: undefined,
     },
     { include: [`${source}.*`], consistency: "none", includeUsersAndRoles: true },
@@ -135,7 +136,7 @@ describe("backing up users and roles", () => {
     const roles = manifest.namespaces.find((entry) => entry.type === "roles");
     expect(users).toMatchObject({ ns: "admin.system.users", documents: 2 });
     expect(roles).toMatchObject({ ns: "admin.system.roles", documents: 2 });
-    expect(users?.files[0]?.key).toBe("admin/system.users.bson.zst");
+    expect(users?.files[0]?.key).toBe(`admin/system.users.bson${TEST_EXTENSION}`);
     expect(manifest.totals.namespaces).toBe(manifest.namespaces.length);
   });
 

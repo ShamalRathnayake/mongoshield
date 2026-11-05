@@ -94,6 +94,35 @@ describe("restore with verifyFirst", () => {
     expect(live).toEqual([{ _id: "live" }]);
   });
 
+  it("verifies first by default when drop mode would drop a collection holding data", async () => {
+    const storage = memoryStorage();
+    await backupWithDamagedLastPart(storage);
+    const target = uniqueDb("vf");
+    await client()
+      .db(target)
+      .collection("a")
+      .insertOne({ _id: "live" } as never);
+    // No verifyFirst given: the library turns it on because the live collection would be dropped.
+    const error = await failure(restore(storage, target, { mode: "drop" }));
+    expect(error.code).toBe("MS_INTEGRITY_FAILED");
+    expect(error.message).toContain("nothing was written");
+    const live = await client().db(target).collection("a").find().toArray();
+    expect(live).toEqual([{ _id: "live" }]);
+  });
+
+  it("can still be turned off for drop mode with verifyFirst: false", async () => {
+    const storage = memoryStorage();
+    await backupWithDamagedLastPart(storage);
+    const target = uniqueDb("vf");
+    await client()
+      .db(target)
+      .collection("a")
+      .insertOne({ _id: "live" } as never);
+    const error = await failure(restore(storage, target, { mode: "drop", verifyFirst: false }));
+    expect(error.code).toBe("MS_INTEGRITY_FAILED");
+    expect(error.message).not.toContain("nothing was written");
+  });
+
   it("reports every missing and damaged file at once", async () => {
     const storage = memoryStorage();
     const manifest = await backupWithDamagedLastPart(storage);

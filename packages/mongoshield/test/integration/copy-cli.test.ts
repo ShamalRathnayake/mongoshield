@@ -7,7 +7,7 @@
  * the command registry.
  */
 
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -56,6 +56,7 @@ async function run(
   command: CommandSpec,
   args: readonly string[],
   env: NodeJS.ProcessEnv = {},
+  cwd: string = workDir,
 ): Promise<CliRun> {
   const stdout = collector();
   const stderr = collector();
@@ -63,7 +64,7 @@ async function run(
     stdout: stdout.stream,
     stderr: stderr.stream,
     env,
-    cwd: workDir,
+    cwd,
     isTTY: false,
   };
   let out = new Output(io, { json: false, quiet: false, verbose: false, color: false });
@@ -395,6 +396,82 @@ describe("mongoshield copy --resume", () => {
     const left = await readdir(join(workDir, ".mongoshield"));
     expect(left.filter((name) => name.startsWith("copy-"))).toEqual([]);
   });
+
+  // Permission bits do not stop root, so these only mean something for other users.
+  const asRoot = process.getuid?.() === 0;
+
+  it.skipIf(asRoot)(
+    "keeps the checkpoint in the temp directory when the working directory is read-only",
+    async () => {
+      const source = uniqueDb("src");
+      const target = uniqueDb("dst");
+      await seed(source);
+      await client().db(target).collection("users").insertOne({ stale: true });
+      // Like the CLI image's root-owned /app, or readOnlyRootFilesystem.
+      const readOnly = join(workDir, `read-only-${target}`);
+      await mkdir(readOnly);
+      await chmod(readOnly, 0o555);
+      try {
+        const args = [
+          "--from",
+          mongoUri(),
+          "--to",
+          mongoUri(),
+          "--include",
+          `${source}.users`,
+          "--rename",
+          `${source}.*=${target}.*`,
+          "--drop",
+          "--yes",
+        ];
+        const result = await run(copyCommand, args, {}, readOnly);
+        expect(result.code).toBe(0);
+        expect(result.stderr).toContain("is not writable; the copy checkpoint goes to");
+        expect(result.stderr).toContain(tmpdir());
+        expect(await client().db(target).collection("users").countDocuments()).toBe(2);
+        // The working directory stayed untouched.
+        await expect(access(join(readOnly, ".mongoshield"))).rejects.toThrow();
+      } finally {
+        await chmod(readOnly, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(asRoot)(
+    "stops before dropping anything when the checkpoint cannot be written",
+    async () => {
+      const source = uniqueDb("src");
+      const target = uniqueDb("dst");
+      await seed(source);
+      await client().db(target).collection("users").insertOne({ stale: true });
+      const readOnly = join(workDir, `read-only-${target}`);
+      await mkdir(readOnly);
+      await chmod(readOnly, 0o555);
+      try {
+        const result = await run(copyCommand, [
+          "--from",
+          mongoUri(),
+          "--to",
+          mongoUri(),
+          "--include",
+          `${source}.users`,
+          "--rename",
+          `${source}.*=${target}.*`,
+          "--drop",
+          "--yes",
+          "--checkpoint",
+          join(readOnly, "copy.json"),
+        ]);
+        expect(result.code).not.toBe(0);
+        expect(result.stderr).toContain("Nothing was written to the target");
+        // The target collection was not dropped.
+        const users = client().db(target).collection("users");
+        expect(await users.countDocuments({ stale: true })).toBe(1);
+      } finally {
+        await chmod(readOnly, 0o755);
+      }
+    },
+  );
 
   it("puts the checkpoint where --checkpoint says, and refuses --resume without one", async () => {
     const source = uniqueDb("src");

@@ -42,7 +42,9 @@ const OPERATOR_NAMESPACE = "mongoshield-system";
 const RELEASE = "mongoshield-operator";
 const JOB_IMAGE = "mongoshield:e2e";
 const OPERATOR_IMAGE = "mongoshield-operator:e2e";
-const MONGO_IMAGE = "mongo:8.0";
+// A fixed version, the 8.0.13 the rest of CI tests: the floating mongo:8.0 tag moved on
+// 26 Oct 2026, and a new image must not change what the e2e test runs against overnight.
+const MONGO_IMAGE = process.env.MONGOSHIELD_E2E_MONGO_IMAGE ?? "mongo:8.0.13";
 
 /** Runs a command with inherited output; throws when it fails. */
 function run(
@@ -204,6 +206,10 @@ function installOperator(helm: string, context: string): void {
     "jobImage.pullPolicy=IfNotPresent",
     "--set",
     "logLevel=debug",
+    // The test reads /metrics through the API server's service proxy, which cannot send
+    // the bearer token; the token check itself is covered by src/http/server.test.ts.
+    "--set",
+    "metrics.auth.enabled=false",
     "--wait",
     "--timeout",
     "180s",

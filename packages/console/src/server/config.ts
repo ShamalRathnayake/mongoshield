@@ -22,9 +22,19 @@
  *   MONGOSHIELD_ADMIN_PASSWORD_FILE  a file containing it. Ignored once any user exists.
  *   MONGOSHIELD_DEFAULT_STORAGE      "false": do not create the "Local backups" storage
  *                                    location (<data>/backups) on a fresh data directory
- *   PORT / HOST                      listen address (default 8080 / 0.0.0.0)
+ *   PORT / HOST                      listen address (default 8080 / `::`, every IPv6 and IPv4
+ *                                    address; 0.0.0.0 where IPv6 is unavailable, see listen.ts)
  *   MONGOSHIELD_PUBLIC_URL           e.g. https://backups.example.com: used for the setup link,
- *                                    the origin check, and HSTS when it is https
+ *                                    the origin and Host checks, and HSTS when it is https;
+ *                                    a path (https://example.com/mongoshield) serves the
+ *                                    console under that sub-path
+ *   MONGOSHIELD_ALLOWED_HOSTS        more host names the console answers to, comma-separated
+ *                                    (`*.example.com` for subdomains, `*` for any; see hosts.ts)
+ *   MONGOSHIELD_TRUSTED_PROXIES      IPs or CIDR ranges of reverse proxies whose
+ *                                    X-Forwarded-For/-Host/-Proto headers are believed
+ *   MONGOSHIELD_ALLOW_UNSAFE_TARGETS "true": let admins point webhooks and storage endpoints
+ *                                    at metadata/link-local addresses and use the console's
+ *                                    own cloud identity with them (network-targets.ts)
  *   MONGOSHIELD_TRUST_PROXY_SECRET   enables reverse-proxy SSO (see auth.ts); ≥ 32 characters
  *   MONGOSHIELD_METRICS_TOKEN        enables GET /metrics with this bearer token
  *   MONGOSHIELD_COOKIE_SECURE        "false" to allow plain-HTTP sessions (evaluation only)
@@ -54,6 +64,8 @@ import { ROLES, type Role } from "../shared/api.ts";
 import { MIN_SECRET_LENGTH } from "../state/crypto.ts";
 import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../state/passwords.ts";
 import { USERNAME_PATTERN } from "./auth.ts";
+import type { ConsoleSettings } from "./context.ts";
+import { isValidAllowedHostEntry, parseTrustedProxies } from "./hosts.ts";
 import { isAllowedEndpoint, isLoopbackHost } from "./oidc/provider.ts";
 import { DEFAULT_CLOCK_SKEW_MS, DEFAULT_SCOPES, type OidcSettings } from "./oidc/settings.ts";
 
@@ -74,7 +86,11 @@ export interface ConsoleEnvironment {
   readonly defaultStorage: boolean;
   readonly dataDir: string;
   readonly port: number;
-  readonly host: string;
+  /**
+   * The address to listen on (HOST). Absent: the dual-stack default, `::` (IPv6 and
+   * IPv4), falling back to 0.0.0.0 where IPv6 is unavailable (listen.ts).
+   */
+  readonly host?: string;
   readonly publicUrl?: string;
   readonly proxySecret?: string;
   readonly metricsToken?: string;
@@ -83,7 +99,18 @@ export interface ConsoleEnvironment {
   readonly shutdownGraceMs: number;
   /** OIDC single sign-on, when MONGOSHIELD_OIDC_ISSUER and _CLIENT_ID are set. */
   readonly oidc?: OidcSettings;
+  /**
+   * Request-handling settings main.ts passes on to the console as they are: allowed
+   * hosts, trusted proxies and the unsafe-targets opt-out.
+   */
+  readonly security: SecuritySettings;
 }
+
+/** The {@link ConsoleSettings} read by {@link readSecuritySettings}. */
+export type SecuritySettings = Pick<
+  ConsoleSettings,
+  "allowedHosts" | "trustedProxies" | "allowUnsafeTargets"
+>;
 
 /** The first admin, provisioned from the environment (headless installs). */
 export interface InitialAdmin {
@@ -93,7 +120,7 @@ export interface InitialAdmin {
 
 /** Default setup window: 15 minutes, like Portainer's (which uses 5). */
 export const DEFAULT_SETUP_WINDOW_MINUTES = 15;
-/** Longest setup window: a day, the setup token's own lifetime. */
+/** Longest setup window: a day (the setup token printed at start expires sooner, see sessions.ts). */
 const MAX_SETUP_WINDOW_MINUTES = 24 * 60;
 
 /** A configuration problem, explained for the operator. */
@@ -140,7 +167,9 @@ export function readEnvironment(env: NodeJS.ProcessEnv): ConsoleEnvironment {
   const oidc = readOidcEnvironment(env, publicUrl?.replace(/\/+$/, ""), cookieSecure);
 
   const initialAdmin = readInitialAdmin(env);
+  const host = optional(env.HOST);
   return {
+    security: readSecuritySettings(env),
     ...(secret === undefined ? {} : { secret: secret.value }),
     secretSource: secret?.source ?? "generated",
     setupWindowMs: readSetupWindowMinutes(env) * 60_000,
@@ -148,7 +177,7 @@ export function readEnvironment(env: NodeJS.ProcessEnv): ConsoleEnvironment {
     ...(initialAdmin === undefined ? {} : { initialAdmin }),
     dataDir: optional(env.MONGOSHIELD_DATA_DIR) ?? "/data",
     port,
-    host: optional(env.HOST) ?? "0.0.0.0",
+    ...(host === undefined ? {} : { host }),
     cookieSecure,
     shutdownGraceMs: grace * 1000,
     ...(oidc === undefined ? {} : { oidc }),
@@ -260,6 +289,39 @@ function readInitialAdmin(env: NodeJS.ProcessEnv): InitialAdmin | undefined {
     );
   }
   return { username, password };
+}
+
+/**
+ * MONGOSHIELD_ALLOWED_HOSTS, MONGOSHIELD_TRUSTED_PROXIES and MONGOSHIELD_ALLOW_UNSAFE_TARGETS.
+ * Lists are separated by commas or spaces. A malformed entry stops the start: a typo
+ * in a proxy range would otherwise silently trust nobody (or the wrong peer).
+ */
+export function readSecuritySettings(env: NodeJS.ProcessEnv): SecuritySettings {
+  const allowedHosts = listOf(env.MONGOSHIELD_ALLOWED_HOSTS).map((entry) => entry.toLowerCase());
+  const badHost = allowedHosts.find((entry) => !isValidAllowedHostEntry(entry));
+  if (badHost !== undefined) {
+    throw new EnvironmentError(
+      `MONGOSHIELD_ALLOWED_HOSTS: "${badHost}" is not a host name (use names such as backups.example.com, *.example.com, or *).`,
+    );
+  }
+  const trustedProxies = listOf(env.MONGOSHIELD_TRUSTED_PROXIES);
+  const parsed = parseTrustedProxies(trustedProxies);
+  if (!parsed.ok) {
+    throw new EnvironmentError(
+      `MONGOSHIELD_TRUSTED_PROXIES: "${parsed.bad}" is not an IP address or CIDR range (e.g. 10.0.0.5 or 10.0.0.0/8).`,
+    );
+  }
+  const allowUnsafeTargets = readBoolean(env, "MONGOSHIELD_ALLOW_UNSAFE_TARGETS", false);
+  return {
+    ...(allowedHosts.length === 0 ? {} : { allowedHosts }),
+    ...(trustedProxies.length === 0 ? {} : { trustedProxies }),
+    ...(allowUnsafeTargets ? { allowUnsafeTargets } : {}),
+  };
+}
+
+/** A comma- or space-separated list variable, without empty entries. */
+function listOf(value: string | undefined): string[] {
+  return (value ?? "").split(/[\s,]+/).filter((entry) => entry !== "");
 }
 
 /** A "true"/"false" variable (case-insensitive), with a default when unset. */
@@ -383,7 +445,8 @@ function checkRedirectUrl(value: string, cookieSecure: boolean): void {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && plainHttpAllowed)) {
     throw new EnvironmentError("MONGOSHIELD_OIDC_REDIRECT_URL must be an https URL.");
   }
-  if (url.pathname !== "/api/oidc/callback") {
+  // A console served under a sub-path (https://example.com/mongoshield) has its callback there too.
+  if (!url.pathname.endsWith("/api/oidc/callback")) {
     throw new EnvironmentError(
       "MONGOSHIELD_OIDC_REDIRECT_URL must end in /api/oidc/callback, e.g. https://backups.example.com/api/oidc/callback.",
     );

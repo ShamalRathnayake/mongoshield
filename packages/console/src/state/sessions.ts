@@ -17,9 +17,14 @@
  *   cannot be computed without MONGOSHIELD_SECRET.
  *
  * Setup token
- * - Single-use, valid 24 hours, stored hashed. A fresh one is issued at every
+ * - Single-use, valid 1 hour, stored hashed. A fresh one is issued at every
  *   start until the first admin exists (the old one cannot be printed again,
- *   because only its hash was kept).
+ *   because only its hash was kept), so an expired token only means a restart.
+ * - main.ts prints it to stdout as the setup link, which is how a `docker run`
+ *   operator finds it. Stdout usually ends up in `docker logs` and in log
+ *   aggregators, readable by more people than the console's admins: that is why the
+ *   token is short-lived and single-use, and why MONGOSHIELD_ADMIN_* (no token at
+ *   all) is the better choice for installs whose logs are shipped elsewhere.
  */
 
 import { constantTimeEqual, hashToken, hmac, randomToken } from "./crypto.ts";
@@ -32,8 +37,11 @@ export const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 export const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 /** `lastSeenAt` is written back at most this often (5 minutes). */
 export const TOUCH_INTERVAL_MS = 5 * 60 * 1000;
-/** The setup token is valid for 24 hours. */
-export const SETUP_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * The setup token is valid for 1 hour: long enough to open the link from the log, short
+ * enough that a copy in a log aggregator is soon useless (see the file header).
+ */
+export const SETUP_TOKEN_TTL_MS = 60 * 60 * 1000;
 
 /** A session found for a cookie, with its user. */
 export interface ActiveSession {

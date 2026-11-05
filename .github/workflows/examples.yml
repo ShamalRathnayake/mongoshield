@@ -37,8 +37,10 @@ jobs:
     name: Helm chart and manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5 # v5: current major
-      - uses: azure/setup-helm@v4 # v4: current major
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
 
       # Lint, then render with defaults and with every optional feature switched on,
       # so template branches that are off by default are exercised too.
@@ -71,7 +73,7 @@ jobs:
 
       # deploy/operator/operator.yaml is rendered from the operator chart; fail if it
       # was not regenerated after a chart change. (The script needs only Node and helm.)
-      - uses: actions/setup-node@v7 # v5: current major
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           # setup-node v5 caches the package manager named in package.json (pnpm),
@@ -100,7 +102,9 @@ jobs:
     name: Shell scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5 # v5: current major
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # shellcheck is preinstalled on GitHub's Ubuntu runners.
       - run: shellcheck docker/install-sdks.sh action/run.sh
 
@@ -108,7 +112,9 @@ jobs:
     name: Example workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5 # v5: current major
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # The copy-paste GitHub Actions templates in examples/github-actions are not run
       # here (they need a real cluster and bucket), so lint them instead: actionlint
       # checks workflow syntax, expressions, action inputs and, through the
@@ -123,7 +129,9 @@ jobs:
     name: Compose example
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5 # v5: current major
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # Parses and validates the Compose file without starting anything.
       - run: docker compose -f examples/docker-compose/compose.yaml config --quiet
       - run: docker compose -f examples/console-compose/compose.yaml config --quiet

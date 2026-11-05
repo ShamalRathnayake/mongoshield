@@ -7,11 +7,18 @@
  * run (no privileges needed), so describing a deployment never fails for lack of roles.
  * On Atlas, one more read-only command tells a shared tier (Free, Flex) from a dedicated
  * cluster (see atlas.ts); its failure never fails the description either.
+ *
+ * Replica sets get a second identity, `instanceId`, from the set's own
+ * `settings.replicaSetId` (an ObjectId the server generates when the set is initiated).
+ * Reading it needs the `clusterMonitor` role (`replSetGetConfig`) or read access to
+ * `local.system.replset`; users without either get no `instanceId`, and two sets with the
+ * same name then look like one deployment, as they did before (see `sameDeployment`).
  */
 
 import { createHash } from "node:crypto";
-import { type Document, type MongoClient, MongoServerError } from "mongodb";
+import { type Document, type MongoClient, MongoServerError, ObjectId } from "mongodb";
 import { type AtlasInfo, detectAtlas } from "./atlas.ts";
+import { type CompatibleEngine, detectCompatibleEngine } from "./engine.ts";
 
 /** The shape of the deployment, as seen from the connected server. */
 export type Topology = "standalone" | "replicaSet" | "sharded" | "unknown";
@@ -25,8 +32,21 @@ export interface DeploymentInfo {
    * A stable, non-secret identifier for the deployment: 32 hex characters derived with
    * SHA-256 from the replica set name (or cluster id / host list). Used to group backups
    * by source without storing host names or credentials in manifests.
+   *
+   * Two replica sets with the same name (`rs0` is the default everywhere) share it; use
+   * `sameDeployment`, which also compares `instanceId`, to tell deployments apart.
    */
   readonly clusterId: string;
+  /**
+   * A second, cluster-unique identifier: 32 hex characters derived with SHA-256 from the
+   * replica set's `settings.replicaSetId`, which the server generates when the set is
+   * initiated and which a set rebuilt under the same name does not share. Only replica
+   * sets have one, and only when the user may read the set's configuration
+   * (`replSetGetConfig`, part of the `clusterMonitor` role, or `local.system.replset`).
+   * Absent otherwise, on Atlas (whose generated set names are unique already), and in
+   * manifests written before MongoShield recorded it.
+   */
+  readonly instanceId?: string;
   /** Change streams need the oplog, which only replica sets and sharded clusters have. */
   readonly supportsChangeStreams: boolean;
   /** `readConcern: "snapshot"` outside transactions needs MongoDB 5.0+ on a replica set or sharded cluster. */
@@ -38,6 +58,11 @@ export interface DeploymentInfo {
    * The engines adapt to shared tiers (Free, Flex) with it. Absent elsewhere.
    */
   readonly atlas?: AtlasInfo;
+  /**
+   * Set when the server is a MongoDB-compatible database rather than MongoDB itself
+   * (Amazon DocumentDB, Azure Cosmos DB, FerretDB; see engine.ts). Absent for MongoDB.
+   */
+  readonly engine?: CompatibleEngine;
 }
 
 /** MongoDB's documented maximum BSON document size, used if `hello` omits it. */
@@ -63,11 +88,17 @@ export async function describeDeployment(client: MongoClient): Promise<Deploymen
   const serverVersion = typeof buildInfo.version === "string" ? buildInfo.version : "0.0.0";
   const hasOplog = topology === "replicaSet" || topology === "sharded";
   const atlas = await detectAtlas(client, hello);
+  // Not on Atlas: its replica set names are generated per cluster (`atlas-<id>-shard-0`),
+  // so they are unique already, and Free/Flex clusters refuse replSetGetConfig anyway.
+  const instanceId =
+    topology === "replicaSet" && atlas === undefined ? await deriveInstanceId(client) : undefined;
+  const engine = detectCompatibleEngine(client, buildInfo);
 
   return {
     topology,
     serverVersion,
     clusterId: await deriveClusterId(client, topology, hello),
+    ...(instanceId === undefined ? {} : { instanceId }),
     supportsChangeStreams: hasOplog,
     supportsSnapshotReads: hasOplog && majorVersion(serverVersion) >= SNAPSHOT_READS_MIN_MAJOR,
     maxBsonObjectSize:
@@ -75,6 +106,7 @@ export async function describeDeployment(client: MongoClient): Promise<Deploymen
         ? hello.maxBsonObjectSize
         : DEFAULT_MAX_BSON_OBJECT_SIZE,
     ...(atlas === undefined ? {} : { atlas }),
+    ...(engine === undefined ? {} : { engine }),
   };
 }
 
@@ -131,6 +163,81 @@ async function deriveClusterId(
     if (shardedClusterId !== undefined) return hashId(`sharded:${shardedClusterId}`);
   }
   return hashId(`${topology}:${seedHosts(client)}`);
+}
+
+/**
+ * Derives `instanceId` from the replica set's `settings.replicaSetId`, or `undefined`
+ * when the user may not read the set's configuration. Two ways, cheapest first:
+ *   1. `replSetGetConfig` (the `clusterMonitor` role has it; Atlas Free/Flex refuse it);
+ *   2. the same document straight from `local.system.replset` (users who may read the
+ *      `local` database, e.g. with the `backup` role on some versions).
+ * Any failure means "unknown": describing a deployment never fails for lack of roles.
+ */
+async function deriveInstanceId(client: MongoClient): Promise<string | undefined> {
+  const fromCommand = await readReplicaSetIdWith(async () => {
+    const reply = await client.db("admin").command({ replSetGetConfig: 1 });
+    return asDocument(reply.config);
+  });
+  const replicaSetId =
+    fromCommand ??
+    (await readReplicaSetIdWith(async () => {
+      const config = await client
+        .db("local")
+        .collection("system.replset")
+        .findOne({}, { projection: { "settings.replicaSetId": 1 } });
+      return config ?? undefined;
+    }));
+  return replicaSetId === undefined ? undefined : hashId(`replicaSetId:${replicaSetId}`);
+}
+
+/**
+ * Runs `read` (which returns a replica set configuration document) and returns its
+ * `settings.replicaSetId` as 24 hex characters, or `undefined` on any failure.
+ */
+async function readReplicaSetIdWith(
+  read: () => Promise<Document | undefined>,
+): Promise<string | undefined> {
+  try {
+    const config = await read();
+    const replicaSetId: unknown = asDocument(config?.settings)?.replicaSetId;
+    if (replicaSetId instanceof ObjectId) return replicaSetId.toHexString();
+    return undefined;
+  } catch {
+    // Not authorized, refused by Atlas, or an old server: the set name has to do.
+    return undefined;
+  }
+}
+
+function asDocument(value: unknown): Document | undefined {
+  return typeof value === "object" && value !== null ? value : undefined;
+}
+
+/**
+ * True when two descriptions (a live deployment, a manifest's or a checkpoint's
+ * `source`) name the same deployment: the same `clusterId`, and, when BOTH record an
+ * `instanceId`, the same `instanceId`. A side without `instanceId` (an older manifest,
+ * a user who may not read the replica set configuration) matches on `clusterId` alone,
+ * as every release before `instanceId` did, so existing backups keep their chains.
+ * Two missing `clusterId`s are not the same deployment.
+ */
+export function sameDeployment(
+  a: { readonly clusterId?: string | undefined; readonly instanceId?: string | undefined },
+  b: { readonly clusterId?: string | undefined; readonly instanceId?: string | undefined },
+): boolean {
+  if (a.clusterId === undefined || a.clusterId !== b.clusterId) return false;
+  if (a.instanceId === undefined || b.instanceId === undefined) return true;
+  return a.instanceId === b.instanceId;
+}
+
+/**
+ * A warning for replica sets identified by their name alone (no `instanceId`), or
+ * `undefined`. Atlas is left out: its replica set names are generated per cluster
+ * (`atlas-<id>-shard-0`), so two Atlas clusters never share one.
+ */
+export function deploymentIdentityWarning(deployment: DeploymentInfo): string | undefined {
+  if (deployment.topology !== "replicaSet" || deployment.instanceId !== undefined) return undefined;
+  if (deployment.atlas !== undefined) return undefined;
+  return "The replica set is identified by its name only: the MongoDB user may not read its configuration (replSetGetConfig), so another replica set with the same name writing to the same storage would look like the same deployment to incrementals, resume and the backup guard. Grant the clusterMonitor role to tell them apart, or keep each deployment's backups in their own storage location.";
 }
 
 /** Reads `config.version.clusterId`; returns undefined when the user lacks access. */

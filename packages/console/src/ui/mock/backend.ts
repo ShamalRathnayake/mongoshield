@@ -24,6 +24,7 @@ import type {
   ConfigImportRequest,
   ConfigImportResult,
   ConnectionView,
+  ContainerEnvironment,
   DocumentPage,
   JobEvent,
   JobKind,
@@ -54,6 +55,7 @@ import {
   CONTAINER_HOST,
   throughContainerHost,
 } from "../../shared/connection-string.ts";
+import { localhostIsContainer, NOT_IN_CONTAINER, usableHostAlias } from "../../shared/container.ts";
 import type {
   EventSourceFactory,
   FetchLike,
@@ -124,6 +126,7 @@ const ROUTE_ROLES: { readonly [Route in RouteKey]: Role | "public" } = {
   "POST /api/users": "admin",
   "PUT /api/users/:id": "admin",
   "DELETE /api/users/:id": "admin",
+  "POST /api/users/:id/sign-out": "admin",
   "GET /api/connections": "viewer",
   "POST /api/connections": "admin",
   "PUT /api/connections/:id": "admin",
@@ -203,11 +206,24 @@ export interface MockBackendOptions {
   /** Start like a brand-new console: no connections, plans or backups (`?fresh=1`). */
   readonly fresh?: boolean;
   /**
-   * Behave like a console running in a container (default false): the session says so,
-   * and `localhost` strings are reached through host.docker.internal, as on the server.
+   * Behave like a console running in Docker Desktop (default false): the session says
+   * so, and `localhost` strings are reached through host.docker.internal, as on the
+   * server. Shorthand for a `container` where host.docker.internal resolves.
    */
   readonly inContainer?: boolean;
+  /**
+   * The container environment to report (wins over `inContainer`), e.g. Linux Docker
+   * Engine where host.docker.internal does not resolve, Podman or Kubernetes.
+   */
+  readonly container?: ContainerEnvironment;
 }
+
+/** Docker Desktop with host.docker.internal resolving: what `inContainer: true` means. */
+const MOCK_DOCKER_DESKTOP: ContainerEnvironment = {
+  kind: "docker-desktop",
+  hostAlias: CONTAINER_HOST,
+  hostAliasResolves: true,
+};
 
 /** A running mock server. */
 export interface MockBackend {
@@ -261,7 +277,8 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
   )?.id;
   let csrfToken = randomToken();
   let nextId = 2000;
-  const inContainer = options.inContainer ?? false;
+  const container =
+    options.container ?? (options.inContainer === true ? MOCK_DOCKER_DESKTOP : NOT_IN_CONTAINER);
   const authMethods = options.authMethods ?? ["password"];
   // SSO-only accounts are possible only when some single sign-on method is enabled.
   const ssoEnabled = authMethods.includes("oidc") || authMethods.includes("proxy");
@@ -295,7 +312,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
               ...(setupWindowEndsAt === undefined ? {} : { windowEndsAt: setupWindowEndsAt }),
             },
           }),
-      ...(user === undefined ? {} : { user, csrfToken, inContainer }),
+      ...(user === undefined ? {} : { user, csrfToken, container }),
     };
   };
 
@@ -504,7 +521,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
         body: undefined,
         user: currentUser(),
       }),
-    inContainer,
+    container,
   });
 
   const backupNamespaces = (backup: BackupDetail | undefined) =>
@@ -633,6 +650,14 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       audit("user.delete", "success", params.id);
       return { ok: true };
     },
+    "POST /api/users/:id/sign-out": ({ params }) => {
+      // The mock keeps no per-user sessions: there is nothing to end but the audit entry.
+      const user = data.users.find((candidate) => candidate.id === params.id);
+      if (user === undefined)
+        throw new MockHttpError(404, "CONSOLE_NOT_FOUND", "The user was not found.");
+      audit("user.sign_out", "success", user.username);
+      return { revoked: 0 };
+    },
 
     "GET /api/connections": () => data.connections.map(toConnectionView),
     "POST /api/connections": ({ body }) => {
@@ -694,8 +719,12 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
       const connection = findConnection(params.id);
       // In a container, a localhost string is refused but the host machine answers: the
       // connection is stored with the address that works, as on the real server.
-      const onHost = inContainer ? throughContainerHost(connection.uri) : undefined;
-      if (onHost !== undefined) {
+      const hostAlias = localhostIsContainer(container.kind)
+        ? usableHostAlias(container)
+        : undefined;
+      const onHost =
+        hostAlias === undefined ? undefined : throughContainerHost(connection.uri, hostAlias);
+      if (hostAlias !== undefined && onHost !== undefined) {
         const from = analyzeConnectionString(connection.uri).hosts.join(", ");
         connection.uri = onHost;
         audit("connection.update", "success", connection.name);
@@ -705,7 +734,7 @@ export function createMockBackend(options: MockBackendOptions = {}): MockBackend
           serverVersion: connection.serverVersion,
           missingBackupPrivileges: connection.missingBackupPrivileges,
           missingRestorePrivileges: connection.missingRestorePrivileges,
-          reachedThrough: { from, to: CONTAINER_HOST },
+          reachedThrough: { from, to: hostAlias },
         };
       }
       if (connection.uri.includes("staging-db.internal")) {

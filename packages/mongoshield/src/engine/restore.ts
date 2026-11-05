@@ -36,6 +36,7 @@ import {
   MongoServerError,
   type WriteConcernSettings,
 } from "mongodb";
+import { withUseLease } from "../catalog/use-leases.ts";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { isAuthzEntry, type Manifest, type StoredFile } from "../format/manifest.ts";
 import type { CollectionMetadata } from "../format/metadata.ts";
@@ -54,7 +55,7 @@ import {
 import { withEngineSpan } from "../telemetry/engine-spans.ts";
 import { ATTRIBUTES, ENGINE_SPANS } from "../telemetry/names.ts";
 import type { Telemetry } from "../telemetry/telemetry.ts";
-import type { RestoreOptions, RestoreResult, SearchIndexRef } from "../types.ts";
+import type { RestoreOptions, RestorePlan, RestoreResult, SearchIndexRef } from "../types.ts";
 import { adaptRestoreConcurrency, assertUsersAndRolesRestoreSupported } from "./atlas-adapt.ts";
 import type { RestoreContext } from "./context.ts";
 import { applyIndexChanges } from "./converge-indexes.ts";
@@ -163,6 +164,8 @@ interface RestoreRun {
     readonly notCreated: SearchIndexRef[];
   };
   documentsRestored: number;
+  /** Documents skipped because their `_id` was already in the target (insert mode). */
+  documentsSkipped: number;
   /** Change events read by the replay (converge windows and incremental chains). */
   eventsReplayed: number;
 }
@@ -193,8 +196,42 @@ export async function runRestore(
 
   // 1. Plan (read-only).
   const detailed = await buildRestorePlan(context, options);
+  assertNoConflicts(detailed.plan);
+
+  const restore = () =>
+    restorePlanned(context, options, detailed, {
+      startedAt,
+      requestedParallelism,
+      requestedInsertWorkers,
+    });
+  if (options.dryRun === true) return restore();
+  // While it reads the backup, prune must leave it (and, by the chain rule, its
+  // parents) alone: see catalog/use-leases.ts.
+  return withUseLease(
+    context.storage,
+    [detailed.plan.backupId],
+    "restore",
+    { logger: context.logger },
+    restore,
+  );
+}
+
+/** Where `runRestore` started, and the concurrency it was asked for. */
+interface RestoreStart {
+  readonly startedAt: number;
+  readonly requestedParallelism: number;
+  readonly requestedInsertWorkers: number;
+}
+
+/** Steps 2 to 5 of `runRestore` (see the file header), once the plan is known. */
+async function restorePlanned(
+  context: RestoreContext,
+  options: RestoreOptions,
+  detailed: DetailedRestorePlan,
+  start: RestoreStart,
+): Promise<RestoreResult> {
   const { plan, manifest } = detailed;
-  assertNoConflicts(plan);
+  const { startedAt, requestedParallelism, requestedInsertWorkers } = start;
 
   // The target: Atlas refuses users and roles, and its Free/Flex tiers get gentler
   // concurrency unless the caller chose it (atlas-adapt.ts).
@@ -247,7 +284,10 @@ export async function runRestore(
   );
   // verifyFirst: every data file to be read is checksummed now, so a file damaged
   // late in a large collection cannot stop the restore halfway (restore-verify-first.ts).
-  if (options.verifyFirst === true) {
+  // Unset, it is on whenever the restore drops a collection that holds data: a part's
+  // checksum is only known at the end of the part, and by then the live collection
+  // would already be gone, replaced by a partial one.
+  if (options.verifyFirst ?? dropsExistingData(plan)) {
     // Each backup of a chain through its own source.
     for (const [backupId, backupSource] of sources) {
       const files = filesToRead(items, replay, backupId);
@@ -280,6 +320,7 @@ export async function runRestore(
     inProgress: new Set(),
     searchIndexes: { created: [], notCreated: [] },
     documentsRestored: 0,
+    documentsSkipped: 0,
     eventsReplayed: 0,
   };
   context.logger.info("Restoring backup", {
@@ -336,6 +377,7 @@ export async function runRestore(
     plan,
     dryRun: false,
     documentsRestored: run.documentsRestored,
+    ...(run.documentsSkipped === 0 ? {} : { documentsSkipped: run.documentsSkipped }),
     durationMs,
     ...(plan.chain === undefined ? {} : { eventsReplayed: run.eventsReplayed }),
     ...(created.length + notCreated.length === 0 ? {} : { searchIndexes: { created, notCreated } }),
@@ -437,6 +479,18 @@ async function readLatestMetadata(
     if (metadata.type === "collection") latest.set(to, metadata);
   }
   return latest;
+}
+
+/**
+ * True when the plan drops a target collection that holds documents (or may: an
+ * uncountable target counts as non-empty). `verifyFirst` defaults to on for such
+ * restores, because a damaged part would otherwise be found only after the live
+ * collection was dropped.
+ */
+export function dropsExistingData(plan: RestorePlan): boolean {
+  return plan.entries.some(
+    (entry) => entry.action === "drop-and-create" && entry.existingDocuments !== 0,
+  );
 }
 
 /**
@@ -769,8 +823,10 @@ async function loadCollection(
     writeConcern: run.writeConcern,
     signal,
     onProgress: (documents, bytes) => run.tracker.updateNamespace(entry.to, documents, bytes),
+    logger: run.logger,
   });
   run.documentsRestored += loaded.documents;
+  run.documentsSkipped += loaded.duplicatesSkipped;
   if (loaded.documentsRead !== source.documents) {
     // The checksum matched, so the file is what the backup wrote; a different count
     // means the manifest itself is inconsistent. Worth knowing, not worth failing.

@@ -8,6 +8,7 @@ import {
   replaceStoredFile,
   writeTestBackup,
 } from "../../test/helpers/backup-fixtures.ts";
+import { isZstdAvailable } from "../compression/index.ts";
 import { generateIdentity } from "../crypto/index.ts";
 import { type ErrorCode, isMongoShieldError } from "../errors.ts";
 import type { Manifest, NamespaceEntry } from "../format/manifest.ts";
@@ -61,18 +62,22 @@ async function expectCode(promise: Promise<unknown>, code: ErrorCode): Promise<v
 }
 
 describe("openDocumentStream", () => {
-  it.each(["zstd", "gzip", "none"] as const)(
-    "reads back every document of a %s backup byte for byte",
-    async (compression) => {
-      const storage = memoryStorage();
-      const manifest = await writeTestBackup(storage, {
-        namespaces: [{ ns: "app.items", documents }],
-        compression,
-      });
-      const read = await readAll(storage, manifest);
-      expect(read.map((raw) => BSON.deserialize(raw))).toEqual(documents);
-    },
-  );
+  // One test per compression (not `it.each`) so the zstd case alone is skipped on a
+  // Node.js without zstd (before 22.15 / 23.8), where it cannot be written at all.
+  for (const compression of ["zstd", "gzip", "none"] as const) {
+    it.skipIf(compression === "zstd" && !isZstdAvailable())(
+      `reads back every document of a ${compression} backup byte for byte`,
+      async () => {
+        const storage = memoryStorage();
+        const manifest = await writeTestBackup(storage, {
+          namespaces: [{ ns: "app.items", documents }],
+          compression,
+        });
+        const read = await readAll(storage, manifest);
+        expect(read.map((raw) => BSON.deserialize(raw))).toEqual(documents);
+      },
+    );
+  }
 
   it("reads a collection split into several parts in order", async () => {
     const storage = memoryStorage();
@@ -122,31 +127,36 @@ describe("openDocumentStream", () => {
     await expectCode(readAll(storage, manifest, { passphrase: "wrong" }), "MS_DECRYPTION_FAILED");
   });
 
-  it.each([
+  // As above, the zstd cases are skipped on a Node.js without zstd; the gzip ones
+  // cover the same paths (encrypted and not) there.
+  for (const [compression, encryption] of [
     ["zstd", undefined],
     ["gzip", undefined],
     ["none", undefined],
     ["zstd", "passphrase"],
-  ] as const)(
-    "reports a flipped byte in a %s file (encryption: %s) as MS_INTEGRITY_FAILED",
-    async (compression, encryption) => {
-      const storage = memoryStorage();
-      const manifest = await writeTestBackup(storage, {
-        namespaces: [{ ns: "app.items", documents }],
-        compression,
-        ...(encryption ? { passphrase: "secret" } : {}),
-      });
-      const file = onlyNamespace(manifest).files[0];
-      if (file === undefined) throw new Error("no file");
-      await replaceStoredFile(storage, manifest, file.key, (bytes) =>
-        flipByte(bytes, Math.floor(bytes.length / 2)),
-      );
-      await expectCode(
-        readAll(storage, manifest, encryption ? { passphrase: "secret" } : undefined),
-        "MS_INTEGRITY_FAILED",
-      );
-    },
-  );
+    ["gzip", "passphrase"],
+  ] as const) {
+    it.skipIf(compression === "zstd" && !isZstdAvailable())(
+      `reports a flipped byte in a ${compression} file (encryption: ${String(encryption)}) as MS_INTEGRITY_FAILED`,
+      async () => {
+        const storage = memoryStorage();
+        const manifest = await writeTestBackup(storage, {
+          namespaces: [{ ns: "app.items", documents }],
+          compression,
+          ...(encryption ? { passphrase: "secret" } : {}),
+        });
+        const file = onlyNamespace(manifest).files[0];
+        if (file === undefined) throw new Error("no file");
+        await replaceStoredFile(storage, manifest, file.key, (bytes) =>
+          flipByte(bytes, Math.floor(bytes.length / 2)),
+        );
+        await expectCode(
+          readAll(storage, manifest, encryption ? { passphrase: "secret" } : undefined),
+          "MS_INTEGRITY_FAILED",
+        );
+      },
+    );
+  }
 
   it("reports a truncated file as MS_INTEGRITY_FAILED", async () => {
     const storage = memoryStorage();

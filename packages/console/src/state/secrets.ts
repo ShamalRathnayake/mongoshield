@@ -104,3 +104,50 @@ export function sealNotifyUrl(store: StateStore, planId: string, url: string): s
 export function openNotifyUrl(store: StateStore, planId: string, sealed: string): string {
   return store.decrypt(sealed, planNotifyContext(planId));
 }
+
+/**
+ * Every secret the state holds, decrypted, for scrubbing error messages and job logs
+ * (defense in depth: the library and SDKs should never put a secret in a message, but
+ * if one ever does, it is replaced with `***` before it leaves the server).
+ *
+ * Connection strings (and their passwords alone, raw and percent-decoded), storage
+ * credential values (keys, SAS tokens, SFTP keys and passphrases), plan passphrases
+ * and managed private keys, and notification URLs (which act as passwords). A secret
+ * that cannot be decrypted cannot leak either and is skipped.
+ */
+export function everyStoredSecret(store: StateStore): string[] {
+  const secrets: string[] = [];
+  const collect = (read: () => readonly (string | undefined)[]): void => {
+    try {
+      for (const value of read()) if (value !== undefined && value !== "") secrets.push(value);
+    } catch {
+      // Unreadable: skipped (see above).
+    }
+  };
+  const state = store.current;
+  for (const connection of state.connections) {
+    collect(() => {
+      const uri = openConnectionUri(store, connection);
+      // The password alone, in case a message quotes it outside the URI.
+      const password = /^mongodb(?:\+srv)?:\/\/[^:@/]*:([^@/]+)@/i.exec(uri)?.[1];
+      return password === undefined ? [uri] : [uri, password, safeDecode(password)];
+    });
+  }
+  for (const storage of state.storage) {
+    collect(() => Object.values(openStorageCredentials(store, storage)));
+  }
+  for (const plan of state.plans) {
+    collect(() => [openPlanPassphrase(store, plan), openPlanIdentity(store, plan)]);
+    collect(() => plan.notify.map((target) => openNotifyUrl(store, plan.id, target.url)));
+  }
+  return secrets;
+}
+
+/** `decodeURIComponent`, or the input when it is not valid percent-encoding. */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}

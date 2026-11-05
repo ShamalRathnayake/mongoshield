@@ -212,6 +212,77 @@ describe("JobRunner", () => {
     });
   });
 
+  it("saves a restore's unfinished namespaces, so a crash still says what may be partial", async () => {
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = await runner.start({
+      kind: "restore",
+      lane: "connection:r",
+      startedBy: "ada",
+      run: async (context) => {
+        context.progress({ type: "namespace:start", ns: "app.users", estimatedDocuments: 1 });
+        context.progress({ type: "namespace:start", ns: "app.orders", estimatedDocuments: 1 });
+        context.progress({ type: "namespace:done", ns: "app.users", documents: 1 });
+        await released;
+        return { summary: "restored" };
+      },
+    });
+    // Saved to console.json while the restore runs (the save is asynchronous).
+    await expect
+      .poll(() => store.current.jobs.find((job) => job.id === started.id)?.unfinishedNamespaces)
+      .toEqual(["app.orders"]);
+
+    // A crash now: the next process finds the job "running" and names what may be partial.
+    const next = new JobRunner({ store });
+    await next.recoverInterrupted();
+    const recovered = store.current.jobs.find((job) => job.id === started.id);
+    expect(recovered?.status).toBe("failed");
+    expect(recovered?.error?.message).toContain("app.orders");
+    expect(recovered?.error?.message).not.toContain("app.users");
+    expect(recovered?.error?.hint).toMatch(/drop/);
+    release();
+  });
+
+  it("drops the unfinished list when a restore succeeds", async () => {
+    const started = await runner.start({
+      kind: "restore",
+      lane: "connection:r2",
+      startedBy: "ada",
+      run: async (context) => {
+        context.progress({ type: "namespace:start", ns: "app.users", estimatedDocuments: 1 });
+        context.progress({ type: "namespace:done", ns: "app.users", documents: 1 });
+        context.progress({ type: "namespace:start", ns: "app.orders", estimatedDocuments: 1 });
+        return { summary: "restored" };
+      },
+    });
+    const finished = await runner.finished(started.id);
+    expect(finished?.status).toBe("succeeded");
+    expect(finished?.unfinishedNamespaces).toBeUndefined();
+    expect(store.current.jobs[0]?.unfinishedNamespaces).toBeUndefined();
+  });
+
+  it("scrubs every known secret from job errors and log lines, not only the job's own", async () => {
+    const secret = "storage-key-0123456789abcdef";
+    const scrubbing = new JobRunner({ store, progressIntervalMs: 0, knownSecrets: () => [secret] });
+    const events: JobEvent[] = [];
+    const started = await scrubbing.start({
+      kind: "verify",
+      lane: "storage:s",
+      startedBy: "ada",
+      run: async (context) => {
+        context.log("warn", `retrying with ${secret}`);
+        throw new MongoShieldError("MS_STORAGE_IO", `request signed with ${secret} failed`);
+      },
+    });
+    scrubbing.subscribe(started.id, (event) => events.push(event));
+    const finished = await scrubbing.finished(started.id);
+    expect(finished?.error?.message).not.toContain(secret);
+    expect(JSON.stringify(events)).not.toContain(secret);
+    await scrubbing.shutdown(100);
+  });
+
   it("gives running jobs a grace period at shutdown, then aborts them", async () => {
     const job = controllable("connection:a");
     const started = await runner.start(job.spec);

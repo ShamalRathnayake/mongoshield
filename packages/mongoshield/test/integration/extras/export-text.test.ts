@@ -2,7 +2,7 @@
 // would, line by line through Extended JSON) to the exact backed-up documents, CSV
 // quoting and escaping, filters, fields, and `mongoshield export --format jsonl|csv`.
 
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -167,6 +167,20 @@ describe("exportDocuments as CSV", () => {
     expect(text).toContain('2,"  spaced  ",,,,,,Bergen,,\n');
     expect(text.endsWith("3,Grace,,,,,,,,\n")).toBe(true);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "creates the output file for its owner only (0600)",
+    async () => {
+      const output = join(workDir, `private-${Math.random()}.jsonl`);
+      await exportDocuments(context(), {
+        backup: "latest",
+        namespace: "app.users",
+        format: "jsonl",
+        output,
+      });
+      expect((await stat(output)).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it("requires fields", async () => {
     await expect(

@@ -18,4 +18,12 @@ spec:
     - port: http-metrics
       path: /metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}
+      {{- if .Values.metrics.auth.enabled }}
+      # The bearer token /metrics requires (values.yaml: metrics.auth).
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "mongoshield-operator.metricsSecretName" . }}
+          key: {{ .Values.metrics.auth.secretKey }}
+      {{- end }}
 {{- end }}

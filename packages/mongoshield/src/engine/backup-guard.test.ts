@@ -16,6 +16,7 @@ import {
   enforceBackupGuard,
   findGuardBaseline,
   GUARD_SHAPE_LABEL,
+  isComparable,
 } from "./backup-guard.ts";
 
 const SHA = "0".repeat(64);
@@ -154,6 +155,25 @@ describe("findGuardBaseline", () => {
     await putCompleteBackup(storage, candidate.id);
     await putCompleteBackup(storage, idAt("2026-10-21T03:00:00Z"));
     expect(await findGuardBaseline(storage, candidate)).toBeUndefined();
+  });
+});
+
+describe("isComparable and replica sets that share a name", () => {
+  const source = (instanceId?: string): Manifest["source"] => ({
+    topology: "replicaSet",
+    serverVersion: "8.0.0",
+    clusterId: "rs0-hash",
+    ...(instanceId === undefined ? {} : { instanceId }),
+  });
+
+  it("does not compare backups of two replica sets that only share a name", () => {
+    const candidate = backupAt(NOW, [], { source: source("prod") });
+    expect(isComparable(backupAt(BEFORE, [], { source: source("staging") }), candidate)).toBe(
+      false,
+    );
+    expect(isComparable(backupAt(BEFORE, [], { source: source("prod") }), candidate)).toBe(true);
+    // A baseline written before instanceId existed still compares, on clusterId alone.
+    expect(isComparable(backupAt(BEFORE, [], { source: source() }), candidate)).toBe(true);
   });
 });
 

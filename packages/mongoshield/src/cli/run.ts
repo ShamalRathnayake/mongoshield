@@ -21,14 +21,17 @@ import type { CommandContext, CommandSpec } from "./command.ts";
 import { COMMANDS, findCommand } from "./commands/index.ts";
 import { renderCommandHelp, renderRootHelp } from "./help.ts";
 import { type CliIo, Output, type OutputSettings, shouldUseColor } from "./io.ts";
-import { reportError } from "./report-error.ts";
+import { reportError, scrubSecrets } from "./report-error.ts";
 
 /** Runs the CLI with `argv` (without the `node` and script paths) and returns the exit code. */
 export async function runCli(argv: readonly string[], io: CliIo): Promise<number> {
   // Decided from the raw arguments first, so even a parse error honours
   // --json and --no-color.
-  let out = new Output(io, settingsFromRawArgs(io, argv));
   const secrets: string[] = [];
+  // Every status, warning and --verbose line is scrubbed of the secrets the run learns
+  // (addSecret below) and of passwords in connection strings.
+  const scrub = (text: string): string => scrubSecrets(text, secrets);
+  let out = new Output(io, settingsFromRawArgs(io, argv), scrub);
 
   try {
     const { command: name, rest } = splitCommand(argv);
@@ -41,16 +44,21 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
     if (!command) throw unknownCommandError(name);
 
     const parsed = parseCommandLine(rest, command.name, command.options, positionalLimit(command));
-    out = new Output(io, {
-      json: parsed.global.json,
-      quiet: parsed.global.quiet,
-      verbose: parsed.global.verbose,
-      color: shouldUseColor(io, parsed.global.noColor),
-    });
+    out = new Output(
+      io,
+      {
+        json: parsed.global.json,
+        quiet: parsed.global.quiet,
+        verbose: parsed.global.verbose,
+        color: shouldUseColor(io, parsed.global.noColor),
+      },
+      scrub,
+    );
     if (parsed.help) {
       printHelp(io, out, renderCommandHelp(command, out));
       return 0;
     }
+    warnAboutPasswordsInArguments(out, rest, (secret) => secrets.push(secret));
 
     const context: CommandContext = {
       io,
@@ -68,6 +76,38 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
     out.endLive();
     return reportError(error, out, secrets);
   }
+}
+
+/** `mongodb://user:password@…` (or `+srv`), capturing the password. */
+const URI_WITH_PASSWORD = /mongodb(?:\+srv)?:\/\/[^:@/\s]*:([^@/\s]+)@/i;
+
+/**
+ * Warns once when a connection string with a password was given as an argument
+ * (`--uri`, `--to-uri`, …). Every user on the host can read it with `ps`, and it stays
+ * in the shell history; `--passphrase` was never offered for this reason. The flags
+ * keep working; the password is also remembered as a secret so no output repeats it.
+ */
+function warnAboutPasswordsInArguments(
+  out: Output,
+  args: readonly string[],
+  remember: (secret: string) => void,
+): void {
+  let found = false;
+  for (const argument of args) {
+    const password = URI_WITH_PASSWORD.exec(argument)?.[1];
+    if (password === undefined) continue;
+    found = true;
+    remember(password);
+    try {
+      remember(decodeURIComponent(password));
+    } catch {
+      // Not valid percent-encoding: the raw form is all the driver can echo.
+    }
+  }
+  if (!found) return;
+  out.warn(
+    "A connection string with a password was passed on the command line: other users can see it in the process list, and it stays in your shell history. Prefer MONGOSHIELD_URI (or MONGODB_URI), MONGOSHIELD_URI_FILE (a file holding the connection string), or the config file.",
+  );
 }
 
 /**

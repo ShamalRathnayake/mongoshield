@@ -14,7 +14,7 @@ import { backupJob, type TaskDeps } from "../jobs/tasks.ts";
 import { AuditLog } from "../state/audit.ts";
 import { randomId } from "../state/crypto.ts";
 import { DEFAULT_PASSWORD_COST, hashPassword } from "../state/passwords.ts";
-import { openStorageCredentials } from "../state/secrets.ts";
+import { everyStoredSecret, openStorageCredentials } from "../state/secrets.ts";
 import { issueSetupToken } from "../state/sessions.ts";
 import { StateStore } from "../state/store.ts";
 import type { StorageRecord, UserRecord } from "../state/types.ts";
@@ -95,6 +95,20 @@ const DEFAULT_SETTINGS: ConsoleSettings = {
   shutdownGraceMs: 60_000,
 };
 
+/**
+ * The secrets that come from the environment rather than the state: the OIDC client
+ * secret, the proxy secret, the metrics token and the webhook signing secret.
+ */
+function configuredSecrets(settings: ConsoleSettings, webhookSecret: string | undefined): string[] {
+  const values = [
+    settings.oidc?.clientSecret,
+    settings.proxySecret,
+    settings.metricsToken,
+    webhookSecret,
+  ];
+  return values.filter((value): value is string => value !== undefined && value !== "");
+}
+
 /** Opens a console on a data directory. Close it with {@link closeConsole}. */
 export async function openConsole(options: OpenConsoleOptions): Promise<OpenedConsole> {
   const now = options.now ?? (() => new Date());
@@ -120,9 +134,16 @@ export async function openConsole(options: OpenConsoleOptions): Promise<OpenedCo
     logger,
     ...(options.webhookSecret === undefined ? {} : { webhookSecret: options.webhookSecret }),
   };
+  const settings: ConsoleSettings = { ...DEFAULT_SETTINGS, ...options.settings };
+  const knownSecrets = (): string[] => [
+    ...everyStoredSecret(store),
+    ...configuredSecrets(settings, options.webhookSecret),
+  ];
   const runner = new JobRunner({
     store,
     now,
+    // Job errors and log lines are scrubbed of every secret, not only the job's own.
+    knownSecrets,
     ...(options.progressIntervalMs === undefined
       ? {}
       : { progressIntervalMs: options.progressIntervalMs }),
@@ -151,7 +172,6 @@ export async function openConsole(options: OpenConsoleOptions): Promise<OpenedCo
     backupJob: (plan) => backupJob(tasks, plan, "schedule"),
   });
 
-  const settings: ConsoleSettings = { ...DEFAULT_SETTINGS, ...options.settings };
   const oidc =
     settings.oidc === undefined
       ? undefined
@@ -181,6 +201,7 @@ export async function openConsole(options: OpenConsoleOptions): Promise<OpenedCo
     oidc,
     passwordCost: options.passwordCost ?? DEFAULT_PASSWORD_COST,
     now,
+    knownSecrets,
     live: {
       clients: new LiveClients(store),
       journal: new LiveJournal({ store, storage, dataDir: options.dataDir }),

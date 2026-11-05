@@ -23,20 +23,52 @@ image:
 # (docker/Dockerfile). A plan can override it in spec.job.image.
 jobImage:
   repository: ghcr.io/shamalrathnayake/mongoshield
-  # Pin an exact version (e.g. "2.0.0") so an image update never changes how your
-  # backups run unannounced. The default image has the AWS SDK; use a CLOUD_SDKS=all
-  # build for Google Cloud Storage or Azure.
-  tag: "latest"
+  # Defaults to the chart's appVersion: the MongoShield release this operator ships
+  # with (never a moving `latest`), so an image push can never change how your backups
+  # run unannounced. The default image has the AWS SDK; use a CLOUD_SDKS=all build for
+  # Google Cloud Storage or Azure.
+  tag: ""
   # Leave empty for Kubernetes' default (IfNotPresent for pinned tags).
   pullPolicy: ""
+
+# What plans may put into the pods the operator runs (spec.job). Whoever can create a
+# MongoShieldBackupPlan could otherwise pick the image that runs next to the database
+# connection string and storage credentials, and the service account (and so the cloud
+# identity) it runs as. See packages/operator/src/resources/job-policy.ts.
+jobPolicy:
+  # Image repositories spec.job.image may name (any tag or digest of them).
+  # Empty: only jobImage.repository. "registry.example.com/*" allows a prefix; ["*"]
+  # allows any image (only if everyone who may create plans may also create Pods).
+  allowedImages: []
+  # Service accounts spec.job.serviceAccountName may name, as "namespace/name"; either
+  # part may be "*" ("prod/*", "*/irsa-backups"). ["*"] allows any account in the plan's
+  # namespace, which is safe when plans are created by people with the built-in `edit`
+  # role (they can create such Pods anyway); restrict it if a narrower role can create
+  # plans.
+  allowedServiceAccounts: ["*"]
+  # While images are restricted (allowedImages is not ["*"]), the environment is too, or
+  # it could change what the allowed image runs (NODE_OPTIONS=--import=..., LD_PRELOAD):
+  # spec.job.env may not name such variables (NODE_OPTIONS only with heap-size and
+  # warning flags) nor the ones the operator sets (MONGODB_URI, MONGOSHIELD_PASSPHRASE...),
+  # every job pod gets them pinned to harmless values, and spec.job.envFrom is refused,
+  # because a ConfigMap or Secret can carry any name. true accepts spec.job.envFrom (the
+  # pinned variables still win over it).
+  allowEnvFrom: false
 
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# Namespaces the operator manages. Empty: every namespace (a ClusterRoleBinding).
-# A list: only those (one RoleBinding per namespace), which also limits what the
-# operator can touch, since it can only create Jobs where it is bound.
+# Namespaces the operator manages.
+#
+# Empty (the default): every namespace, through a ClusterRoleBinding. The operator can
+# then list the Pods of every namespace (kube-system included), read their logs, and
+# create Jobs and CronJobs that mount any Secret anywhere: close to cluster-wide Secret
+# access if its Pod or token is ever compromised.
+#
+# A list: only those namespaces (one RoleBinding each), which also limits what the
+# operator can touch, since it can only read Pods and create Jobs where it is bound.
+# Recommended for production, e.g. watchNamespaces: [prod, staging].
 watchNamespaces: []
 
 # Two replicas give fast failover: one leads (holds a Lease) and reconciles, the
@@ -101,11 +133,37 @@ service:
   port: 8080
 
 metrics:
+  # /metrics names every watched namespace and plan, so it requires a bearer token
+  # (the probes never do). The token is in a Secret: the chart creates one with a
+  # random token (kept across upgrades) unless existingSecret names your own. The
+  # ServiceMonitor below sends it. Read it with:
+  #   kubectl get secret <release>-mongoshield-operator-metrics -o jsonpath='{.data.token}' | base64 -d
+  auth:
+    enabled: true
+    # A Secret of your own, in the release namespace, holding the token under secretKey.
+    existingSecret: ""
+    secretKey: token
+    # true: start without a token (and leave /metrics open) while existingSecret does
+    # not exist yet. Used by the plain manifests in deploy/operator.
+    optional: false
   # A Prometheus Operator ServiceMonitor for /metrics (needs its CRDs installed).
   serviceMonitor:
     enabled: false
     interval: 30s
     labels: {}
+
+# A NetworkPolicy for the operator's pods (off by default: it needs a CNI that enforces
+# NetworkPolicies). Ingress: only port 8080 (probes come from the kubelet, which
+# NetworkPolicies do not block), and only from the pods and namespaces listed in `from`
+# (e.g. Prometheus); empty `from` allows any source on that port. Egress is not limited:
+# the operator must reach the Kubernetes API server, whose address differs per cluster.
+networkPolicy:
+  enabled: false
+  # NetworkPolicyPeer entries allowed to scrape /metrics, for example:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: monitoring
+  from: []
 
 # Keep one replica up during node drains (only with replicaCount > 1).
 podDisruptionBudget:

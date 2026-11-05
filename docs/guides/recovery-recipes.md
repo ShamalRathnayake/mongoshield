@@ -20,7 +20,13 @@ $exists $type $regex $and $or $nor $not $elemMatch $size`; anything else fails w
 `MS_CONFIG_INVALID` instead of matching the wrong documents. Regexes accept the options
 `i m s u x` (and `(?i)`-style options at the start of the pattern); they run on
 JavaScript's engine, so PCRE-only syntax such as possessive quantifiers or atomic groups
-is not supported, and `l` is rejected. Strings always compare with the simple (binary)
+is not supported, and `l` is rejected. Because JavaScript's engine cannot be interrupted,
+patterns that could backtrack for practically forever are refused with
+`MS_CONFIG_INVALID`: a repeated group that itself repeats (`(a+)+`, `(.*x)*`), a
+repeated group whose alternatives can match the same text (`(a|aa)+`), and patterns
+over 1024 characters. A repeated group that ends with a character its repeated parts
+cannot match is fine, since every repetition then ends at that character:
+`^([a-z0-9]+\.)+[a-z]+$` and `^(\w+-)+\d+$` are accepted. Strings always compare with the simple (binary)
 collation. Filters and ids on the
 command line are [Extended JSON](https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/):
 `'{"_id":{"$oid":"6523f1c2a1b2c3d4e5f60718"}}'`, `'{"createdAt":{"$gte":{"$date":"2026-10-01T00:00:00Z"}}}'`.

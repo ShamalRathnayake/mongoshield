@@ -205,10 +205,13 @@ export function hasRole(actual: Role, required: Role): boolean {
 }
 
 /**
- * The client's address, for rate limiting and the audit log. The socket
- * address only: `X-Forwarded-For` can be set by anyone and is not trusted.
+ * The client's address, for rate limiting and the audit log: the socket address,
+ * or behind a trusted proxy (MONGOSHIELD_TRUSTED_PROXIES) the address it forwarded.
+ * `X-Forwarded-For` from anyone else is never believed: anyone can set it.
  */
 export function clientAddress(c: Context<AppEnv>): string {
+  const resolved = c.get("client");
+  if (resolved !== undefined) return resolved.address;
   try {
     return getConnInfo(c).remote.address ?? "unknown";
   } catch {

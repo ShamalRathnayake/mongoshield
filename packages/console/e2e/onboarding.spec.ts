@@ -76,7 +76,9 @@ test("paste a connection string, browse it, back it up and restore it in a few c
     await expect(
       page.getByLabel("This is a production database", { exact: true }),
     ).not.toBeChecked();
-    await expect(page.getByText(/runs on this computer or in Docker/)).toBeVisible();
+    await expect(
+      page.getByText(/runs on this computer, so it looks like a test database/),
+    ).toBeVisible();
     // The password is never shown: only the masked password field holds it.
     expect(await page.locator("body").textContent()).not.toContain(E2E_MONGO_PASSWORD);
     await page.getByLabel("Name", { exact: true }).fill("Quick start");

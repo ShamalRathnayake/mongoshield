@@ -227,15 +227,23 @@ function backupId(date: Date, suffix: string): string {
   return `${date.toISOString().slice(0, 19).replaceAll(":", "-")}Z_${suffix}`;
 }
 
-/** Nightly backups at 02:00 UTC for the last `days` days, newest first. */
+/**
+ * Nightly backups at 02:00 UTC for the last `days` nights, newest first. `day` 0 is
+ * always the most recent 02:00 that has passed: before 02:00 UTC that is yesterday's,
+ * so the fixtures (the newest backup is unverified, day 3 crashed, …) look the same at
+ * any time of day instead of shifting by one between midnight and 02:00 UTC.
+ */
 function nightlyBackups(now: number, storageId: string, days: number): MockBackup[] {
   const today = new Date(now);
+  const nightOf = (daysAgo: number) =>
+    new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - daysAgo, 2, 0, 4),
+    );
+  // Tonight's backup has not started yet before 02:00 UTC.
+  const skipped = nightOf(0).getTime() > now ? 1 : 0;
   const backups: MockBackup[] = [];
   for (let day = 0; day < days; day += 1) {
-    const started = new Date(
-      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - day, 2, 0, 4),
-    );
-    if (started.getTime() > now) continue;
+    const started = nightOf(day + skipped);
     const id = backupId(started, (0x7f3a9c + day * 4099).toString(16).slice(-6));
     const startedAt = started.toISOString();
     const completedAt = new Date(started.getTime() + 11 * MINUTE + day * 7_000).toISOString();

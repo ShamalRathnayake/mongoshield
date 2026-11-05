@@ -173,11 +173,21 @@ export function buildBackupJob(
   };
 }
 
+/**
+ * The backup id as the last argument, after `--`. Ids come from custom resources
+ * (`spec.backup.id`) and from Job results; after `--` the CLI takes an id such as
+ * `--to-uri=…` literally (and refuses it as unknown) instead of parsing it as a flag.
+ * The CRDs also restrict ids to the backup id format (api/crds.ts).
+ */
+function backupIdArgument(backupId: string): string[] {
+  return ["--", backupId];
+}
+
 /** The command line of a restore. */
 export function restoreArgs(restore: Restore, backupId: string): string[] {
   const spec = restore.spec;
   const mode = spec.mode ?? "fail-if-exists";
-  const args = ["restore", backupId, "--json", "--config", CONFIG_PATH, "--mode", mode];
+  const args = ["restore", "--json", "--config", CONFIG_PATH, "--mode", mode];
   // --yes answers the CLI's "are you sure?". The question was already answered
   // declaratively: spec.confirm names the target (checked by the CRD and reconciler).
   if (OVERWRITE_MODES.includes(mode) && !spec.dryRun) args.push("--yes");
@@ -188,6 +198,7 @@ export function restoreArgs(restore: Restore, backupId: string): string[] {
   if (spec.at) args.push("--at", spec.at);
   if (spec.skipIndexes) args.push("--skip-indexes");
   if (spec.usersAndRoles) args.push("--users-and-roles", spec.usersAndRoles);
+  args.push(...backupIdArgument(backupId));
   return args;
 }
 
@@ -248,11 +259,12 @@ export function buildScheduledBackup(plan: BackupPlan, job: Job): Backup {
 /** The command line of a drill. The target comes from MONGOSHIELD_DRILL_URI, not a flag. */
 export function drillArgs(drill: Drill, backupId: string): string[] {
   const spec = drill.spec;
-  const args = ["drill", backupId, "--json", "--config", CONFIG_PATH];
+  const args = ["drill", "--json", "--config", CONFIG_PATH];
   if (spec.sample !== undefined) args.push("--sample", String(spec.sample));
   if (spec.prefix) args.push("--prefix", spec.prefix);
   for (const pattern of spec.include ?? []) args.push("--include", pattern);
   for (const pattern of spec.exclude ?? []) args.push("--exclude", pattern);
+  args.push(...backupIdArgument(backupId));
   return args;
 }
 
@@ -317,7 +329,16 @@ export function buildDataDeletionJob(
   const template = buildPodTemplate({
     plan,
     defaults,
-    args: ["delete", backupId, "--yes", "--json", "--config", CONFIG_PATH, "--by", requestedBy],
+    args: [
+      "delete",
+      "--yes",
+      "--json",
+      "--config",
+      CONFIG_PATH,
+      "--by",
+      requestedBy,
+      ...backupIdArgument(backupId),
+    ],
     configMapName: configMapNameOf(plan),
     labels,
     configHash,

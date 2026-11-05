@@ -11,6 +11,7 @@ import { runRestore } from "../../src/engine/restore.ts";
 import { temporaryCollectionTime } from "../../src/engine/restore-authz.ts";
 import { silentLogger } from "../../src/logger.ts";
 import { memoryStorage } from "../../src/storage/memory.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 import { mongoUri, uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 
 const client = useMongoClient();
@@ -90,7 +91,13 @@ beforeAll(async () => {
     });
   }
   const result = await runBackup(
-    { client: client(), storage, logger: silentLogger, compression: "zstd", encryption: undefined },
+    {
+      client: client(),
+      storage,
+      logger: silentLogger,
+      compression: TEST_COMPRESSION,
+      encryption: undefined,
+    },
     { include: [`${source}.*`], consistency: "none", includeUsersAndRoles: true },
   );
   backupId = result.manifest.id;

@@ -3,6 +3,8 @@
 
 import type { Document, ObjectId } from "mongodb";
 import { describe, expect, it } from "vitest";
+import { listBackups } from "../../src/catalog/catalog.ts";
+import { liveUseLeases } from "../../src/catalog/use-leases.ts";
 import { planRestore, runRestore } from "../../src/engine/restore.ts";
 import { isMongoShieldError } from "../../src/errors.ts";
 import { silentLogger } from "../../src/logger.ts";
@@ -216,6 +218,7 @@ describe("insert", () => {
     );
     // 2 new users + 2500 orders; user 1 was a duplicate.
     expect(result.documentsRestored).toBe(2502);
+    expect(result.documentsSkipped).toBe(1);
     const restored = await documentsOf(target, "users");
     expect(restored.map((user) => [user._id, user.name])).toEqual([
       [1, "changed"],
@@ -223,6 +226,65 @@ describe("insert", () => {
       [3, "Linus"],
       [77, "only in target"],
     ]);
+  });
+
+  it("fails on a duplicate in another unique index instead of skipping the document", async () => {
+    const storage = await appBackup();
+    const target = uniqueDb("rm");
+    const targetUsers = client().db(target).collection<TestDocument>("users");
+    // The application created its own unique index first; Grace's email is taken by a
+    // document with another _id, so Grace is NOT in the target and must not vanish.
+    await targetUsers.createIndex({ email: 1 }, { unique: true });
+    await targetUsers.insertOne({ _id: 50, name: "someone else", email: "grace@example.com" });
+
+    const error = await restore(storage, target, { mode: "insert", include: ["app.users"] }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(isMongoShieldError(error, "MS_RESTORE_FAILED")).toBe(true);
+    expect(String((error as Error).message)).toContain("email_1");
+  });
+
+  it("skips duplicate _ids in a clustered collection", async () => {
+    const storage = memoryStorage();
+    await writeTestBackup(storage, {
+      namespaces: [
+        {
+          ns: "app.events",
+          documents: [{ _id: 1 }, { _id: 2 }],
+          options: { clusteredIndex: { key: { _id: 1 }, unique: true, v: 2, name: "_id_" } },
+          indexes: [],
+        },
+      ],
+    });
+    const target = uniqueDb("rm");
+    await client()
+      .db(target)
+      .createCollection("events", { clusteredIndex: { key: { _id: 1 }, unique: true } });
+    await client().db(target).collection<TestDocument>("events").insertOne({ _id: 1 });
+
+    const result = await restore(storage, target, { mode: "insert" });
+    expect(result.documentsRestored).toBe(1);
+    expect(result.documentsSkipped).toBe(1);
+  });
+});
+
+describe("use lease", () => {
+  it("marks the backup as in use while restoring, so prune keeps it, and clears it after", async () => {
+    const storage = await appBackup();
+    const [entry] = await listBackups(storage);
+    if (entry === undefined) throw new Error("no backup");
+    const leasesSeen: number[] = [];
+    await restore(storage, uniqueDb("rm"), {
+      include: ["app.users"],
+      onProgress: () => {
+        // Checked from inside the restore: the lease is there while documents load.
+        void liveUseLeases(storage, entry.id).then((leases) => leasesSeen.push(leases.length));
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(leasesSeen.some((count) => count === 1)).toBe(true);
+    expect(await liveUseLeases(storage, entry.id)).toEqual([]);
   });
 });
 

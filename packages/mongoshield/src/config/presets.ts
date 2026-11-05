@@ -20,6 +20,7 @@
  * they add a retention policy sized for small clusters.
  */
 
+import { defaultCompression } from "../compression/index.ts";
 import { ATLAS_SHARED_TIER_TUNING } from "../mongo/atlas.ts";
 import type { MongoShieldConfigInput } from "./schema.ts";
 
@@ -50,6 +51,14 @@ const SMALL_CLUSTER_RETENTION = { last: 7, weekly: 4, monthly: 6 } as const;
 const FLEX_BYTES_PER_SECOND = ATLAS_SHARED_TIER_TUNING.maxBytesPerSecond * 2;
 
 /**
+ * The presets compress with zstd (smaller and faster than gzip), but only where the
+ * runtime has it: `node:zlib` gained zstd in Node 22.15 / 23.8, and the package runs
+ * on 22.12 and later. Hard-coding "zstd" here would make every backup on 22.12-22.14
+ * fail, because a preset's value counts as configured and so skips the gzip fallback.
+ */
+const PRESET_COMPRESSION = defaultCompression();
+
+/**
  * Every preset's defaults, by name. `satisfies` (rather than a type annotation) keeps
  * the literal values in the type, so `mongoshield init` can print them without
  * checking for missing fields.
@@ -60,7 +69,7 @@ export const CONFIG_PRESETS = {
    * all on M0, about 100 operations per second, a weekly data transfer allowance.
    */
   "atlas-free": {
-    compression: "zstd",
+    compression: PRESET_COMPRESSION,
     backup: {
       // "auto" uses converge when the tier lets the user open a change stream on the
       // whole deployment, and plain reads otherwise (with a warning in the manifest).
@@ -72,7 +81,7 @@ export const CONFIG_PRESETS = {
   },
   /** Atlas Flex clusters: a few daily snapshots in Atlas, 500 operations per second. */
   "atlas-flex": {
-    compression: "zstd",
+    compression: PRESET_COMPRESSION,
     backup: {
       consistency: "auto",
       parallelism: ATLAS_SHARED_TIER_TUNING.parallelism,

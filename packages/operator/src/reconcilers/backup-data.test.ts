@@ -108,13 +108,14 @@ describe("deletionPolicy", () => {
     const job = deleteJob(client);
     expect(job?.spec?.template.spec?.containers[0]?.args).toEqual([
       "delete",
-      "2026-10-24T11-59-02Z_ab12cd",
       "--yes",
       "--json",
       "--config",
       "/etc/mongoshield/config/mongoshield.config.json",
       "--by",
       "kubernetes:prod/manual-1",
+      "--",
+      "2026-10-24T11-59-02Z_ab12cd",
     ]);
     expect(job?.metadata.ownerReferences?.[0]).toMatchObject({
       kind: "MongoShieldBackup",

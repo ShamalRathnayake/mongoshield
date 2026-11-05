@@ -200,7 +200,7 @@ export async function importMongodump(
       window: outcome.window,
     });
     manifestAttempted = true;
-    await writeManifest(storage, manifest, { signal });
+    await writeManifest(storage, manifest, { signal, logger });
     target.progress.finish();
 
     const durationMs = Math.round(performance.now() - clock);

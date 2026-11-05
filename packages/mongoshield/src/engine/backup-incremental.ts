@@ -27,6 +27,11 @@
  * end time), a parent from another deployment or selection, a parent whose own chain is
  * broken, and an oplog that no longer reaches back to P (`MS_CHANGE_HISTORY_LOST`).
  *
+ * On Atlas Free and Flex clusters an incremental adapts like a full backup does
+ * (atlas-adapt.ts): its change stream filters databases with regexes only (the tier
+ * refuses `$in` in `ns.db` filters), its metadata and time series reads run at the
+ * gentler parallelism and read limit, and `includeUsersAndRoles` is refused up front.
+ *
  * With `fallbackToFull` (what scheduled runs use: "full weekly, incremental hourly"),
  * each of those cases takes a full backup instead, and so do the chain policies
  * `fullAfterMs` (the chain's base is too old) and `maxChainLength`; the result's
@@ -38,6 +43,7 @@ import { type CatalogEntry, listBackups } from "../catalog/catalog.ts";
 import { chainEndTime, inspectChain } from "../catalog/chain.ts";
 import { PLAN_LABEL } from "../catalog/scope.ts";
 import { selectBackup } from "../catalog/select.ts";
+import { holdUseLease } from "../catalog/use-leases.ts";
 import { abortError, isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import {
   caseCollisionSuffixes,
@@ -59,8 +65,11 @@ import type { Logger } from "../logger.ts";
 import {
   type CollectionSpec,
   type DeploymentInfo,
+  deploymentIdentityWarning,
   describeDeployment,
   discoverNamespaces,
+  isAtlasSharedTier,
+  sameDeployment,
 } from "../mongo/index.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import type {
@@ -69,6 +78,11 @@ import type {
   CompletedBackupResult,
   IncrementalOptions,
 } from "../types.ts";
+import {
+  adaptBackupReads,
+  assertUsersAndRolesBackupSupported,
+  logBackupAdaptation,
+} from "./atlas-adapt.ts";
 import { type AuthzScope, backupUsersAndRoles } from "./backup-authz.ts";
 import { openReadConsistency, resolveConsistencyMode } from "./backup-consistency.ts";
 import { namespaceEntry, planNamespace, runPendingParts } from "./backup-dump.ts";
@@ -85,6 +99,7 @@ import { type ChangeCapture, startChangeCapture } from "./converge-capture.ts";
 import { compareClusterTimes, formatClusterTime, readLatestClusterTime } from "./converge-time.ts";
 import { mapWithConcurrency } from "./pool.ts";
 import { ProgressTracker } from "./progress.ts";
+import { createRateLimiter } from "./rate-limit.ts";
 
 /** How long cleanup of a failed run may take before it gives up (it is best effort). */
 const CLEANUP_TIMEOUT_MS = 60_000;
@@ -127,17 +142,32 @@ export async function runIncrementalBackup(
   const fallback = incremental.fallbackToFull === true;
   throwIfAborted(signal);
 
-  /** The full backup taken instead (fallbackToFull, or a chain policy). */
-  const fullInstead = async (reason: string): Promise<BackupResult> => {
-    logger.info("Taking a full backup instead of an incremental one", { reason });
+  /**
+   * The full backup taken instead (fallbackToFull, or a chain policy). `warning` is set
+   * when falling back is a problem the operator should fix, not routine (the chain
+   * policies are routine): it is logged as a warning and added to the result's
+   * `warnings`, which scheduled runs put in their run report.
+   */
+  const fullInstead = async (reason: string, warning?: string): Promise<BackupResult> => {
+    if (warning === undefined) {
+      logger.info("Taking a full backup instead of an incremental one", { reason });
+    } else {
+      logger.warn(warning, { reason });
+    }
     const { incremental: _incremental, ...fullOptions } = options;
     const result = await runFull(fullOptions);
-    return result.status === "complete" ? { ...result, fullBackupReason: reason } : result;
+    if (result.status !== "complete") return result;
+    const warnings = [...(warning === undefined ? [] : [warning]), ...(result.warnings ?? [])];
+    return {
+      ...result,
+      fullBackupReason: reason,
+      ...(warnings.length === 0 ? {} : { warnings }),
+    };
   };
   /** Rethrows `error`, or takes a full backup when falling back is allowed for it. */
   const fallBackOn = (error: unknown): Promise<BackupResult> => {
     if (fallback && isMongoShieldError(error) && FALLBACK_CODES.has(error.code)) {
-      return fullInstead(error.message);
+      return fullInstead(error.message, fallbackWarning(error));
     }
     throw error;
   };
@@ -161,6 +191,9 @@ export async function runIncrementalBackup(
   } catch (error) {
     return fallBackOn(error);
   }
+  // Atlas Free/Flex: the tier has no users and roles to read. Refused before the
+  // fallback, which would only be refused the same way (atlas-adapt.ts).
+  assertUsersAndRolesBackupSupported(options, deployment);
   // 3. The chain policies: a new chain once the current one is old or long enough.
   const due = fullBackupDue(entries, parent, incremental, new Date());
   if (due !== undefined) return fullInstead(due);
@@ -188,6 +221,18 @@ const FALLBACK_CODES = new Set([
   "MS_SNAPSHOT_TOO_OLD",
   "MS_PERMISSION_DENIED",
 ]);
+
+/**
+ * The warning for a fall back that will keep happening until someone acts, or
+ * `undefined` for the routine ones. Today that is `MS_SNAPSHOT_TOO_OLD`: the time
+ * series collections an incremental copies whole did not fit in the server's snapshot
+ * window, which is a property of their size, so without a warning every incremental
+ * of the job would quietly become a full backup (more storage, longer runs).
+ */
+export function fallbackWarning(error: MongoShieldError): string | undefined {
+  if (error.code !== "MS_SNAPSHOT_TOO_OLD") return undefined;
+  return "The incremental backup fell back to a full backup because its time series collections could not be read within the server's snapshot window (MS_SNAPSHOT_TOO_OLD). This repeats on every run while they are this large: raise minSnapshotHistoryWindowInSeconds on the server, or exclude the large time series collections from this job and back them up separately.";
+}
 
 /**
  * Why the chain policies ask for a full backup now, or `undefined`: the chain's base
@@ -233,6 +278,12 @@ async function takeIncremental(
   assertRetentionSupported(storage, options.retainDays);
   const selection = selectionOf(options);
   const labels = options.labels ?? {};
+  // Atlas Free/Flex: the metadata and time series copies read gently, like a full
+  // backup's dumps (atlas-adapt.ts); an explicit setting wins.
+  const reads = adaptBackupReads(options, validateBackupOptions(options), deployment);
+  logBackupAdaptation(logger, reads, deployment);
+  const identityWarning = deploymentIdentityWarning(deployment);
+  if (identityWarning !== undefined) logger.warn(identityWarning);
 
   // A parent that ends after "now" cannot come from this deployment's history.
   const now = await readLatestClusterTime(client).catch(rethrowTyped);
@@ -259,6 +310,9 @@ async function takeIncremental(
   const writtenKeys = new Set<string>();
   let capture: ChangeCapture | undefined;
   let manifestAttempted = false;
+  // Tells prune this incomplete run is alive (time series copies can take long; see
+  // catalog/use-leases.ts and the same heartbeat in backup.ts).
+  const heartbeat = await holdUseLease(storage, id, "backup", { logger });
   try {
     // 3. The key envelope (passphrase and KMS backups), as for any backup.
     const encryption: FileEncryption | undefined =
@@ -294,6 +348,8 @@ async function takeIncremental(
       include: options.include,
       exclude: options.exclude,
       serverVersion: deployment.serverVersion,
+      // Atlas Free/Flex only accept strings and regexes in ns.db filters.
+      regexDatabaseFilter: isAtlasSharedTier(deployment),
       signal,
       retainUntil,
       purpose: "incremental",
@@ -305,10 +361,13 @@ async function takeIncremental(
     //    time series collection whole, in a snapshot whose time becomes the end.
     const runningCapture = capture;
     const state = await copyNamespaceState(
-      dumpContextFor(context, options, { id, encryption, writtenKeys, retainUntil }),
+      {
+        ...dumpContextFor(context, options, { id, encryption, writtenKeys, retainUntil }),
+        rateLimiter: createRateLimiter(reads.rateLimits),
+      },
       specs,
       {
-        parallelism: validateBackupOptions(options),
+        parallelism: reads.parallelism,
         partSizeBytes: options.partSizeBytes ?? DEFAULT_PART_SIZE_BYTES,
         readPreference: resolveReadPreference(options, "snapshot"),
         progress: new ProgressTracker({ onProgress: options.onProgress, logger }),
@@ -358,6 +417,8 @@ async function takeIncremental(
     await deleteOrphans(storage, manifest, logger, signal);
     manifestAttempted = true;
     await writeManifest(storage, manifest, {
+      // Warns if the store turns out not to honour conditional writes (S3-compatibles).
+      logger,
       ...(signal === undefined ? {} : { signal }),
       ...(retainUntil === undefined ? {} : { retainUntil }),
     });
@@ -377,6 +438,8 @@ async function takeIncremental(
     logger.error("Incremental backup failed", { id, code: failure.code, error: failure.message });
     await deletePartialIncremental(storage, logger, { id, writtenKeys, manifestAttempted });
     throw failure;
+  } finally {
+    await heartbeat.release();
   }
 }
 
@@ -519,7 +582,7 @@ function uniqueSuffixes(specs: readonly CollectionSpec[]): Map<string, string> {
 export interface ParentRequirements {
   /** `"latest"` or a backup id. */
   readonly from: string;
-  readonly deployment: Pick<DeploymentInfo, "clusterId">;
+  readonly deployment: Pick<DeploymentInfo, "clusterId" | "instanceId">;
   readonly selection: Selection;
   /** The new backup's labels (a `mongoshield.plan` label narrows `"latest"`). */
   readonly labels: Readonly<Record<string, string>>;
@@ -580,8 +643,9 @@ function whyNotParent(
   if (chainEndTime(manifest) === undefined) {
     return `it was taken with consistency "${manifest.consistency.mode}", so it has no exact end time to continue from (incrementals need a converge or snapshot backup)`;
   }
-  const clusterId = manifest.source.clusterId;
-  if (clusterId === undefined || clusterId !== requirements.deployment.clusterId) {
+  // Same clusterId and, when both know it, the same instanceId: a replica set that
+  // only shares this one's name is another deployment (see `sameDeployment`).
+  if (!sameDeployment(manifest.source, requirements.deployment)) {
     return "it was taken from a different deployment";
   }
   if (manifest.selection === undefined) {
@@ -601,6 +665,29 @@ function whyNotParent(
   const problem = inspection.problems[0];
   if (problem !== undefined)
     return `its own chain is broken (${problem.backupId}: ${problem.problem})`;
+  const failed = failedVerificationIn(entries, inspection.members);
+  if (failed !== undefined) {
+    return failed === manifest.id
+      ? "it failed its last verification"
+      : `its chain holds ${failed}, which failed its last verification`;
+  }
+  return undefined;
+}
+
+/**
+ * The first member of a chain (newest first) whose newest verification failed, or
+ * `undefined`. A backup known to be damaged must not get incrementals on top: every
+ * recovery point they add would depend on it, while retention prunes the older,
+ * intact chains. Members never verified, or verified since with success, are fine.
+ */
+function failedVerificationIn(
+  entries: readonly CatalogEntry[],
+  members: readonly Manifest[],
+): string | undefined {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  for (const member of members) {
+    if (byId.get(member.id)?.verification?.ok === false) return member.id;
+  }
   return undefined;
 }
 

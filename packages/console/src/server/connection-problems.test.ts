@@ -6,15 +6,40 @@
 
 import { MongoServerError } from "mongodb";
 import { describe, expect, it } from "vitest";
+import type { ContainerEnvironment } from "../shared/api.ts";
 import { type ConnectionAttempt, classify, explainConnectionError } from "./connection-problems.ts";
+
+/** Linux Docker Engine started without --add-host: host.docker.internal does not resolve. */
+const DOCKER_ENGINE: ContainerEnvironment = {
+  kind: "docker-engine",
+  hostAlias: "host.docker.internal",
+  hostAliasResolves: false,
+};
+/** Docker Desktop: host.docker.internal resolves. */
+const DOCKER_DESKTOP: ContainerEnvironment = {
+  kind: "docker-desktop",
+  hostAlias: "host.docker.internal",
+  hostAliasResolves: true,
+};
+const NO_CONTAINER: ContainerEnvironment = { kind: "none" };
 
 const ATLAS: ConnectionAttempt = {
   atlas: true,
   hosts: ["cluster0.abcde.mongodb.net"],
-  inContainer: true,
+  container: DOCKER_ENGINE,
 };
-const LOCAL: ConnectionAttempt = { atlas: false, hosts: ["localhost"], inContainer: true };
-const REMOTE: ConnectionAttempt = { atlas: false, hosts: ["db.example.com"], inContainer: false };
+const LOCAL: ConnectionAttempt = { atlas: false, hosts: ["localhost"], container: DOCKER_ENGINE };
+const REMOTE: ConnectionAttempt = {
+  atlas: false,
+  hosts: ["db.example.com"],
+  container: NO_CONTAINER,
+};
+/** The quick fill's address for "this computer" from inside a container. */
+const ON_HOST: ConnectionAttempt = {
+  atlas: false,
+  hosts: ["host.docker.internal"],
+  container: DOCKER_ENGINE,
+};
 
 /** A network error as the driver nests it: name, message, cause with a code. */
 function networkError(message: string, code: string): Error {
@@ -51,27 +76,128 @@ describe("explainConnectionError", () => {
     );
   });
 
-  it("recognises SRV lookups that fail in other ways (no data, server failure, TXT)", () => {
+  it("says the name does not exist only when DNS says so (ENOTFOUND, ENODATA)", () => {
     for (const message of [
+      "querySrv ENOTFOUND _mongodb._tcp.x.mongodb.net",
       "querySrv ENODATA _mongodb._tcp.x.mongodb.net",
-      "querySrv ESERVFAIL _mongodb._tcp.x.mongodb.net",
-      "queryTxt ETIMEOUT x.mongodb.net",
+      "queryTxt ENODATA x.mongodb.net",
     ]) {
       expect(classify(message, undefined, ATLAS), message).toBe("dns-not-found");
     }
+  });
+
+  it("blames the DNS resolver, not the cluster, when an SRV or TXT lookup fails otherwise", () => {
+    for (const message of [
+      "querySrv ETIMEOUT _mongodb._tcp.x.mongodb.net",
+      "querySrv ESERVFAIL _mongodb._tcp.x.mongodb.net",
+      "querySrv ECONNREFUSED _mongodb._tcp.x.mongodb.net",
+      "querySrv EREFUSED _mongodb._tcp.x.mongodb.net",
+      "queryTxt ETIMEOUT x.mongodb.net",
+      "queryTxt ECANCELLED x.mongodb.net",
+    ]) {
+      expect(classify(message, undefined, ATLAS), message).toBe("dns-resolver");
+    }
+    const error = Object.assign(new Error("querySrv ETIMEOUT _mongodb._tcp.cluster0.x.net"), {
+      code: "ETIMEOUT",
+      syscall: "querySrv",
+    });
+    const problem = explain(error, ATLAS);
+    expect(problem.kind).toBe("dns-resolver");
+    // Not "the cluster may be deleted": the resolver failed, and the standard
+    // (non-SRV) connection string avoids the SRV lookup altogether.
+    expect(problem.message).not.toMatch(/deleted/);
+    expect(problem.fix).toMatch(/standard connection string/);
+    expect(problem.fix).toMatch(/mongodb:\/\/host1:27017,host2:27017/);
+    // getaddrinfo EAI_AGAIN ("temporary failure in name resolution") is the resolver too.
+    expect(classify("getaddrinfo EAI_AGAIN db.example.com", undefined, REMOTE)).toBe(
+      "dns-resolver",
+    );
   });
 
   it("recognises unknown host names, with Docker advice for local names", () => {
     const problem = explain(networkError("getaddrinfo ENOTFOUND mongo", "ENOTFOUND"), {
       atlas: false,
       hosts: ["localhost"],
-      inContainer: true,
+      container: DOCKER_DESKTOP,
     });
     expect(problem.kind).toBe("dns-not-found");
     expect(problem.fix).toMatch(/host\.docker\.internal/);
     expect(explain(networkError("getaddrinfo ENOTFOUND db", "ENOTFOUND"), REMOTE).fix).toMatch(
       /typos/,
     );
+  });
+
+  it("explains a missing host.docker.internal with the Linux --add-host fix", () => {
+    const problem = explain(
+      networkError("getaddrinfo ENOTFOUND host.docker.internal", "ENOTFOUND"),
+      ON_HOST,
+    );
+    expect(problem.kind).toBe("dns-not-found");
+    expect(problem.message).toContain("host.docker.internal");
+    expect(problem.fix).toContain("--add-host=host.docker.internal:host-gateway");
+    expect(problem.fix).toContain('extra_hosts: ["host.docker.internal:host-gateway"]');
+    expect(problem.fix).not.toMatch(/typos/);
+    // The same when the resolver itself gave up on the name.
+    expect(
+      explain(networkError("getaddrinfo EAI_AGAIN host.docker.internal", "EAI_AGAIN"), ON_HOST).fix,
+    ).toContain("--add-host=host.docker.internal:host-gateway");
+    // Under Podman, the name to use is host.containers.internal.
+    const podman = explain(
+      networkError("getaddrinfo ENOTFOUND host.docker.internal", "ENOTFOUND"),
+      {
+        ...ON_HOST,
+        container: {
+          kind: "podman",
+          hostAlias: "host.containers.internal",
+          hostAliasResolves: true,
+        },
+      },
+    );
+    expect(podman.fix).toContain("host.containers.internal");
+    // Outside a container the name never exists: use localhost.
+    expect(
+      explain(networkError("getaddrinfo ENOTFOUND host.docker.internal", "ENOTFOUND"), {
+        ...ON_HOST,
+        container: NO_CONTAINER,
+      }).fix,
+    ).toMatch(/use localhost/);
+  });
+
+  it("points a refused host.docker.internal at mongod's bindIp", () => {
+    const problem = explain(networkError("connect ECONNREFUSED 172.17.0.1:27017", "ECONNREFUSED"), {
+      ...ON_HOST,
+      container: DOCKER_DESKTOP,
+    });
+    expect(problem.kind).toBe("connection-refused");
+    expect(problem.message).toContain("the machine it runs on");
+    expect(problem.fix).toMatch(/bindIp/);
+    expect(problem.fix).toMatch(/127\.0\.0\.1/);
+  });
+
+  it("keeps localhost advice right for Kubernetes and host networking", () => {
+    const refused = networkError("connect ECONNREFUSED 127.0.0.1:27017", "ECONNREFUSED");
+    const kubernetes = explain(refused, { ...LOCAL, container: { kind: "kubernetes" } });
+    expect(kubernetes.fix).toMatch(/localhost is this pod/);
+    expect(kubernetes.fix).toMatch(/svc\.cluster\.local/);
+    expect(kubernetes.fix).not.toMatch(/host\.docker\.internal/);
+    const hostNetwork = explain(refused, { ...LOCAL, container: { kind: "host-network" } });
+    expect(hostNetwork.fix).toMatch(/bindIp/);
+    expect(hostNetwork.fix).not.toMatch(/host\.docker\.internal/);
+  });
+
+  it("suggests host.containers.internal for localhost under Podman", () => {
+    const problem = explain(networkError("connect ECONNREFUSED 127.0.0.1:27017", "ECONNREFUSED"), {
+      ...LOCAL,
+      container: {
+        kind: "podman",
+        hostAlias: "host.containers.internal",
+        hostAliasResolves: true,
+      },
+    });
+    expect(problem.fix).toMatch(/runs in Podman/);
+    expect(problem.fix).toContain("host.containers.internal");
+    // The alias resolves, so there is nothing to add.
+    expect(problem.fix).not.toMatch(/--add-host/);
   });
 
   it("explains Atlas closing the connection as the IP access list, and offers the public IP", () => {
@@ -179,9 +305,10 @@ describe("explainConnectionError", () => {
   });
 
   it("recognises other timeouts and falls back to the driver's message", () => {
-    expect(explain(new Error("Server selection timed out after 10000 ms"), REMOTE).kind).toBe(
-      "timeout",
-    );
+    const timeout = explain(new Error("Server selection timed out after 10000 ms"), REMOTE);
+    expect(timeout.kind).toBe("timeout");
+    // A single-node replica set behind Docker or a tunnel needs directConnection.
+    expect(timeout.fix).toMatch(/directConnection=true/);
     const unknown = explain(new Error("something odd"), REMOTE);
     expect(unknown.kind).toBe("unknown");
     expect(unknown.message).toBe("something odd");

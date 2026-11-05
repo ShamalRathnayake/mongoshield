@@ -69,10 +69,64 @@ export interface SessionInfo {
   /** While setup is not complete: whether the setup page needs the token from the log. */
   readonly setup?: SetupState;
   /**
-   * Signed in only: whether the console runs in a container, where `localhost` is the
-   * container itself. Pages then suggest `host.docker.internal` instead of `localhost`.
+   * Whether the session cookie is `Secure` (MONGOSHIELD_COOKIE_SECURE, on by default).
+   * Browsers drop a Secure cookie over plain HTTP from anywhere but localhost, so the
+   * sign-in and setup pages warn when they are opened that way. Absent from older servers.
    */
-  readonly inContainer?: boolean;
+  readonly cookieSecure?: boolean;
+  /**
+   * Whether the server's Node.js has zstd (22.15+ / 23.8+). Without it the plan editor
+   * offers gzip instead, and the server refuses zstd plans it could not run. Absent from
+   * older servers, which means available.
+   */
+  readonly zstdAvailable?: boolean;
+  /**
+   * Signed in only: where the console runs (Docker, Podman, Kubernetes, …) and whether
+   * the name for "the machine the container runs on" resolves there. Pages use it to
+   * suggest `host.docker.internal` instead of `localhost`, or to explain how to make
+   * that name exist (Linux Docker Engine needs `--add-host`).
+   */
+  readonly container?: ContainerEnvironment;
+}
+
+/**
+ * What kind of place the console runs in, as far as networking is concerned:
+ *
+ *   docker-desktop  Docker Desktop or OrbStack (a Linux VM on macOS/Windows): `localhost`
+ *                   is the container, `host.docker.internal` reaches the computer
+ *   docker-engine   Docker Engine on Linux: `localhost` is the container, and
+ *                   `host.docker.internal` exists only with
+ *                   `--add-host=host.docker.internal:host-gateway`
+ *   podman          Podman: like Docker, but the name is `host.containers.internal`
+ *   kubernetes      a Kubernetes pod: `localhost` is the pod (a sidecar works), other
+ *                   databases are reached through Service names; no host name to suggest
+ *   host-network    a container sharing the host's network (`--network host`):
+ *                   `localhost` IS the host machine
+ *   none            not in a container: `localhost` is this computer
+ */
+export type ContainerKind =
+  | "docker-desktop"
+  | "docker-engine"
+  | "podman"
+  | "kubernetes"
+  | "host-network"
+  | "none";
+
+/** The console's container environment, detected by the server at start (see SessionInfo). */
+export interface ContainerEnvironment {
+  readonly kind: ContainerKind;
+  /**
+   * The name that reaches the machine the container runs on (`host.docker.internal`,
+   * `host.containers.internal`); absent where `localhost` already means the right thing
+   * (not in a container, host networking, Kubernetes).
+   */
+  readonly hostAlias?: string;
+  /**
+   * Whether {@link hostAlias} resolves from inside the console (a DNS lookup on the
+   * server). Pages offer the name in one click only when it does; otherwise they show
+   * how to create it. Absent until the lookup has finished.
+   */
+  readonly hostAliasResolves?: boolean;
 }
 
 /**
@@ -236,6 +290,7 @@ export type AtlasTierName = "shared" | "dedicated";
 /** The kinds of connection failure the console explains (src/server/connection-problems.ts). */
 export type ConnectionProblemKind =
   | "dns-not-found"
+  | "dns-resolver"
   | "network-blocked"
   | "paused-cluster"
   | "auth-failed"
@@ -825,6 +880,13 @@ export interface JobSummary {
   /** e.g. the new backup id, or "restored 1.2M documents". */
   readonly summary?: string;
   readonly error?: ApiError["error"];
+  /**
+   * Restores only: target namespaces the restore started but has not finished. While it
+   * runs these are in progress; on a job that failed, was cancelled or was interrupted by
+   * a console crash, they may be dropped or half-loaded (restore them again with "drop").
+   * Saved with the job, so the list survives a restart.
+   */
+  readonly unfinishedNamespaces?: readonly string[];
 }
 
 /** Server-Sent Events on /api/jobs/:id/events. `data` is JSON of this shape. */
@@ -1216,6 +1278,8 @@ export interface ApiRoutes {
   "POST /api/users": { request: UserInput; response: UserView };
   "PUT /api/users/:id": { request: UserInput; response: UserView };
   "DELETE /api/users/:id": { request: undefined; response: { ok: true } };
+  /** Ends every session of the user (yours except the one making the request). */
+  "POST /api/users/:id/sign-out": { request: undefined; response: { revoked: number } };
 
   "GET /api/connections": { request: undefined; response: readonly ConnectionView[] };
   "POST /api/connections": { request: ConnectionInput; response: ConnectionView };

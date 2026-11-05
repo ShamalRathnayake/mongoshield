@@ -125,11 +125,22 @@ export function optionalStringArray(
   return strings;
 }
 
-/** An optional `{ string: string }` map. */
+/**
+ * An optional `{ string: string }` map.
+ *
+ * `nonEmptyValues` refuses values that are empty or only whitespace. Credential maps
+ * set it: an empty credential is never meant, and a stored-but-empty credential would
+ * make the location look as if it had credentials when it has none (the managed-identity
+ * endpoint check in jobs/storage.ts must not be skipped for one).
+ */
 export function optionalStringMap(
   fields: Fields,
   name: string,
-  options: { readonly maxEntries?: number; readonly maxLength?: number } = {},
+  options: {
+    readonly maxEntries?: number;
+    readonly maxLength?: number;
+    readonly nonEmptyValues?: boolean;
+  } = {},
 ): Record<string, string> | undefined {
   const value = fields[name];
   if (value === undefined || value === null) return undefined;
@@ -143,6 +154,14 @@ export function optionalStringMap(
     if (typeof item !== "string" || key.length > DEFAULT_MAX_LENGTH || item.length > maxLength) {
       throw invalid(
         `Every value of "${name}" must be a string of at most ${maxLength} characters.`,
+      );
+    }
+    if (options.nonEmptyValues === true && item.trim() === "") {
+      // JSON.stringify quotes the (untrusted) key and escapes any control characters.
+      const shownKey = JSON.stringify(key.slice(0, 64));
+      throw invalid(
+        `The value of ${shownKey} in "${name}" is empty.`,
+        `Give ${shownKey} a value, or leave it out entirely.`,
       );
     }
     map[key] = item;

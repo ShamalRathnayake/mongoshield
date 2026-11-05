@@ -21,7 +21,7 @@
   "bugs": "https://github.com/ShamalRathnayake/mongoshield/issues",
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.19.0"
   },
   "bin": {
     "mongoshield-operator": "./dist/main.mjs"

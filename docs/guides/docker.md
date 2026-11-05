@@ -8,17 +8,24 @@ the CLI image starts at [The CLI image](#the-cli-image).
 ## The web console
 
 ```bash
-docker run -p 8080:8080 -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console
+docker run -p 127.0.0.1:8080:8080 --add-host=host.docker.internal:host-gateway \
+  -v mongoshield:/data ghcr.io/shamalrathnayake/mongoshield-console
 ```
 
-Open http://localhost:8080. There is nothing to configure first:
+Open http://localhost:8080. There is nothing to configure first. The two flags matter:
+
+- `-p 127.0.0.1:8080:8080` publishes the console on this machine only. Until the admin
+  exists, whoever opens the setup page first becomes the admin, so never publish it on
+  every interface (`-p 8080:8080`) on a machine others can reach. For access from other
+  machines, see [Plain HTTP, HTTPS and other machines](#plain-http-https-and-other-machines).
+- `--add-host=host.docker.internal:host-gateway` makes `host.docker.internal` (a MongoDB on this machine) work
+  on Linux Docker Engine too. Docker Desktop and OrbStack already provide the name, and
+  the flag is harmless there.
 
 1. **Create the admin.** For 15 minutes after the console starts, the setup page creates
    the first admin without a token. After that (or with `MONGOSHIELD_SETUP_WINDOW_MINUTES=0`)
    it needs the one-time link the console prints in its log (`docker logs <container>`),
-   or a restart to open the window again. Whoever opens the page first in that window
-   becomes the admin, so on a machine reachable from other networks publish the port on
-   loopback only until then: `-p 127.0.0.1:8080:8080`.
+   or a restart to open the window again.
 2. **Paste a connection string**, the console tests it and suggests a name and whether it
    is production (always shown, so you can change it), then opens the live data browser.
 3. **Back up now** writes an encrypted backup to the **Local backups** location
@@ -54,7 +61,7 @@ Inside a container, `localhost` is the console's own container, not your compute
 | Where MongoDB runs | Connection string |
 |---|---|
 | Another container | Put both on one network (`docker network create backup`, `--network backup` on both) and use the container's name: `mongodb://mongo:27017/?replicaSet=rs0`. Compose does this for you. |
-| On the host machine | `mongodb://host.docker.internal:27017/?directConnection=true`. Docker Desktop and OrbStack provide that name; on Linux add `--add-host=host.docker.internal:host-gateway`, and make mongod listen on that interface (`bindIp`). |
+| On the host machine | `mongodb://host.docker.internal:27017/?directConnection=true`. Docker Desktop and OrbStack provide that name; on Linux it needs `--add-host=host.docker.internal:host-gateway` (in every example here), and mongod must listen on that interface (`bindIp`), not only on 127.0.0.1. |
 | MongoDB Atlas or any server | Paste the string as Atlas shows it (see below). |
 
 ### Atlas in the console
@@ -73,10 +80,15 @@ For a server whose certificate comes from your own certificate authority, mount 
 name it in the connection string:
 
 ```bash
-docker run -p 8080:8080 -v mongoshield:/data \
-  -v "$PWD/ca.pem:/certs/ca.pem:ro" ghcr.io/shamalrathnayake/mongoshield-console
+docker run -p 127.0.0.1:8080:8080 --add-host=host.docker.internal:host-gateway -v mongoshield:/data \
+  -v "$PWD/ca.pem:/certs/ca.pem:ro,z" ghcr.io/shamalrathnayake/mongoshield-console
 # connection string: mongodb+srv://user:pass@cluster0.example.com/?tlsCAFile=/certs/ca.pem
 ```
+
+`z` in `:ro,z` is for hosts with SELinux enforcing (Fedora, RHEL, CentOS): Docker relabels
+the file so the container may read it. Without it the console gets "permission denied" on
+the CA file, which surfaces as a TLS error. Elsewhere it is ignored. Use it only on files
+and folders you mount for MongoShield, never on system folders such as `/home` or `/etc`.
 
 `docker/smoke/console-srv-tls.sh` proves this end to end without Atlas: CoreDNS on the
 Docker network serves the SRV and TXT records, mongod requires TLS with a private CA, and
@@ -91,6 +103,21 @@ Session cookies are `Secure` by default. Browsers accept them over plain HTTP on
 sign in. For access from other machines, put a TLS reverse proxy (Caddy,
 Traefik, nginx, an ingress) in front and set `MONGOSHIELD_PUBLIC_URL=https://…`. For a quick
 evaluation on a trusted network only, `MONGOSHIELD_COOKIE_SECURE=false` allows plain HTTP.
+
+### A host folder instead of a named volume
+
+The console runs as uid 65532. A named volume (`-v mongoshield:/data`) is prepared for that
+user automatically; a bind-mounted host folder is not, and the console then cannot write
+its `secret.key`. Give the folder to that user first (and add `z` on SELinux hosts):
+
+```bash
+mkdir -p ./mongoshield-data && sudo chown 65532:65532 ./mongoshield-data
+docker run -p 127.0.0.1:8080:8080 --add-host=host.docker.internal:host-gateway \
+  -v "$PWD/mongoshield-data:/data:z" ghcr.io/shamalrathnayake/mongoshield-console
+```
+
+Rootless Docker and Podman map container users to a range of host ids, so there use
+`podman unshare chown 65532:65532 ./mongoshield-data` (or a named volume) instead.
 
 ### Stopping, health and Compose
 
@@ -118,7 +145,7 @@ provenance. The entrypoint is the `mongoshield` CLI and the default command is
 ## One-off commands
 
 ```bash
-docker run --rm --init \
+docker run --rm --init --add-host=host.docker.internal:host-gateway \
   -e MONGODB_URI='mongodb+srv://backup:…@cluster0.example.mongodb.net/' \
   -e MONGOSHIELD_STORAGE='s3://acme-backups/prod?region=eu-west-1' \
   -e MONGOSHIELD_RECIPIENTS='age1…' \
@@ -127,18 +154,30 @@ docker run --rm --init \
 ```
 
 `--init` lets Ctrl-C and `docker stop` interrupt the command promptly (Node.js as PID 1
-gets no default signal handling).
+gets no default signal handling). `--add-host` makes `host.docker.internal` reach a
+MongoDB on the host machine on Linux too (see [Connecting to MongoDB](#connecting-to-mongodb));
+it changes nothing for Atlas or other servers.
 
 Backing up to a local directory instead: mount a volume at `/backups`, which the image
 prepares for its non-root user (uid 65532):
 
 ```bash
-docker run --rm --init -e MONGODB_URI -v mongoshield-backups:/backups \
+docker run --rm --init --add-host=host.docker.internal:host-gateway -e MONGODB_URI \
+  -v mongoshield-backups:/backups \
   ghcr.io/shamalrathnayake/mongoshield:2 backup --to /backups
 ```
 
-A bind-mounted host directory must be writable by uid 65532
-(`sudo chown 65532:65532 ./backups`), or run with `--user "$(id -u):$(id -g)"`.
+A bind-mounted host directory must be writable by uid 65532, and on SELinux hosts needs
+`z` (see [A host folder instead of a named volume](#a-host-folder-instead-of-a-named-volume)):
+
+```bash
+mkdir -p ./backups && sudo chown 65532:65532 ./backups
+docker run --rm --init --add-host=host.docker.internal:host-gateway -e MONGODB_URI \
+  -v "$PWD/backups:/backups:z" \
+  ghcr.io/shamalrathnayake/mongoshield:2 backup --to /backups
+```
+
+Or run as your own user instead: `--user "$(id -u):$(id -g)"`.
 
 ## Running the scheduler
 
@@ -148,9 +187,9 @@ locking, verification, retention and notifications (see the
 for `mongoshield.config.{ts,js,mjs,json}`:
 
 ```bash
-docker run -d --name mongoshield --restart unless-stopped \
+docker run -d --name mongoshield --restart unless-stopped --add-host=host.docker.internal:host-gateway \
   -e MONGODB_URI -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  -v "$PWD/mongoshield.config.json:/app/mongoshield.config.json:ro" \
+  -v "$PWD/mongoshield.config.json:/app/mongoshield.config.json:ro,z" \
   ghcr.io/shamalrathnayake/mongoshield:2
 ```
 
@@ -189,6 +228,7 @@ A full Compose stack (MongoDB, MinIO, the scheduler) is in
 | Variable | Meaning |
 |---|---|
 | `MONGODB_URI` or `MONGOSHIELD_URI` | connection string |
+| `MONGOSHIELD_URI_FILE` | a file holding the connection string (a mounted secret); used when neither variable above is set |
 | `MONGOSHIELD_STORAGE` | `s3://bucket/prefix?region=…&endpoint=…&forcePathStyle=true`, or a path |
 | `MONGOSHIELD_RECIPIENTS` | comma-separated age public keys to encrypt for |
 | `MONGOSHIELD_PASSPHRASE` | passphrase encryption instead of recipients |
@@ -201,9 +241,9 @@ Environment variables override the config file; command-line flags override both
 ## Restoring
 
 ```bash
-docker run --rm -it --init -e MONGODB_URI \
+docker run --rm -it --init --add-host=host.docker.internal:host-gateway -e MONGODB_URI \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  -v "$HOME/backup.key:/run/secrets/backup.key:ro" -e MONGOSHIELD_IDENTITY_FILE=/run/secrets/backup.key \
+  -v "$HOME/backup.key:/run/secrets/backup.key:ro,z" -e MONGOSHIELD_IDENTITY_FILE=/run/secrets/backup.key \
   ghcr.io/shamalrathnayake/mongoshield:2 \
   restore latest --from s3://acme-backups/prod --rename 'app.*=app_restored.*'
 ```
@@ -221,12 +261,19 @@ docker build -f docker/Dockerfile --build-arg CLOUD_SDKS=gcs,azure -t mongoshiel
 Approximate sizes: `none` ~160 MB, `s3` ~180 MB, `all` ~310 MB (uncompressed).
 
 The image has no shell. To debug, build `--target deps` (Debian slim with the same
-`node_modules`), or swap the runtime base for `gcr.io/distroless/nodejs24-debian12:debug-nonroot`.
+`node_modules`), or swap the runtime base for `gcr.io/distroless/nodejs24-debian13:debug-nonroot`.
 
 ## Verifying the signature
 
+Check that the image was signed by this repository's Docker workflow, running on `main`
+(releases are built there) or on a release tag, and not merely by any workflow of the
+repository:
+
 ```bash
 cosign verify ghcr.io/shamalrathnayake/mongoshield:2 \
-  --certificate-identity-regexp '^https://github.com/ShamalRathnayake/mongoshield/' \
+  --certificate-identity-regexp '^https://github\.com/ShamalRathnayake/mongoshield/\.github/workflows/docker\.yml@refs/(heads/main|tags/(mongoshield@|v)[0-9].*)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+For a release image you can be stricter still:
+`--certificate-identity https://github.com/ShamalRathnayake/mongoshield/.github/workflows/docker.yml@refs/heads/main`.

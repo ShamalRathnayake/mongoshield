@@ -24,7 +24,7 @@
  * mask tooling, and reads as what it does: "mask: suggest rules".
  */
 
-import { access, readFile, rename, writeFile } from "node:fs/promises";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
 import type { MongoShieldConfigInput } from "../../config/schema.ts";
 import { MongoShieldError } from "../../errors.ts";
@@ -42,6 +42,7 @@ import {
   toLiteral,
 } from "../../mask/suggest/index.ts";
 import { openConnection } from "../../mongo/index.ts";
+import { renameWithRetry } from "../../util/rename.ts";
 import { usageError } from "../args.ts";
 import type { CommandContext, CommandSpec } from "../command.ts";
 import { formatCount, plural } from "../format.ts";
@@ -333,11 +334,21 @@ function mergeJson(
   }
 }
 
-/** Writes next to the file, then renames: a crash never leaves half a mask file. */
+/**
+ * Writes next to the file, then renames: a crash never leaves half a mask file.
+ * The rename is retried for a moment on Windows, where an editor, antivirus or
+ * indexer holding the file open makes it fail with EPERM/EBUSY; if it still fails,
+ * the temporary file is removed instead of being left next to the mask file.
+ */
 async function writeAtomically(file: string, text: string): Promise<void> {
   const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, text, "utf8");
-  await rename(temporary, file);
+  try {
+    await writeFile(temporary, text, "utf8");
+    await renameWithRetry(temporary, file);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,14 @@ describe("isInScope", () => {
     // Names of Object.prototype members are labels like any other.
     expect(isInScope(origin, { labels: { constructor: "Object" } })).toBe(false);
   });
+
+  it("keeps two replica sets with one set name apart when both record an instanceId", () => {
+    const staging = { ...origin, instanceId: "aaa" };
+    expect(isInScope(staging, { clusterId: "c1", instanceId: "aaa" })).toBe(true);
+    expect(isInScope(staging, { clusterId: "c1", instanceId: "bbb" })).toBe(false);
+    // A backup written before instanceId existed still belongs to its cluster's scope.
+    expect(isInScope(origin, { clusterId: "c1", instanceId: "bbb" })).toBe(true);
+  });
 });
 
 describe("validateScope", () => {

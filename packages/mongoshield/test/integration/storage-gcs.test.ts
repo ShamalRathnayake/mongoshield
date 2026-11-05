@@ -11,7 +11,8 @@
 
 import { randomUUID } from "node:crypto";
 import { Storage } from "@google-cloud/storage";
-import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+// Types only: the module is loaded lazily in `beforeAll` (see ../helpers/docker.ts).
+import type { StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe } from "vitest";
 import { gcsStorage } from "../../src/storage/gcs.ts";
 import { freePort, isDockerAvailable } from "../helpers/docker.ts";
@@ -21,6 +22,7 @@ const FAKE_GCS_IMAGE = "fsouza/fake-gcs-server:1.50.2";
 const BUCKET = "mongoshield-conformance";
 const CONTAINER_PORT = 4443;
 
+// False without Docker, and below Node.js 22.22, which Testcontainers 12 needs.
 const dockerAvailable = await isDockerAvailable();
 
 describe.skipIf(!dockerAvailable)("gcsStorage against fake-gcs-server", () => {
@@ -30,6 +32,7 @@ describe.skipIf(!dockerAvailable)("gcsStorage against fake-gcs-server", () => {
   beforeAll(async () => {
     const hostPort = await freePort();
     const endpoint = `http://127.0.0.1:${hostPort}`;
+    const { GenericContainer, Wait } = await import("testcontainers");
     container = await new GenericContainer(FAKE_GCS_IMAGE)
       .withExposedPorts({ container: CONTAINER_PORT, host: hostPort })
       .withCommand([

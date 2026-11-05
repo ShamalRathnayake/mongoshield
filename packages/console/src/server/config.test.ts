@@ -120,11 +120,15 @@ describe("readEnvironment", () => {
     expect(readEnvironment({ MONGOSHIELD_SECRET: SECRET })).toMatchObject({
       dataDir: "/data",
       port: 8080,
-      host: "0.0.0.0",
       cookieSecure: true,
       shutdownGraceMs: 60_000,
     });
     expect(readEnvironment({ MONGOSHIELD_SECRET: SECRET }).oidc).toBeUndefined();
+    // No HOST: main.ts listens on the dual-stack default (listen.ts).
+    expect(readEnvironment({ MONGOSHIELD_SECRET: SECRET }).host).toBeUndefined();
+    expect(readEnvironment({ MONGOSHIELD_SECRET: SECRET, HOST: "127.0.0.1" }).host).toBe(
+      "127.0.0.1",
+    );
   });
 
   it("reads the optional settings and validates them", () => {
@@ -154,5 +158,43 @@ describe("readEnvironment", () => {
     expect(() =>
       readEnvironment({ MONGOSHIELD_SECRET: SECRET, MONGOSHIELD_TRUST_PROXY_SECRET: "weak" }),
     ).toThrow(/at least 32/);
+  });
+});
+
+describe("request-handling settings", () => {
+  it("reads allowed hosts, trusted proxies and the unsafe-targets opt-out", () => {
+    expect(readEnvironment({}).security).toEqual({});
+    expect(
+      readEnvironment({
+        MONGOSHIELD_ALLOWED_HOSTS: "Backups.Example.com, *.corp.example.net",
+        MONGOSHIELD_TRUSTED_PROXIES: "10.0.0.0/8 192.0.2.5",
+        MONGOSHIELD_ALLOW_UNSAFE_TARGETS: "true",
+      }).security,
+    ).toEqual({
+      allowedHosts: ["backups.example.com", "*.corp.example.net"],
+      trustedProxies: ["10.0.0.0/8", "192.0.2.5"],
+      allowUnsafeTargets: true,
+    });
+  });
+
+  it("refuses malformed entries instead of trusting the wrong peer", () => {
+    expect(() => readEnvironment({ MONGOSHIELD_TRUSTED_PROXIES: "proxy.local" })).toThrow(
+      /not an IP address or CIDR range/,
+    );
+    expect(() => readEnvironment({ MONGOSHIELD_ALLOWED_HOSTS: "https://x.example" })).toThrow(
+      /not a host name/,
+    );
+    expect(() => readEnvironment({ MONGOSHIELD_ALLOW_UNSAFE_TARGETS: "yes" })).toThrow(
+      /"true" or "false"/,
+    );
+  });
+
+  it("accepts an OIDC redirect URL under a sub-path", () => {
+    const environment = readEnvironment({
+      MONGOSHIELD_PUBLIC_URL: "https://example.com/mongoshield/",
+      MONGOSHIELD_OIDC_ISSUER: "https://login.example.com",
+      MONGOSHIELD_OIDC_CLIENT_ID: "console",
+    });
+    expect(environment.oidc?.redirectUrl).toBe("https://example.com/mongoshield/api/oidc/callback");
   });
 });

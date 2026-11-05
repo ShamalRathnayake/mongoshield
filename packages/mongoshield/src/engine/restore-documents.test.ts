@@ -6,9 +6,104 @@ import { describe, expect, it } from "vitest";
 import {
   type BatchLimits,
   batchDocuments,
+  classifyDuplicateKey,
   DEFAULT_BATCH_LIMITS,
+  isDuplicateIdError,
   type RawBatch,
 } from "./restore-documents.ts";
+
+/** The parts of a driver write error that decide (the driver drops `keyPattern`). */
+function writeError(code: number, errmsg: string) {
+  return { code, errmsg };
+}
+
+describe("isDuplicateIdError", () => {
+  it("accepts duplicate _id errors, including clustered collections", () => {
+    const messages = [
+      "E11000 duplicate key error collection: app.users index: _id_ dup key: { _id: 1 }",
+      "E11000 duplicate key error collection: app.events dup key: { _id: 1 } found value: {}",
+    ];
+    for (const message of messages)
+      expect(isDuplicateIdError(writeError(11000, message))).toBe(true);
+  });
+
+  it("refuses duplicates on any other unique index, even one starting with _id", () => {
+    const messages = [
+      'E11000 duplicate key error collection: app.users index: username_1 dup key: { username: "ada" }',
+      "E11000 duplicate key error collection: app.users index: _id_1_x_1 dup key: { _id: 1, x: 2 }",
+    ];
+    for (const message of messages) {
+      expect(isDuplicateIdError(writeError(11000, message))).toBe(false);
+    }
+  });
+
+  it("refuses errors that are not duplicate keys", () => {
+    expect(isDuplicateIdError(writeError(121, "Document failed validation"))).toBe(false);
+    expect(classifyDuplicateKey(writeError(121, "index: _id_"))).toBeUndefined();
+  });
+});
+
+describe("classifyDuplicateKey", () => {
+  /** An E11000 whose message names no index, as MongoDB-compatible engines word it. */
+  const COSMOS =
+    "E11000 duplicate key error collection: app.users Failed _id or unique index constraint";
+
+  it("trusts keyPattern first, whatever the message says", () => {
+    const onId = { code: 11000, errmsg: COSMOS, keyPattern: { _id: 1 } };
+    const onEmail = {
+      code: 11000,
+      errmsg: "index: _id_ dup key: { _id: 1 }",
+      keyPattern: { email: 1 },
+    };
+    const compound = { code: 11000, errmsg: COSMOS, keyPattern: { _id: 1, tenant: 1 } };
+    expect(classifyDuplicateKey(onId)).toBe("id");
+    expect(classifyDuplicateKey(onEmail)).toBe("other-index");
+    expect(classifyDuplicateKey(compound)).toBe("other-index");
+  });
+
+  it("falls back to keyValue when there is no keyPattern", () => {
+    expect(classifyDuplicateKey({ code: 11000, keyValue: { _id: "a" } })).toBe("id");
+    expect(classifyDuplicateKey({ code: 11000, keyValue: { email: "a@b" } })).toBe("other-index");
+  });
+
+  it("reads keyPattern from a WriteError's raw record", () => {
+    // The driver's WriteError keeps the server's record as `err` and exposes code and
+    // errmsg as getters (the class itself is not exported). It drops keyPattern today;
+    // should a version pass it on, it is used.
+    const raw = { index: 0, code: 11000, errmsg: COSMOS, keyPattern: { _id: 1 } };
+    const withPattern = { err: raw, code: raw.code, errmsg: raw.errmsg };
+    expect(classifyDuplicateKey(withPattern)).toBe("id");
+    const withoutPattern = { err: { ...raw, keyPattern: undefined }, code: 11000, errmsg: COSMOS };
+    expect(classifyDuplicateKey(withoutPattern)).toBe("unattributed");
+  });
+
+  it("reads the index name from the message, also without a dup key part", () => {
+    expect(
+      classifyDuplicateKey(
+        writeError(11000, "E11000 duplicate key error collection: app.c index: _id_"),
+      ),
+    ).toBe("id");
+    expect(
+      classifyDuplicateKey(writeError(11000, "E11000 duplicate key error index: email_1")),
+    ).toBe("other-index");
+  });
+
+  it("reads the first field of the duplicate key when no index is named", () => {
+    expect(classifyDuplicateKey(writeError(11000, "E11000 dup key: { _id: 1 }"))).toBe("id");
+    expect(classifyDuplicateKey(writeError(11000, 'E11000 dup key: { "_id": 1 }'))).toBe("id");
+    expect(classifyDuplicateKey(writeError(11000, 'E11000 dup key: { email: "x" }'))).toBe(
+      "other-index",
+    );
+  });
+
+  it("calls an E11000 that says nothing about its index unattributed, and skips it as a duplicate _id", () => {
+    for (const message of [COSMOS, "E11000 duplicate key error", ""]) {
+      expect(classifyDuplicateKey(writeError(11000, message))).toBe("unattributed");
+      expect(isDuplicateIdError(writeError(11000, message))).toBe(true);
+    }
+    expect(classifyDuplicateKey({ code: 11000 })).toBe("unattributed");
+  });
+});
 
 async function* from(documents: readonly Buffer[]): AsyncGenerator<Buffer> {
   yield* documents;

@@ -14,17 +14,14 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
-import {
-  GenericContainer,
-  getContainerRuntimeClient,
-  type StartedTestContainer,
-  Wait,
-} from "testcontainers";
+// Types only: the module is loaded lazily in `beforeAll` (see ../helpers/docker.ts).
+import type { StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { isMongoShieldError } from "../../src/errors.ts";
 import { resolveStorage } from "../../src/storage/resolve.ts";
 import { type S3StorageOptions, s3Storage } from "../../src/storage/s3.ts";
 import type { ObjectInfo, StorageAdapter } from "../../src/storage/types.ts";
+import { isDockerAvailable } from "../helpers/docker.ts";
 import { describeStorageConformance } from "../helpers/storage-conformance.ts";
 
 /** Pinned so emulator upgrades never change test results unnoticed. */
@@ -32,21 +29,7 @@ const S3MOCK_IMAGE = "adobe/s3mock:5.2";
 /** S3Mock's plain-HTTP port. */
 const S3MOCK_PORT = 9090;
 const BUCKET = "mongoshield-conformance";
-/** How long to wait for Docker to answer before skipping the suite. */
-const DOCKER_PROBE_TIMEOUT_MS = 5_000;
-
-/** True if a container runtime answers within the timeout. */
-async function isDockerAvailable(): Promise<boolean> {
-  const timeout = new Promise<boolean>((resolve) => {
-    setTimeout(() => resolve(false), DOCKER_PROBE_TIMEOUT_MS).unref();
-  });
-  const probe = getContainerRuntimeClient().then(
-    () => true,
-    () => false,
-  );
-  return Promise.race([probe, timeout]);
-}
-
+// False without Docker, and below Node.js 22.22, which Testcontainers 12 needs.
 const dockerAvailable = await isDockerAvailable();
 
 describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
@@ -54,6 +37,7 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
   let client: S3Client;
 
   beforeAll(async () => {
+    const { GenericContainer, Wait } = await import("testcontainers");
     container = await new GenericContainer(S3MOCK_IMAGE)
       .withExposedPorts(S3MOCK_PORT)
       .withWaitStrategy(Wait.forHttp("/", S3MOCK_PORT).forStatusCodeMatching(() => true))
@@ -96,8 +80,8 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
   const multipartBody = () => Readable.from([Buffer.alloc(11 * 1024 * 1024, 7)]);
 
   describe("checksum modes", () => {
-    it("with the SDK default, S3Mock refuses multipart completions and the error says what to set", async () => {
-      const storage = ownClientStorage();
+    it("with WHEN_SUPPORTED (the SDK default), S3Mock refuses multipart completions and the error says what to set", async () => {
+      const storage = ownClientStorage({ requestChecksumCalculation: "WHEN_SUPPORTED" });
       try {
         // Single-part uploads carry their checksum in the request and work.
         await storage.put("small", Buffer.from("x"));
@@ -112,6 +96,17 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
       }
     });
 
+    it("by default with a custom endpoint, multipart uploads work: checksums are only sent when required", async () => {
+      const storage = ownClientStorage();
+      try {
+        const info = await storage.put("big", multipartBody());
+        expect(info.size).toBe(11 * 1024 * 1024);
+        expect((await storage.head("big"))?.size).toBe(11 * 1024 * 1024);
+      } finally {
+        await storage.close?.();
+      }
+    });
+
     it("with requestChecksumCalculation WHEN_REQUIRED, multipart uploads work without a custom client", async () => {
       const storage = ownClientStorage({ requestChecksumCalculation: "WHEN_REQUIRED" });
       try {
@@ -119,6 +114,26 @@ describe.skipIf(!dockerAvailable)("s3Storage against S3Mock", () => {
         expect(info.size).toBe(11 * 1024 * 1024);
         expect(info.etag).toMatch(/-3$/);
         expect((await storage.head("big"))?.size).toBe(11 * 1024 * 1024);
+      } finally {
+        await storage.close?.();
+      }
+    });
+  });
+
+  describe("conditional writes on an endpoint that is not AWS or R2", () => {
+    it("probes the store once, then refuses to overwrite with If-None-Match", async () => {
+      // A localhost endpoint is "some S3-compatible store": the adapter probes it.
+      const storage = ownClientStorage();
+      try {
+        await storage.put("locks/a", Buffer.from("first"), { ifNoneMatch: "*" });
+        const second = await storage
+          .put("locks/a", Buffer.from("second"), { ifNoneMatch: "*" })
+          .catch((reason: unknown) => reason);
+        expect(isMongoShieldError(second, "MS_STORAGE_PRECONDITION_FAILED")).toBe(true);
+        // The probe object is gone again.
+        const keys: string[] = [];
+        for await (const info of storage.list("locks/")) keys.push(info.key);
+        expect(keys).toEqual(["locks/a"]);
       } finally {
         await storage.close?.();
       }

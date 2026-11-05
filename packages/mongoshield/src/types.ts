@@ -46,7 +46,7 @@ export interface DecryptionOptions {
 export interface MongoShieldOptions {
   readonly source?: SourceOptions;
   readonly storage: StorageAdapter;
-  /** Defaults to `"zstd"`. */
+  /** Defaults to `"zstd"`, or `"gzip"` on a Node.js without zstd (before 22.15 / 23.8). */
   readonly compression?: Compression;
   readonly encryption?: EncryptionOptions;
   readonly logger?: Logger;
@@ -209,6 +209,15 @@ export interface CompletedBackupResult {
    * `incremental` policy, or `fallbackToFull`): why.
    */
   readonly fullBackupReason?: string;
+  /**
+   * Things worth fixing that did not fail the backup, each also logged as a warning:
+   * consistency `auto` fell back to `none` (the manifest's `consistency.warning`), an
+   * incremental fell back to a full backup for a reason that repeats on every run
+   * (`MS_SNAPSHOT_TOO_OLD` on large time series), a Queryable Encryption collection
+   * backed up without its state collections. Absent when there is nothing to report.
+   * Scheduled runs copy them into the run report (`backup.warnings`).
+   */
+  readonly warnings?: readonly string[];
 }
 
 /**
@@ -250,6 +259,14 @@ export interface RestoreOptions {
    * (docs/guides/incremental-backups.md).
    */
   readonly at?: Date | ClusterTime;
+  /**
+   * With `at`: the deployment whose base backups the journal is replayed onto, as
+   * `shield.sourceIdentity()` returns it. Defaults to the configured `source`'s
+   * identity (never the target's: restoring into a fresh cluster is common). Without
+   * either, the newest suitable base at or before `at` decides, with a warning when
+   * the storage location holds bases of several deployments.
+   */
+  readonly sourceIdentity?: { readonly clusterId: string; readonly instanceId?: string };
   /** Defaults to the instance's `source`. */
   readonly target?: SourceOptions;
   readonly include?: readonly NamespacePattern[];
@@ -294,8 +311,10 @@ export interface RestoreOptions {
    * file) before writing anything. Without it, a file damaged late in a large
    * collection is only found after the earlier batches were inserted. Costs one
    * extra read of the selected data. On damage the restore fails with
-   * `MS_INTEGRITY_FAILED` and writes nothing. Defaults to false (the CLI turns it on
-   * when a target already holds data).
+   * `MS_INTEGRITY_FAILED` and writes nothing. Defaults to on when the restore drops a
+   * collection that holds documents (mode `drop`), so a damaged part can never leave a
+   * dropped live collection behind with only part of its data; off otherwise (the CLI
+   * also turns it on for insert and upsert into existing data). `false` turns it off.
    */
   readonly verifyFirst?: boolean;
 }
@@ -400,7 +419,14 @@ export interface PointInTimeResult {
 export interface RestoreResult {
   readonly plan: RestorePlan;
   readonly dryRun: boolean;
+  /** Documents written to the target (skipped duplicates are not counted). */
   readonly documentsRestored: number;
+  /**
+   * Mode `insert` only, present when any were skipped: documents not written because a
+   * document with the same `_id` was already in the target. A collision on any other
+   * unique index is not skipped: it fails the restore.
+   */
+  readonly documentsSkipped?: number;
   readonly durationMs: number;
   /** Present for point-in-time restores (`at`). */
   readonly pointInTime?: PointInTimeResult;

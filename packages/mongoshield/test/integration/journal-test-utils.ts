@@ -23,8 +23,9 @@ import {
   startJournal,
 } from "../../src/journal/index.ts";
 import type { StorageAdapter } from "../../src/storage/types.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 
-/** Starts a writer with test settings: 1 s segments, quick retries, a short lease. */
+/** Starts a writer with test settings: `TEST_COMPRESSION`, 1 s segments, quick retries, a short lease. */
 export function startTestJournal(
   client: MongoClient,
   storage: StorageAdapter,
@@ -34,7 +35,7 @@ export function startTestJournal(
   return startJournal({
     client,
     storage,
-    compression: "zstd",
+    compression: TEST_COMPRESSION,
     include: [`${database}.*`],
     segmentSeconds: 1,
     retryDelayMs: 100,

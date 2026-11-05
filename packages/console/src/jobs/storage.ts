@@ -20,19 +20,32 @@
  *   gs://bucket/prefix?projectId=
  *       credentials GOOGLE_CREDENTIALS_JSON (a service account key, as JSON)
  *   az://account/container/prefix?endpoint=
- *       credentials AZURE_STORAGE_CONNECTION_STRING
+ *       credentials AZURE_STORAGE_CONNECTION_STRING, or AZURE_STORAGE_SAS_TOKEN (a SAS
+ *       token for the account or container; never in `endpoint=`, where it would be
+ *       stored and shown in clear text)
  *   sftp://user@host:port/path?fingerprint=SHA256:…
  *       credentials SFTP_PRIVATE_KEY, SFTP_PASSPHRASE
  *
  * Why local paths must stay inside the data directory: the console runs with
  * its own file system permissions, and an admin account (or whoever stole one)
  * must not be able to point "storage" at /etc or another volume and read or
- * delete files there through backup, restore or prune.
+ * delete files there through backup, restore or prune. Nor at the console's own
+ * files inside it (console.json, the audit log, secret.key, the lock, the live edit
+ * journal): a prune or delete through such a location would destroy them.
+ *
+ * Endpoints (`endpoint=`) must not carry credentials (a SAS token in its query string
+ * would be stored and shown in clear), must not point at cloud metadata or link-local
+ * addresses, and an Azure location that uses the console's own managed identity (no
+ * connection string and no signed SAS token: see `AzureAuth`) only talks to Azure's
+ * storage domains, because the SDK sends the identity's bearer token to the endpoint
+ * (src/server/network-targets.ts; the console setting MONGOSHIELD_ALLOW_UNSAFE_TARGETS
+ * lifts the last two rules). Stored Azure credentials that would not be used are
+ * refused outright, both when saved and when the adapter is built.
  *
  * Cloud adapters are imported lazily, so their SDKs load only when used.
  */
 
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   MongoShieldError,
@@ -40,13 +53,23 @@ import {
   type StorageAdapter,
   SUPPORTED_STORAGE_SCHEMES,
 } from "mongoshield";
+import { LOCAL_JOURNAL_DIR } from "../server/live/journal.ts";
+import {
+  UNSAFE_TARGET_HINT,
+  unsafeHostReason,
+  unsafeManagedIdentityEndpointReason,
+} from "../server/network-targets.ts";
+import { AUDIT_FILE } from "../state/audit.ts";
+import { LOCK_FILE } from "../state/lock.ts";
+import { SECRET_KEY_FILE } from "../state/secret-key.ts";
+import { STATE_FILE } from "../state/store.ts";
 import type { StorageRecord } from "../state/types.ts";
 
 /** Credential names accepted per scheme. Anything else is refused (catches typos). */
 export const CREDENTIAL_NAMES: Readonly<Record<string, readonly string[]>> = {
   s3: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
   gs: ["GOOGLE_CREDENTIALS_JSON"],
-  az: ["AZURE_STORAGE_CONNECTION_STRING"],
+  az: ["AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_SAS_TOKEN"],
   sftp: ["SFTP_PRIVATE_KEY", "SFTP_PASSPHRASE"],
   memory: [],
   file: [],
@@ -74,10 +97,12 @@ export function storageSchemeOf(url: string): StorageScheme {
  */
 export function checkStorageInput(
   url: string,
-  credentialNames: readonly string[],
+  credentials: Readonly<Record<string, string>>,
   dataDir: string,
+  options: { readonly allowUnsafeTargets?: boolean } = {},
 ): void {
   const scheme = storageSchemeOf(url);
+  const credentialNames = Object.keys(credentials);
   if (scheme === "file") {
     localPathOf(url, dataDir);
   } else if (scheme !== "memory") {
@@ -88,6 +113,10 @@ export function checkStorageInput(
         hint: "Put credentials in the credentials fields; they are stored encrypted.",
       });
     }
+    const endpoint = parsed.searchParams.get("endpoint");
+    if (endpoint !== null) {
+      checkEndpoint(scheme, endpoint, credentials, options.allowUnsafeTargets === true);
+    }
   }
   const allowed = CREDENTIAL_NAMES[scheme] ?? [];
   for (const name of credentialNames) {
@@ -97,6 +126,97 @@ export function checkStorageInput(
           allowed.length > 0
             ? `Use ${allowed.join(", ")}.`
             : `${scheme} storage takes no credentials.`,
+      });
+    }
+  }
+  if (scheme === "az" && credentialNames.length > 0) checkAzureCredentials(credentials);
+}
+
+/**
+ * How an Azure location authenticates, judged by the credentials that would actually be
+ * USED, not by which names happen to be stored:
+ *
+ *   connectionString  a non-empty AZURE_STORAGE_CONNECTION_STRING (the SDK then never
+ *                     reaches for an identity of the console)
+ *   sas               a non-empty AZURE_STORAGE_SAS_TOKEN carrying a `sig=` signature
+ *                     (the library uses a SAS only when `sig` is present)
+ *   managedIdentity   neither: the library falls back to DefaultAzureCredential, i.e. the
+ *                     console's own managed identity, whose bearer token goes to the endpoint
+ *
+ * Deciding on names alone let `{"AZURE_STORAGE_SAS_TOKEN": ""}` (or a SAS without `sig=`)
+ * skip the managed-identity endpoint check and send the console's token to any host.
+ */
+export type AzureAuth =
+  | { readonly kind: "connectionString"; readonly connectionString: string }
+  | { readonly kind: "sas"; readonly sasToken: string }
+  | { readonly kind: "managedIdentity" };
+
+/** Works out the {@link AzureAuth} of a set of stored credentials (see there). */
+export function azureAuthOf(credentials: Readonly<Record<string, string>>): AzureAuth {
+  const connectionString = credentials.AZURE_STORAGE_CONNECTION_STRING?.trim() ?? "";
+  if (connectionString !== "") return { kind: "connectionString", connectionString };
+  // A SAS token may be pasted with or without its leading "?".
+  const sasToken = (credentials.AZURE_STORAGE_SAS_TOKEN ?? "").trim().replace(/^\?/, "");
+  const signature = new URLSearchParams(sasToken).get("sig") ?? "";
+  if (signature.trim() !== "") return { kind: "sas", sasToken };
+  return { kind: "managedIdentity" };
+}
+
+/**
+ * Stored Azure credentials must be usable: a location that stores some but would still
+ * authenticate with the console's managed identity is a mistake at best (and was the
+ * way around the endpoint check at worst; see {@link AzureAuth}).
+ */
+function checkAzureCredentials(credentials: Readonly<Record<string, string>>): void {
+  if (azureAuthOf(credentials).kind === "managedIdentity") throw unusableAzureCredentials();
+}
+
+/** The error for stored Azure credentials that would not be used (see {@link AzureAuth}). */
+function unusableAzureCredentials(): MongoShieldError {
+  return configError(
+    "The stored Azure credentials cannot be used: there is no connection string, and no SAS token with a signature (sig=).",
+    {
+      hint: "Give AZURE_STORAGE_CONNECTION_STRING, or a complete SAS token (sv=…&sig=…) in AZURE_STORAGE_SAS_TOKEN. Store no credentials at all to use the console's own Azure identity.",
+    },
+  );
+}
+
+/**
+ * The `endpoint=` parameter of an s3:// or az:// URL (see the file header): no
+ * credentials in it (Azure SAS tokens go into AZURE_STORAGE_SAS_TOKEN), no metadata or
+ * link-local hosts, and no foreign host for Azure's managed identity.
+ */
+function checkEndpoint(
+  scheme: StorageScheme,
+  endpoint: string,
+  credentials: Readonly<Record<string, string>>,
+  allowUnsafe: boolean,
+): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch (error) {
+    throw configError("The endpoint parameter is not a URL.", { cause: error });
+  }
+  if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "") {
+    throw configError("The endpoint must not contain credentials or a query string.", {
+      hint:
+        scheme === "az"
+          ? "Put a SAS token in the AZURE_STORAGE_SAS_TOKEN credential instead; credentials are stored encrypted and never shown."
+          : "Put credentials in the credentials fields; they are stored encrypted.",
+    });
+  }
+  if (allowUnsafe) return;
+  const unsafe = unsafeHostReason(parsed.hostname);
+  if (unsafe !== undefined) {
+    throw configError(`The endpoint is refused: ${unsafe}.`, { hint: UNSAFE_TARGET_HINT });
+  }
+  // Judged on the credentials that would really be used (see AzureAuth), never on names.
+  if (scheme === "az" && azureAuthOf(credentials).kind === "managedIdentity") {
+    const foreign = unsafeManagedIdentityEndpointReason(parsed.hostname);
+    if (foreign !== undefined) {
+      throw configError(`The endpoint is refused: ${foreign}.`, {
+        hint: `Store credentials for this location (AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_SAS_TOKEN). ${UNSAFE_TARGET_HINT}`,
       });
     }
   }
@@ -198,8 +318,28 @@ export function localPathOf(url: string, dataDir: string): string {
       hint: `Use a relative path such as "backups", or an absolute path under ${root}.`,
     });
   }
+  const first = (inside.split(sep)[0] ?? "").toLowerCase();
+  if (CONSOLE_OWN_NAMES.some((name) => first === name || first.startsWith(`${name}.`))) {
+    throw configError(
+      `Local storage cannot use "${first}": it belongs to the console itself (state, audit log, keys or the live edit journal).`,
+      { hint: `Use a directory of its own, such as "backups".` },
+    );
+  }
   return absolute;
 }
+
+/**
+ * Names at the top of the data directory that the console uses itself, with the files
+ * derived from them (`console.json.tmp-…`, `audit.jsonl.1`). Local storage must not
+ * overlap them (see the file header).
+ */
+const CONSOLE_OWN_NAMES = [
+  STATE_FILE,
+  AUDIT_FILE,
+  SECRET_KEY_FILE,
+  LOCK_FILE,
+  LOCAL_JOURNAL_DIR,
+].map((name) => name.toLowerCase());
 
 async function s3Adapter(
   url: string,
@@ -267,14 +407,26 @@ async function azureAdapter(
   const [container = "", ...rest] = decodeURIComponent(parsed.pathname)
     .split("/")
     .filter((segment) => segment.length > 0);
-  const connectionString = credentials.AZURE_STORAGE_CONNECTION_STRING;
+  const auth = azureAuthOf(credentials);
+  if (auth.kind === "connectionString") {
+    return azureStorage({
+      container,
+      prefix: rest.join("/"),
+      connectionString: auth.connectionString,
+    });
+  }
+  // Credentials are stored (that is how we got here) but none of them is usable. Falling
+  // through to the endpoint without a SAS would make the library use the console's own
+  // managed identity and send its token to the endpoint, which was never checked for
+  // that case (see AzureAuth). Refuse instead.
+  if (auth.kind === "managedIdentity") throw unusableAzureCredentials();
   const endpoint = parsed.searchParams.get("endpoint");
+  const accountUrl = endpoint ?? `https://${parsed.hostname}.blob.core.windows.net`;
+  // A SAS token travels as the account URL's query string (the adapter keeps it there).
   return azureStorage({
     container,
     prefix: rest.join("/"),
-    ...(connectionString
-      ? { connectionString }
-      : { accountUrl: endpoint ?? `https://${parsed.hostname}.blob.core.windows.net` }),
+    accountUrl: `${accountUrl.replace(/\?.*$/, "")}?${auth.sasToken}`,
   });
 }
 

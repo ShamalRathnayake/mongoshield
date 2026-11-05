@@ -81,7 +81,6 @@ describe("reconcileDrill", () => {
     const container = drillJob(client)?.spec?.template.spec?.containers[0];
     expect(container?.args).toEqual([
       "drill",
-      "latest",
       "--json",
       "--config",
       "/etc/mongoshield/config/mongoshield.config.json",
@@ -93,6 +92,8 @@ describe("reconcileDrill", () => {
       "app.*",
       "--exclude",
       "app.logs",
+      "--",
+      "latest",
     ]);
     const names = container?.env?.map((variable) => variable.name) ?? [];
     expect(names).toContain("MONGOSHIELD_DRILL_URI");
@@ -202,7 +203,7 @@ describe("reconcileDrill", () => {
       status: { phase: "Succeeded", backupId: "id-3" },
     });
     await reconcileDrill(context, ref);
-    expect(drillJob(client)?.spec?.template.spec?.containers[0]?.args?.[1]).toBe("id-3");
+    expect(drillJob(client)?.spec?.template.spec?.containers[0]?.args?.at(-1)).toBe("id-3");
   });
 
   it("fails for an unusable backup and waits for its plan", async () => {

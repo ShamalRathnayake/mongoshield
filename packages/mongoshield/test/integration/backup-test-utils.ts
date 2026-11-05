@@ -22,8 +22,9 @@ import { silentLogger } from "../../src/logger.ts";
 import type { StorageAdapter } from "../../src/storage/types.ts";
 import type { EncryptionOptions } from "../../src/types.ts";
 import { readStreamToBuffer } from "../../src/util/streams.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 
-/** A backup context with sensible test defaults. */
+/** A backup context with sensible test defaults (`TEST_COMPRESSION`, no encryption). */
 export function backupContext(
   client: MongoClient,
   storage: StorageAdapter,
@@ -33,7 +34,7 @@ export function backupContext(
     client,
     storage,
     logger: silentLogger,
-    compression: overrides.compression ?? "zstd",
+    compression: overrides.compression ?? TEST_COMPRESSION,
     encryption: overrides.encryption,
   };
 }

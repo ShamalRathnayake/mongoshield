@@ -16,8 +16,11 @@ journaled changes up to that time. The format and the exact rules are in
 
 ## Requirements
 
-- A **replica set or sharded cluster on MongoDB 6.0+** (Atlas included). The journal reads
-  a deployment-wide change stream.
+- A **replica set or sharded cluster on MongoDB 6.0+** (Atlas included, Free and Flex
+  too). The journal reads a deployment-wide change stream; `journal start` checks the
+  deployment first and refuses a standalone server or an older MongoDB with
+  `MS_UNSUPPORTED_TOPOLOGY` (before 6.0, change streams do not report collection and
+  index changes).
 - A user allowed to open it: `changeStream` and `find` on every database, e.g. the
   `readAnyDatabase` role. (The built-in `backup` role alone is not enough.)
 - **Base backups with a cluster time**: `consistency: "converge"` (what `auto` picks on a
@@ -37,6 +40,7 @@ in storage (`locks/journal/`) makes sure a second one cannot start by accident.
 
 ```bash
 docker run -d --name mongoshield-journal --restart unless-stopped --init \
+  --add-host=host.docker.internal:host-gateway \
   -e MONGODB_URI='mongodb+srv://journal:…@cluster0.example.mongodb.net/' \
   -e MONGOSHIELD_STORAGE='s3://acme-backups/prod?region=eu-west-1' \
   -e MONGOSHIELD_RECIPIENTS='age1…' \
@@ -244,12 +248,13 @@ In code, the same restore is `planPointInTimeRestore` + a restore of the base ba
 ```ts
 import { planPointInTimeRestore, replayJournal } from "mongoshield";
 
-const plan = await planPointInTimeRestore(storage, { t: 1763130719, i: 4 });
+const plan = await planPointInTimeRestore(storage, { t: 1763130719, i: 4 }, { include: ["app.*"] });
 const rename = { "app.*": "app_recovered.*" };
-await shield.restore({ backup: plan.baseBackupId, rename });
+await shield.restore({ backup: plan.baseBackupId, include: ["app.*"], rename });
 const result = await replayJournal({
-  client, storage, rename,
-  from: plan.baseTime, to: plan.at, baseNamespaces: plan.baseNamespaces,
+  client, storage, rename, include: ["app.*"],
+  from: plan.baseTime, to: plan.at,
+  baseNamespaces: plan.baseNamespaces, baseSelection: plan.baseSelection,
   decryption: { identities: [identity] },
 });
 console.log(`restored to ${result.restoredTo.t}:${result.restoredTo.i}, ${result.events} changes replayed`);
@@ -261,6 +266,8 @@ console.log(`restored to ${result.restoredTo.t}:${result.restoredTo.i}, ${result
 |---|---|---|
 | `MS_STORAGE_PRECONDITION_FAILED` "Another journal writer is running" | the lease is held | stop the other writer, or start with `--wait-for-lease` |
 | `MS_CHANGE_HISTORY_LOST` on `restore --at` | no base backup plus journal reaches that time | pick a time in one of the recoverable ranges the error lists |
+| `MS_CHANGE_HISTORY_LOST` listing "base backups passed over" | the newer bases do not cover what the restore selects (another job's narrower selection, or a `query` filter) | narrow the restore with `--include`/`--exclude` to what such a base covers, or pick a time after a base that covers everything |
+| warning "holds base backups of other deployments" | backups of two clusters share the storage location, and the journal does not say which it follows; the newest suitable base was used | keep each deployment under its own prefix; pass `--source-cluster <clusterId>` (in code `sourceIdentity`, from `shield.sourceIdentity()`) |
 | `MS_INTEGRITY_FAILED` "segment chain is broken" | a segment is missing or was modified | restore to a time before the damaged segment, or from a newer base backup |
 | `MS_PERMISSION_DENIED` | the user cannot open a deployment-wide change stream | grant `readAnyDatabase` (or `changeStream` + `find` on all databases) |
 | `MS_CONFIG_INVALID` "cannot be encrypted with a passphrase" | the journal needs recipients or KMS keys | add an `age1…` recipient (`mongoshield keygen`) |

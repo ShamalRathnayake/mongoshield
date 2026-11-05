@@ -1,11 +1,22 @@
 /**
  * HTTP hardening that applies to every response or every state-changing request:
- * security headers, the same-origin check, and the JSON-only body rule.
+ * who the client is (behind trusted proxies), the Host allow-list, security headers,
+ * the same-origin check, and the JSON-only body rule.
  */
 
+import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Context, MiddlewareHandler } from "hono";
-import type { AppEnv, ConsoleSettings } from "./context.ts";
+import type { AppEnv, ConsoleSettings, RequestClient } from "./context.ts";
 import { ConsoleError } from "./errors.ts";
+import {
+  forwardedClientAddress,
+  hostnameOf,
+  isAllowedHostname,
+  isTrustedProxy,
+  lastForwardedValue,
+  normalizeAddress,
+  parseTrustedProxies,
+} from "./hosts.ts";
 
 /**
  * Content Security Policy for the UI and the API.
@@ -51,9 +62,71 @@ export function securityHeaders(settings: ConsoleSettings): MiddlewareHandler<Ap
       headers.set("Strict-Transport-Security", HSTS);
     }
     // API responses are per-user and may describe infrastructure: never cache them.
-    if (new URL(c.req.url).pathname.startsWith("/api/")) {
+    // `c.req.path` is the routed path, without the sub-path the console may be served under.
+    if (c.req.path.startsWith("/api/")) {
       headers.set("Cache-Control", "no-store");
     }
+  };
+}
+
+/**
+ * Works out where a request came from and stores it as `client` (see `RequestClient`).
+ * Forwarding headers are believed only when the socket peer is a trusted proxy
+ * (MONGOSHIELD_TRUSTED_PROXIES, hosts.ts); otherwise anyone could send them.
+ */
+export function resolveClient(settings: ConsoleSettings): MiddlewareHandler<AppEnv> {
+  const parsed = parseTrustedProxies(settings.trustedProxies ?? []);
+  // config.ts refuses malformed entries; settings passed in code (tests) get the same rule.
+  if (!parsed.ok) throw new Error(`Not an IP address or CIDR range: ${parsed.bad}`);
+  const trusted = parsed.list;
+  const anyTrusted = (settings.trustedProxies ?? []).length > 0;
+  return async (c, next) => {
+    const peer = socketAddress(c);
+    const ownHost = c.req.header("host") ?? new URL(c.req.url).host;
+    let client: RequestClient = {
+      address: peer === undefined ? "unknown" : normalizeAddress(peer),
+      host: ownHost,
+      viaTrustedProxy: false,
+    };
+    if (anyTrusted && peer !== undefined && isTrustedProxy(peer, trusted)) {
+      client = {
+        address: forwardedClientAddress(c.req.header("x-forwarded-for"), peer, trusted),
+        host: lastForwardedValue(c.req.header("x-forwarded-host")) ?? ownHost,
+        viaTrustedProxy: true,
+      };
+    }
+    c.set("client", client);
+    await next();
+  };
+}
+
+/** The socket peer's address, or `undefined` for in-process requests (tests). */
+function socketAddress(c: Context<AppEnv>): string | undefined {
+  try {
+    return getConnInfo(c).remote.address;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Refuses requests for host names the console does not know (DNS rebinding; see the
+ * header of hosts.ts) with `421 Misdirected Request`. Runs on every API request,
+ * reads included: a rebinding page must not even learn the setup state.
+ */
+export function allowedHostsOnly(settings: ConsoleSettings): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    const host = c.get("client")?.host ?? c.req.header("host") ?? new URL(c.req.url).host;
+    const hostname = hostnameOf(host);
+    if (hostname === undefined || !isAllowedHostname(hostname, settings)) {
+      throw new ConsoleError(
+        421,
+        "CONSOLE_UNKNOWN_HOST",
+        `The console does not answer to the host name ${JSON.stringify(host.slice(0, 100))}.`,
+        "Open the console at its own address. If this is its address, set MONGOSHIELD_PUBLIC_URL to it (or add the name to MONGOSHIELD_ALLOWED_HOSTS) and restart the console.",
+      );
+    }
+    await next();
   };
 }
 
@@ -78,7 +151,9 @@ export function sameOriginOnly(settings: ConsoleSettings): MiddlewareHandler<App
           403,
           "CONSOLE_BAD_ORIGIN",
           "Cross-site requests are not allowed.",
-          "Open the console from its own address.",
+          settings.publicUrl === undefined
+            ? "Open the console from its own address. Behind a reverse proxy, set MONGOSHIELD_PUBLIC_URL to the address you open it at (or list the proxy in MONGOSHIELD_TRUSTED_PROXIES so its X-Forwarded-Host is used)."
+            : `Open the console at ${settings.publicUrl} (MONGOSHIELD_PUBLIC_URL).`,
         );
       }
     }
@@ -86,14 +161,19 @@ export function sameOriginOnly(settings: ConsoleSettings): MiddlewareHandler<App
   };
 }
 
-/** The request's own origin (Host header), or the configured public URL. */
+/**
+ * The configured public URL's origin, or the request's own host: the `Host` header,
+ * or `X-Forwarded-Host` from a trusted proxy (a proxy that rewrites `Host` to its
+ * upstream's name would otherwise make every sign-in look cross-site). The host has
+ * passed {@link allowedHostsOnly} already, so a rebinding page cannot match itself.
+ */
 function isAllowedOrigin(c: Context<AppEnv>, origin: string, settings: ConsoleSettings): boolean {
   if (settings.publicUrl !== undefined && origin === new URL(settings.publicUrl).origin)
     return true;
-  const host = c.req.header("host");
+  const host = c.get("client")?.host ?? c.req.header("host");
   if (host === undefined) return false;
   try {
-    return new URL(origin).host === host;
+    return new URL(origin).host.toLowerCase() === host.toLowerCase();
   } catch {
     return false;
   }

@@ -34,6 +34,8 @@ import {
   PLAN_LABEL,
   type PruneScope,
   type RestoreMode,
+  type RestoreOptions,
+  type RestorePlanEntry,
   type RetentionPolicy,
   runScheduledJob,
   storageLock,
@@ -226,8 +228,10 @@ async function planScope(
     uri: openConnectionUri(deps.store, connection),
   });
   try {
-    const clusterId = await source.sourceClusterId(signal === undefined ? {} : { signal });
-    return { clusterId, labels: planScopeLabels(plan) };
+    // clusterId plus instanceId, so two replica sets that share a set name (both
+    // `rs0`) are never pruned as one series.
+    const identity = await source.sourceIdentity(signal === undefined ? {} : { signal });
+    return { ...identity, labels: planScopeLabels(plan) };
   } finally {
     await source.close();
   }
@@ -464,6 +468,42 @@ function describeDocumentCounts(
   return parts.join(", ");
 }
 
+/**
+ * The console's `verifyFirst` choice for a whole-collection restore: whether to checksum
+ * every file before the first write. The rule (like the CLI's, cli/commands/restore.ts):
+ * verify exactly when the restore writes into a target that already holds documents;
+ * into empty targets the extra read would double every restore's transfer for little gain.
+ *
+ *   drop             `undefined`: the library's own default does exactly this (on when the
+ *                    plan drops a collection holding data, `dropsExistingData` in
+ *                    engine/restore.ts), from the plan it makes anyway. Deciding here too
+ *                    would plan the restore twice.
+ *   insert, upsert   the library leaves verification off for these, so the console plans
+ *                    the restore to see whether a target collection holds documents (a
+ *                    damaged part would otherwise leave it half merged). The plan connects,
+ *                    lists collections and counts, so it runs under the job's signal.
+ *   fail-if-exists   `undefined`: it refuses non-empty targets, so nothing live is at risk
+ *                    (and the library's default is off).
+ */
+async function verifyFirstFor(
+  shield: MongoShield,
+  selection: RestoreOptions,
+  signal: AbortSignal,
+): Promise<boolean | undefined> {
+  if (selection.mode !== "insert" && selection.mode !== "upsert") return undefined;
+  const plan = await shield.planRestore({ ...selection, signal });
+  return plan.entries.some(mergesIntoExistingData);
+}
+
+/**
+ * True for plan entries that add to or change documents a target already holds. An
+ * uncountable target (`existingDocuments` undefined) counts as holding some.
+ */
+function mergesIntoExistingData(entry: RestorePlanEntry): boolean {
+  if (entry.existingDocuments === 0) return false;
+  return entry.action === "insert" || entry.action === "upsert";
+}
+
 /** A restore job (whole collections, or only matching documents when `filter` is set). */
 export function restoreJob(deps: TaskDeps, input: RestoreJobInput, startedBy: string): JobSpec {
   const uri = openConnectionUri(deps.store, input.target);
@@ -497,16 +537,21 @@ export function restoreJob(deps: TaskDeps, input: RestoreJobInput, startedBy: st
         };
       }
 
-      const result = await shield.restore({
+      const selection = {
         backup: input.backupId,
         target: { uri },
         mode: input.mode,
-        signal: context.signal,
-        onProgress: context.progress,
         ...(input.include === undefined ? {} : { include: input.include }),
         ...(input.exclude === undefined ? {} : { exclude: input.exclude }),
         ...(input.rename === undefined ? {} : { rename: input.rename }),
         ...(decryption === undefined ? {} : { decryption }),
+      };
+      const verifyFirst = await verifyFirstFor(shield, selection, context.signal);
+      const result = await shield.restore({
+        ...selection,
+        signal: context.signal,
+        onProgress: context.progress,
+        ...(verifyFirst === undefined ? {} : { verifyFirst }),
       });
       const namespaces = result.plan.entries.filter((entry) => entry.action !== "skip").length;
       return {

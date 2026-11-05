@@ -176,6 +176,50 @@ describe("encodeNameSegment", () => {
     expect(encodeNameSegment(name)).toBe(encoded);
   });
 
+  it.each([
+    ["con", "co%6E"],
+    ["NUL", "NU%4C"],
+    ["Aux", "Au%78"],
+    ["prn", "pr%6E"],
+    ["com1", "com%31"],
+    ["LPT9", "LPT%39"],
+    ["com0", "com%30"],
+    ["con.archive", "co%6E.archive"],
+    ["nul.x.y", "nu%6C.x.y"],
+  ])("escapes the Windows device name %j as %j", (name, encoded) => {
+    expect(encodeNameSegment(name)).toBe(encoded);
+    expect(decodeURIComponent(encoded)).toBe(name);
+  });
+
+  it.each(["console", "nullable", "auxiliary", "com10", "lpt", "com", "x.con", "my-nul"])(
+    "leaves %j alone: it only contains a device name",
+    (name) => {
+      expect(encodeNameSegment(name)).toBe(name);
+    },
+  );
+
+  it("gives Windows device names safe data and metadata file keys", () => {
+    const key = dataFileKey({ db: "aux", collection: "con", compression: "zstd", encrypted: true });
+    expect(key).toBe("au%78/co%6E.bson.zst.age");
+    expect(metadataFileKey({ db: "app", collection: "nul", encrypted: false })).toBe(
+      "app/nu%6C.metadata.json",
+    );
+  });
+
+  it("can be reversed by decoding the percent escapes, for names short enough to stay whole", () => {
+    fc.assert(
+      fc.property(fc.string({ unit: "grapheme", minLength: 1, maxLength: 20 }), (name) => {
+        const encoded = encodeNameSegment(name);
+        // A grapheme can be several UTF-8 bytes and every byte becomes "%XX", so even 20
+        // graphemes can pass the 180-character limit. Those names are cut and given a
+        // hash suffix instead (next test), which is not meant to be reversible: skip them.
+        fc.pre(encoded.length < 180);
+        expect(decodeURIComponent(encoded)).toBe(name);
+      }),
+      { numRuns: 500 },
+    );
+  });
+
   it("rejects empty names", () => {
     expect(() => encodeNameSegment("")).toThrow(expect.objectContaining({ code: "MS_INTERNAL" }));
   });

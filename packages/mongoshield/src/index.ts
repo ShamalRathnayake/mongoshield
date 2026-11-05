@@ -291,6 +291,9 @@ export {
   type StoredFile,
 } from "./format/manifest.ts";
 
+// Which compression this runtime supports (zstd needs Node.js 22.15 / 23.8 or later).
+export { defaultCompression, isZstdAvailable } from "./compression/index.ts";
+
 // Logging.
 export { fromPino, type LogFields, type Logger, type PinoLike, silentLogger } from "./logger.ts";
 

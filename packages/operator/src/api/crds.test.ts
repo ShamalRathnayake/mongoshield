@@ -145,6 +145,17 @@ describe("CRDs", () => {
         spec: { planRef: { name: "p" } },
       }),
     ).toEqual([".spec.target: required"]);
+    // A backup id becomes a Job argument: only "latest" and real backup ids pass.
+    const restoreWithId = (id: string) =>
+      validateAgainst(rootSchema(restoreCrd), {
+        ...makeRestore(),
+        spec: { ...makeRestore().spec, backup: { id } },
+      });
+    expect(restoreWithId("--to-uri=mongodb://attacker.example/")).toEqual([
+      expect.stringContaining(".spec.backup.id: does not match"),
+    ]);
+    expect(restoreWithId("latest")).toEqual([]);
+    expect(restoreWithId("2026-10-20T03-00-04Z_7f3a9c")).toEqual([]);
   });
 
   it("carry the safety rules as CEL validations", () => {

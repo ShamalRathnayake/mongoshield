@@ -327,8 +327,32 @@ describe("the state, the transaction cookie and the code", () => {
   it("caps the number of pending sign-ins", async () => {
     const context = await setup();
     const oidc = context.testConsole.services.oidc;
-    for (let index = 0; index < 1010; index++) await oidc?.begin();
+    for (let index = 0; index < 1010; index++)
+      await oidc?.begin(`10.0.${index >> 8}.${index & 255}`);
     expect(oidc?.pendingCount).toBe(1000);
+  });
+
+  it("lets a loop on the login endpoint evict only its own pending sign-ins", async () => {
+    const context = await setup();
+    const oidc = context.testConsole.services.oidc;
+    // Someone starts signing in (in-process requests have the address "unknown")…
+    const client = context.testConsole.client();
+    const login = await client.request("GET", "/api/oidc/login");
+    const authorizeUrl = login.headers.get("location") ?? "";
+    // …while one address loops on the endpoint far past every cap.
+    for (let index = 0; index < 1500; index++) await oidc?.begin("203.0.113.66");
+    expect(oidc?.pendingCount).toBe(101);
+    // Many addresses fill the table: the looping address loses its entries first.
+    for (let index = 0; index < 950; index++)
+      await oidc?.begin(`10.1.${index >> 8}.${index & 255}`);
+    expect(oidc?.pendingCount).toBe(1000);
+    // The first sign-in still completes.
+    const { code, request } = context.provider.issueCode(authorizeUrl, {});
+    const callback = await client.request(
+      "GET",
+      `/api/oidc/callback?${new URLSearchParams({ code, state: request.state }).toString()}`,
+    );
+    expect(callback.headers.get("location")).toBe("/#/");
   });
 });
 
@@ -661,8 +685,9 @@ describe("roles and accounts", () => {
     const context = await setup({ autoProvision: false });
     await expectFailure(await signIn(context), "CONSOLE_OIDC_NOT_PROVISIONED");
 
+    // Prepared accounts are found by the identity's verified email (case-insensitively).
     const created = await context.admin.request("POST", "/api/users", {
-      username: "alice",
+      username: "Alice@example.com",
       role: "operator",
     });
     expect(created.status).toBe(200);
@@ -680,6 +705,65 @@ describe("roles and accounts", () => {
       await signIn(context, { claims: { sub: "intruder", preferred_username: "alice2" } }),
       "CONSOLE_OIDC_ACCOUNT_CONFLICT",
     );
+  });
+
+  it("never links a prepared account by preferred_username, which users can often edit", async () => {
+    const context = await setup({ autoProvision: false });
+    await context.admin.request("POST", "/api/users", { username: "bob", role: "admin" });
+    // Someone who renamed themselves "bob" at the provider does not get bob's account.
+    await expectFailure(
+      await signIn(context, {
+        claims: { sub: "mallory", preferred_username: "bob", email: "mallory@example.com" },
+      }),
+      "CONSOLE_OIDC_ACCOUNT_CONFLICT",
+    );
+    const users = (await context.admin.request("GET", "/api/users")).body as {
+      username: string;
+      lastLoginAt?: string;
+    }[];
+    expect(users.find((user) => user.username === "bob")?.lastLoginAt).toBeUndefined();
+  });
+
+  it("links by email only when the provider says it is verified, and by exact subject", async () => {
+    const context = await setup({ autoProvision: false });
+    await context.admin.request("POST", "/api/users", {
+      username: "carol@example.com",
+      role: "operator",
+    });
+    await context.admin.request("POST", "/api/users", {
+      username: "subject-dave",
+      role: "operator",
+    });
+    // A missing email_verified counts as unverified.
+    await expectFailure(
+      await signIn(context, {
+        claims: {
+          sub: "carol-1",
+          preferred_username: "carol",
+          email: "carol@example.com",
+          email_verified: undefined,
+        },
+      }),
+      "CONSOLE_OIDC_NOT_PROVISIONED",
+    );
+    await expectFailure(
+      await signIn(context, {
+        claims: { sub: "carol-1", email: "carol@example.com", email_verified: "true" },
+      }),
+      "CONSOLE_OIDC_NOT_PROVISIONED",
+    );
+    const carol = await expectSignedIn(
+      await signIn(context, {
+        claims: { sub: "carol-1", email: "carol@example.com", email_verified: true },
+      }),
+    );
+    expect(carol.username).toBe("carol@example.com");
+    const dave = await expectSignedIn(
+      await signIn(context, {
+        claims: { sub: "subject-dave", preferred_username: "dave", email: undefined },
+      }),
+    );
+    expect(dave.username).toBe("subject-dave");
   });
 
   it("never takes over a password account with the same username", async () => {

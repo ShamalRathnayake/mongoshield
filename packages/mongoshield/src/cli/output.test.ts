@@ -69,6 +69,24 @@ describe("Output", () => {
     expect(stderr()).toBe("status\n✔ done\n▲ careful\ndebug details\nraw\n");
   });
 
+  it("scrubs secrets from status, warning and --verbose lines, never from results", () => {
+    const stdout = collector();
+    const stderr = collector();
+    const out = new Output(
+      { stdout: stdout.stream, stderr: stderr.stream, env: {}, cwd: "/", isTTY: false },
+      { json: false, quiet: false, verbose: true, color: false },
+      (text) => scrubSecrets(text, ["s3cret-pass"]),
+    );
+    out.warn("driver said: auth failed for s3cret-pass at mongodb://u:hunter2@h/x");
+    out.debug('info retrying {"uri":"mongodb://u:hunter2@h/x"}');
+    out.info("using s3cret-pass");
+    out.result("s3cret-pass is a document value");
+    expect(stderr.text()).not.toContain("s3cret-pass");
+    expect(stderr.text()).not.toContain("hunter2");
+    expect(stderr.text()).toContain("auth failed for");
+    expect(stdout.text()).toBe("s3cret-pass is a document value\n");
+  });
+
   it("--quiet keeps results, warnings and errors only", () => {
     const { out, stdout, stderr } = testOutput({ quiet: true });
     out.result("the result");

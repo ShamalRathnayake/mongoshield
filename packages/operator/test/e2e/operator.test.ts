@@ -24,7 +24,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const context = process.env.MONGOSHIELD_E2E_CONTEXT;
 const operatorNamespace = process.env.MONGOSHIELD_E2E_OPERATOR_NAMESPACE ?? "mongoshield-system";
 const release = process.env.MONGOSHIELD_E2E_RELEASE ?? "mongoshield-operator";
-const mongoImage = process.env.MONGOSHIELD_E2E_MONGO_IMAGE ?? "mongo:8.0";
+// Same default as scripts/e2e.ts, which preloads this image into the kind node.
+const mongoImage = process.env.MONGOSHIELD_E2E_MONGO_IMAGE ?? "mongo:8.0.13";
 const namespace = `ms-e2e-${randomBytes(3).toString("hex")}`;
 
 /** Runs kubectl against the e2e cluster; returns stdout. */

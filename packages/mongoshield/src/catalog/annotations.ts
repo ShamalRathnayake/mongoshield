@@ -42,6 +42,14 @@ export const VerificationRecordSchema = z.object({
   filesChecked: z.number().int().nonnegative(),
   documentsChecked: z.number().int().nonnegative(),
   problemCount: z.number().int().nonnegative(),
+  /**
+   * `"links"` when an incremental backup was verified with `chain: "links"`: its own
+   * files were checked, but its earlier chain members only for being present and
+   * lined up. Such a record alone does not prove the backup restorable, so retention
+   * counts it as verified only when every earlier member is verified too. Absent for
+   * full checks (and in records written before this field existed).
+   */
+  chainScope: z.literal("links").optional(),
   tool: z.string(),
 });
 
@@ -140,6 +148,9 @@ export async function recordVerification(
     filesChecked: report.filesChecked,
     documentsChecked: report.documentsChecked,
     problemCount: report.problems.length,
+    // Only an incremental verified with `chain: "links"` says so: its own files were
+    // checked, its earlier members' were not (see VerificationRecordSchema).
+    ...(report.chain?.scope === "links" ? { chainScope: "links" as const } : {}),
     tool: `mongoshield@${version}`,
   };
   // "2026-11-14T03:00:04.123Z" → "2026-11-14T03-00-04-123Z": safe in keys, still sortable.

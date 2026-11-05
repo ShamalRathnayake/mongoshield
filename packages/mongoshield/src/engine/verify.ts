@@ -25,6 +25,7 @@
 
 import { BSON } from "mongodb";
 import { type CatalogEntry, inspectChain, listBackups, selectBackup } from "../catalog/index.ts";
+import { withUseLease } from "../catalog/use-leases.ts";
 import { isMongoShieldError, MongoShieldError, throwIfAborted } from "../errors.ts";
 import { LOSSLESS_DESERIALIZE_OPTIONS } from "../format/bson-stream.ts";
 import {
@@ -89,8 +90,22 @@ export async function verifyBackup(
   options: VerifyOptions,
 ): Promise<VerifyReport> {
   const startedAt = performance.now();
-  const mode = options.mode ?? "fast";
   const { manifest, entries } = await loadManifest(context, options);
+  // While its files are read, prune must leave the backup alone (catalog/use-leases.ts).
+  return withUseLease(context.storage, [manifest.id], "verify", { logger: context.logger }, () =>
+    verifyLoaded(context, options, manifest, entries, startedAt),
+  );
+}
+
+/** The verification itself, once the backup's manifest and the catalog are loaded. */
+async function verifyLoaded(
+  context: VerifyContext,
+  options: VerifyOptions,
+  manifest: Manifest,
+  entries: readonly CatalogEntry[],
+  startedAt: number,
+): Promise<VerifyReport> {
+  const mode = options.mode ?? "fast";
   const totals: VerifyTotals = {
     filesChecked: 0,
     bytesChecked: 0,

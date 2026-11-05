@@ -3,7 +3,11 @@
  * restore (docs/specs/JOURNAL.md, "Restore to a point in time", step 4).
  *
  *   pre-flight   read every event of (from, to] once: the segment chain, decryption
- *                and parsing are all checked before anything is written
+ *                and parsing are all checked, and so are the namespaces the base
+ *                must cover and the targets of collections created after it
+ *                (`preflightJournal`). A point-in-time restore runs it BEFORE the
+ *                base restore (src/shield.ts), so a refusal leaves the target as it
+ *                was instead of at the base backup's time
  *   targets      source namespace → target namespace, with the restore's
  *                include/exclude and rename rules (converge-targets.ts)
  *   replay       the converge replay (converge-replay.ts): the same translation table,
@@ -25,30 +29,31 @@ import type { MongoClient, WriteConcernSettings } from "mongodb";
 import { applyIndexChanges } from "../engine/converge-indexes.ts";
 import { replayChangeEvents } from "../engine/converge-replay.ts";
 import {
+  type ChangeWindowSummary,
   checkWindowTargets,
   planReplayTargets,
+  type ReplayTargets,
   summarizeChangeEvents,
 } from "../engine/converge-targets.ts";
+import { compareClusterTimes } from "../engine/converge-time.ts";
 import { ProgressTracker } from "../engine/progress.ts";
 import { dropNamespace } from "../engine/restore-collections.ts";
 import { compileRenameMap } from "../engine/restore-rename.ts";
-import { throwIfAborted } from "../errors.ts";
+import { MongoShieldError, throwIfAborted } from "../errors.ts";
 import type { ClusterTime } from "../format/manifest.ts";
 import { type Logger, silentLogger } from "../logger.ts";
 import { compileNamespaceFilter, splitNamespace } from "../mongo/index.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import type { DecryptionOptions, NamespacePattern, ProgressEvent, RestoreMode } from "../types.ts";
-import { loadJournalCoverage, segmentsBetween } from "./coverage.ts";
+import { type JournalCoverage, loadJournalCoverage, segmentsBetween } from "./coverage.ts";
 import { readJournalSegments } from "./reader.ts";
 import { toJournalTime } from "./time.ts";
 
 /** How the journal replay shows up in progress events (it is not a namespace). */
 export const JOURNAL_PROGRESS_LABEL = "(journal)";
 
-/** Options for {@link replayJournal}. */
-export interface ReplayJournalOptions {
-  /** Connected client for the restore target. Not closed. */
-  readonly client: MongoClient;
+/** Options for {@link preflightJournal}: what the replay will read and where it writes. */
+export interface PreflightJournalOptions {
   /** The storage holding the journal. */
   readonly storage: StorageAdapter;
   /** Replay the events after this cluster time: the base backup's (plan `baseTime`). */
@@ -62,6 +67,15 @@ export interface ReplayJournalOptions {
    * events to reach collections the journal never mentions.
    */
   readonly baseNamespaces?: readonly string[] | undefined;
+  /**
+   * The base backup's include/exclude selection (plan `baseSelection`). When given, a
+   * journaled namespace the restore selects that the base neither holds nor would have
+   * backed up is refused before the replay writes anything: rebuilding it from events
+   * alone would miss every document written before the base.
+   */
+  readonly baseSelection?:
+    | { readonly include: readonly string[]; readonly exclude: readonly string[] }
+    | undefined;
   /** The base restore's include/exclude patterns (same meaning as for restore). */
   readonly include?: readonly NamespacePattern[] | undefined;
   readonly exclude?: readonly NamespacePattern[] | undefined;
@@ -70,13 +84,36 @@ export interface ReplayJournalOptions {
   /** For collections created after the base backup; defaults to `"fail-if-exists"`. */
   readonly mode?: RestoreMode | undefined;
   readonly decryption?: DecryptionOptions | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
+/**
+ * What {@link preflightJournal} checked, for {@link replayJournal} to reuse instead of
+ * reading the journal range once more.
+ */
+export interface JournalPreflight {
+  readonly from: ClusterTime;
+  readonly to: ClusterTime;
+  readonly coverage: JournalCoverage;
+  readonly summary: ChangeWindowSummary;
+  readonly targets: ReplayTargets;
+}
+
+/** Options for {@link replayJournal}. */
+export interface ReplayJournalOptions extends PreflightJournalOptions {
+  /** Connected client for the restore target. Not closed. */
+  readonly client: MongoClient;
+  /**
+   * The pre-flight already done for this range (before the base restore). Without it
+   * the replay does its own, still before it writes anything.
+   */
+  readonly preflight?: JournalPreflight | undefined;
   readonly writeConcern?: WriteConcernSettings | undefined;
   /** Skip document validation (needs the bypassDocumentValidation privilege). */
   readonly bypassDocumentValidation?: boolean | undefined;
   /** Leave out the index changes made after the base backup (as restore's `skipIndexes`). */
   readonly skipIndexes?: boolean | undefined;
   readonly logger?: Logger | undefined;
-  readonly signal?: AbortSignal | undefined;
   readonly onProgress?: ((event: ProgressEvent) => void) | undefined;
 }
 
@@ -102,6 +139,52 @@ export interface ReplayJournalResult {
 }
 
 /**
+ * Reads the journal range `(from, to]` once and checks everything a replay could
+ * refuse, without writing: the segment chain, decryption and parsing, the namespaces
+ * the base backup must cover (`baseSelection`), and, with `client`, the targets of
+ * collections created after the base (the conflict rules of `mode`). Run it before
+ * restoring the base backup; pass the result to {@link replayJournal}.
+ *
+ * @throws MongoShieldError `MS_CHANGE_HISTORY_LOST` when the journal does not cover the
+ *   range or the base backup does not cover what it changes, `MS_INTEGRITY_FAILED` /
+ *   `MS_DECRYPTION_FAILED` for a broken or unreadable segment, `MS_RESTORE_CONFLICT`
+ *   for collections created after the base backup whose target holds data (mode
+ *   `fail-if-exists`), `MS_ABORTED`.
+ */
+export async function preflightJournal(
+  options: PreflightJournalOptions & { readonly client?: MongoClient | undefined },
+): Promise<JournalPreflight> {
+  const { storage, from, signal } = options;
+  const to = toJournalTime(options.to);
+  const coverage = await loadJournalCoverage(storage, signal);
+  const summary = await summarizeChangeEvents(
+    readJournalSegments(storage, { from, to, decryption: options.decryption, signal, coverage }),
+  );
+  throwIfAborted(signal);
+
+  const filter = compileNamespaceFilter({ include: options.include, exclude: options.exclude });
+  const rename = compileRenameMap(options.rename);
+  const baseNamespaces = options.baseNamespaces ?? [];
+  if (options.baseSelection !== undefined) {
+    assertBaseCoversJournal(summary.namespaces, baseNamespaces, filter, options.baseSelection);
+  }
+  const restored = new Map<string, string>();
+  for (const ns of baseNamespaces) if (filter(ns)) restored.set(ns, rename(ns));
+  const targets = planReplayTargets({
+    backedUp: new Set(baseNamespaces),
+    restored,
+    filter,
+    rename,
+    summary,
+  });
+  // Only reads: refuses conflicts now; the drops of mode `drop` wait for the replay.
+  if (options.client !== undefined) {
+    await checkWindowTargets(options.client, targets, options.mode ?? "fail-if-exists", signal);
+  }
+  return { from, to, coverage, summary, targets };
+}
+
+/**
  * Replays the journaled changes in `(from, to]` into the target.
  *
  * @throws MongoShieldError `MS_CHANGE_HISTORY_LOST` when the journal does not cover the
@@ -117,26 +200,19 @@ export async function replayJournal(options: ReplayJournalOptions): Promise<Repl
   const to = toJournalTime(options.to);
   const decryption = options.decryption;
 
-  const coverage = await loadJournalCoverage(storage, signal);
+  // A pre-flight for another range would vouch for events it never read.
+  const given = options.preflight;
+  const preflight =
+    given !== undefined &&
+    compareClusterTimes(given.from, from) === 0 &&
+    compareClusterTimes(given.to, to) === 0
+      ? given
+      : await preflightJournal({ ...options, client: undefined });
+  const { coverage, summary, targets } = preflight;
   const read = () => readJournalSegments(storage, { from, to, decryption, signal, coverage });
 
-  // Pre-flight: one full pass proves the range is intact before anything is written.
-  const summary = await summarizeChangeEvents(read());
-  throwIfAborted(signal);
-
-  const filter = compileNamespaceFilter({ include: options.include, exclude: options.exclude });
-  const rename = compileRenameMap(options.rename);
-  const baseNamespaces = options.baseNamespaces ?? [];
-  const restored = new Map<string, string>();
-  for (const ns of baseNamespaces) if (filter(ns)) restored.set(ns, rename(ns));
-  const targets = planReplayTargets({
-    backedUp: new Set(baseNamespaces),
-    restored,
-    filter,
-    rename,
-    summary,
-  });
-
+  // Checked again: the base restore ran since the pre-flight, and mode `drop` needs
+  // the list of targets to drop first.
   const dropFirst = await checkWindowTargets(
     client,
     targets,
@@ -195,4 +271,41 @@ export async function replayJournal(options: ReplayJournalOptions): Promise<Repl
     warnings,
     durationMs: Math.round(performance.now() - startedAt),
   };
+}
+
+/** `$out` / `$merge` scratch collections, which the journal records only as renames. */
+const SCRATCH_COLLECTION_PREFIX = "tmp.";
+
+/**
+ * Refuses journaled namespaces the base backup never covered (see `baseSelection`).
+ * The planner already passes over such bases (base-suitability.ts) using the names it
+ * knows from manifests; this check sees the journal's own namespaces, so it also
+ * catches collections no backup ever held.
+ *
+ * @throws MongoShieldError `MS_CHANGE_HISTORY_LOST` listing the namespaces.
+ */
+function assertBaseCoversJournal(
+  journaled: ReadonlySet<string>,
+  baseNamespaces: readonly string[],
+  restoreFilter: (ns: string) => boolean,
+  baseSelection: { readonly include: readonly string[]; readonly exclude: readonly string[] },
+): void {
+  const inBase = new Set(baseNamespaces);
+  const wouldBackUp = compileNamespaceFilter(baseSelection);
+  const uncovered: string[] = [];
+  for (const ns of journaled) {
+    if (splitNamespace(ns).collection.startsWith(SCRATCH_COLLECTION_PREFIX)) continue;
+    if (inBase.has(ns) || !restoreFilter(ns) || wouldBackUp(ns)) continue;
+    uncovered.push(ns);
+  }
+  if (uncovered.length === 0) return;
+  uncovered.sort();
+  throw new MongoShieldError(
+    "MS_CHANGE_HISTORY_LOST",
+    `The base backup does not cover ${uncovered.slice(0, 5).join(", ")}${uncovered.length > 5 ? ` and ${uncovered.length - 5} more` : ""}, which the journal changes: replaying their events alone would miss every document written before the base backup.`,
+    {
+      hint: "Leave those namespaces out of the restore (exclude), or restore to a time with a base backup that covers them.",
+      details: { uncoveredNamespaces: uncovered },
+    },
+  );
 }

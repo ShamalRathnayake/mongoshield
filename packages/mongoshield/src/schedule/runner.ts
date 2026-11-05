@@ -367,6 +367,11 @@ async function runBackupStep(context: RunContext, signal: AbortSignal): Promise<
     bytesStored: totals.bytesStored,
     durationMs: result.durationMs,
     attempts: attempted.attempts,
+    // What the backup really used: `auto` may have fallen back to `none` (see warnings).
+    consistency: result.manifest.consistency.mode,
+    ...(result.warnings === undefined || result.warnings.length === 0
+      ? {}
+      : { warnings: [...result.warnings] }),
     // Only jobs that take incrementals report the kind (old reports stay as they were).
     ...(section?.incremental === undefined
       ? {}
@@ -450,16 +455,18 @@ async function runReplicateStep(
   backupId: string,
   signal: AbortSignal,
 ): Promise<void> {
-  const { shield, config, logger, draft } = context;
+  const { shield, config, logger, draft, options } = context;
   const outcomes = await replicateToTargets(shield.storage, config.replicate ?? [], backupId, {
     resolve: resolveStorage,
     logger,
     signal,
   });
+  // The report goes to webhooks, Slack and --json output: scrub with the real secrets.
+  const secrets = secretsOf(config, options);
   draft.replicate = outcomes.map((outcome) => ({
     location: outcome.location,
     ok: outcome.error === undefined,
-    ...(outcome.error === undefined ? {} : { error: errorMessage(outcome.error) }),
+    ...(outcome.error === undefined ? {} : { error: errorMessage(outcome.error, secrets) }),
   }));
 
   const failed = outcomes.filter((outcome) => outcome.error !== undefined);
@@ -474,9 +481,12 @@ async function runReplicateStep(
   }
 }
 
-/** A short, secret-free description of an unknown error. */
-function errorMessage(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error), []);
+/**
+ * A short, secret-free description of an unknown error: connection strings redacted
+ * and every known secret of the run (`secretsOf`) replaced, as for the run's own error.
+ */
+function errorMessage(error: unknown, secrets: readonly string[]): string {
+  return scrub(error instanceof Error ? error.message : String(error), secrets);
 }
 
 async function runVerifyStep(
@@ -628,10 +638,11 @@ async function runPruneStep(
 
 /**
  * The backups this job's retention covers: same deployment as the backup just
- * written, and the same `scopeLabels` (or, by default, the same shape label as
+ * written (its `clusterId`, and its `instanceId` when the run recorded one), and
+ * the same `scopeLabels` (or, by default, the same shape label as
  * that backup carries). `undefined` when the deployment is unknown.
  *
- * The cluster id comes from what the run itself recorded (the manifest, or the
+ * The deployment ids come from what the run itself recorded (the manifest, or the
  * checkpoint of a run that used up its time budget) rather than from a second
  * connection, so it is exactly what the job's backups carry.
  */
@@ -641,11 +652,15 @@ async function pruneScopeOf(
   signal: AbortSignal,
 ): Promise<PruneScope | undefined> {
   const { shield, config, options } = context;
-  const clusterId =
+  const source =
     backup.status === "complete"
-      ? backup.manifest.source.clusterId
-      : (await readCheckpoint(shield.storage, backup.id, signal))?.source.clusterId;
+      ? backup.manifest.source
+      : (await readCheckpoint(shield.storage, backup.id, signal))?.source;
+  const clusterId = source?.clusterId;
   if (clusterId === undefined) return undefined;
+  // Two replica sets with one set name (staging and prod both `rs0`) share a
+  // clusterId; the instanceId keeps their retention apart (catalog/scope.ts).
+  const instanceId = source?.instanceId;
   // Empty scope labels would widen the scope to every backup of the deployment,
   // so they fall back to the shape label like absent ones.
   const custom = scopeLabelsOf(config, options);
@@ -653,7 +668,7 @@ async function pruneScopeOf(
     custom !== undefined && Object.keys(custom).length > 0
       ? custom
       : { [GUARD_SHAPE_LABEL]: backupShapeLabel(config.backup ?? {}) };
-  return { clusterId, labels };
+  return instanceId === undefined ? { clusterId, labels } : { clusterId, instanceId, labels };
 }
 
 /**
@@ -693,7 +708,8 @@ function resolveSettings(config: MongoShieldConfig, options: ScheduledJobOptions
     timeoutMs: timeoutMinutes === undefined ? undefined : timeoutMinutes * 60_000,
     jitterMs: (schedule?.jitterSeconds ?? 0) * 1000,
     guard: config.guard === undefined ? undefined : guardPolicyFrom(config.guard),
-    retention: retentionPolicyFrom(config.retention),
+    // Periods count in the zone the cron runs in, so "daily" means the schedule's day.
+    retention: retentionPolicyFrom(config.retention, schedule?.timezone),
   };
 }
 
@@ -714,9 +730,13 @@ function guardPolicyFrom(section: NonNullable<MongoShieldConfig["guard"]>): Back
 }
 
 /** The retention policy, or `undefined` when none is configured (pruning is then skipped). */
-function retentionPolicyFrom(section: MongoShieldConfig["retention"]): RetentionPolicy | undefined {
+function retentionPolicyFrom(
+  section: MongoShieldConfig["retention"],
+  timeZone: string | undefined,
+): RetentionPolicy | undefined {
   if (section === undefined) return undefined;
   const policy: { -readonly [Field in keyof RetentionPolicy]: RetentionPolicy[Field] } = {};
+  if (timeZone !== undefined) policy.timeZone = timeZone;
   for (const field of [
     "last",
     "hourly",

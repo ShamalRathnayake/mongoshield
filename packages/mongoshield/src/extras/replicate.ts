@@ -28,7 +28,10 @@
  * `retainDays` makes the copies write-once at the destination (S3 Object Lock and
  * similar). The manifest is still copied unchanged, so its `immutableUntil` describes the
  * source; prune at the destination then learns of the lock from the storage itself and
- * skips those backups (see src/catalog/prune.ts).
+ * skips those backups (see src/catalog/prune.ts). Every adapter refuses to delete a
+ * locked object with an object-locked error; on S3, where a plain delete would instead
+ * hide the locked copy behind a delete marker (gone from listings and restores, still
+ * billed), the adapter checks each object's retention first (src/storage/s3.ts).
  */
 
 import { listBackups } from "../catalog/catalog.ts";

@@ -30,6 +30,16 @@
  *   of several racing creates wins; but a concurrent *unconditional* put of the
  *   same key may be overwritten, and a lock left by a crashed process is only
  *   broken after a minute (until then, conditional writes of that key wait).
+ *   The lock's age is measured with the file server's clock, not this machine's
+ *   (see `removeIfStaleLock`), so a server clock that lags or runs ahead never
+ *   makes a live lock look stale.
+ * - A conditional write whose link(2) reports EEXIST although the name is our own
+ *   temp file (NFSv3 retransmits a link whose reply was lost, and the retry finds
+ *   the name taken by the first attempt) counts as written: the inodes are compared.
+ * - On Windows, renames are retried for a moment when another program (Defender,
+ *   the search indexer) holds the file open, see src/util/rename.ts; an EPERM that
+ *   persists is reported as a permission or "file in use" problem, not as a
+ *   read-only filesystem.
  *
  * Known limitation: a key cannot be both an object and a "directory" (for
  * example `a` and `a/b`), which S3 allows. MongoShield's layout never does this.
@@ -38,23 +48,13 @@
 import { randomBytes } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
-import {
-  link,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  rename,
-  rm,
-  rmdir,
-  stat,
-  statfs,
-} from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, rm, rmdir, stat, statfs } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { abortError, MongoShieldError, throwIfAborted } from "../errors.ts";
+import { renameWithRetry } from "../util/rename.ts";
 import { assertValidKey, assertValidPrefix } from "./keys.ts";
 import { rejectRetention } from "./retention.ts";
 import type {
@@ -100,10 +100,17 @@ const LOCK_DIRECTORY_PATTERN = /^\..+\.mongoshield-lock$/;
 /**
  * A lock directory older than this is assumed to be left by a crashed writer and
  * is removed. The lock is only held for one stat and one rename, so a live
- * holder never comes close; the margin covers slow network mounts and clock
- * skew between the client and a file server (which sets the mtime).
+ * holder never comes close; the margin covers slow network mounts. The age is
+ * measured on the clock that stamped the lock (the file server's), see
+ * `removeIfStaleLock`, so clock skew between machines does not eat into it.
  */
 const STALE_LOCK_MS = 60 * 1000;
+
+/**
+ * How often a waiting writer may measure the file server's clock (one tiny probe
+ * file each time) while it waits for a lock that might be stale.
+ */
+const CLOCK_PROBE_INTERVAL_MS = 1000;
 
 /** How long a conditional writer waits between attempts to take a busy lock. */
 const LOCK_RETRY_MS = 25;
@@ -257,7 +264,7 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
     signal: AbortSignal | undefined,
   ): Promise<void> {
     if (!ifNoneMatch) {
-      await rename(tempPath, finalPath);
+      await renameWithRetry(tempPath, finalPath, { signal });
       return;
     }
     if (hardLinksUnsupported) {
@@ -267,7 +274,13 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
     try {
       await link(tempPath, finalPath);
     } catch (error) {
-      if (errnoCode(error) === "EEXIST") throw alreadyExists(key, error);
+      if (errnoCode(error) === "EEXIST") {
+        // NFSv3 is stateless: when the reply to a successful link is lost, the
+        // client retransmits it and the retry fails with EEXIST because of our own
+        // first attempt. The name then points at our temp file's inode: we won.
+        if (await isSameFile(tempPath, finalPath)) return;
+        throw alreadyExists(key, error);
+      }
       if (!LINK_UNSUPPORTED_CODES.has(errnoCode(error) ?? "")) throw error;
       hardLinksUnsupported = true;
       await publishUnderLock(tempPath, finalPath, key, signal);
@@ -291,7 +304,7 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
     await acquireLock(lockPath, finalPath, key, signal);
     try {
       if (await pathExists(finalPath)) throw alreadyExists(key);
-      await rename(tempPath, finalPath);
+      await renameWithRetry(tempPath, finalPath, { signal });
     } finally {
       await rmdir(lockPath).catch(() => {});
     }
@@ -309,6 +322,7 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
     key: string,
     signal: AbortSignal | undefined,
   ): Promise<void> {
+    const wait: LockWait = { startedAt: performance.now(), lastProbeAt: undefined };
     for (;;) {
       throwIfAborted(signal);
       try {
@@ -318,7 +332,7 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
         if (errnoCode(error) !== "EEXIST") throw error;
       }
       if (await pathExists(finalPath)) throw alreadyExists(key);
-      if (await removeIfStaleLock(lockPath)) continue;
+      if (await removeIfStaleLock(lockPath, wait)) continue;
       await sleep(LOCK_RETRY_MS, undefined, signal ? { signal } : {});
     }
   }
@@ -602,12 +616,51 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 /**
+ * True when `left` and `right` are the same file (hard links to one inode).
+ *
+ * The ids are read as bigints: NTFS file ids are 64-bit, and as a JavaScript
+ * number (exact only up to 2^53) two different files can round to the same id.
+ */
+async function isSameFile(left: string, right: string): Promise<boolean> {
+  try {
+    const [leftStats, rightStats] = await Promise.all([
+      lstat(left, { bigint: true }),
+      lstat(right, { bigint: true }),
+    ]);
+    // ino 0 means the filesystem does not report inodes; never call that a match.
+    return (
+      leftStats.ino !== 0n && leftStats.ino === rightStats.ino && leftStats.dev === rightStats.dev
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** What a writer waiting for a lock directory remembers between attempts. */
+interface LockWait {
+  /** When this writer started waiting (`performance.now()`, a monotonic clock). */
+  readonly startedAt: number;
+  /** When it last measured the file server's clock, if it has. */
+  lastProbeAt: number | undefined;
+}
+
+/**
  * Removes a lock directory left by a crashed writer. Returns true if the lock was
  * stale (or is already gone), so the caller should try to take it right away.
  * Two waiters may both find the same lock stale; only one rmdir removes it, and
  * mkdir then still lets only one of them in.
+ *
+ * The lock's mtime comes from the clock of whatever stamped it: on SMB and NFS
+ * that is usually the file server, which may be minutes off this machine's clock.
+ * Comparing it with `Date.now()` alone could call a lock taken a second ago stale
+ * (server behind) and let two writers in. So the local clock is only a cheap first
+ * filter, and the verdict uses the server's clock, read from the mtime of a probe
+ * file created next to the lock just now. A lock is checked that way when the
+ * local clock says it is old, or when this writer has itself waited longer than
+ * {@link STALE_LOCK_MS} (a server clock that runs ahead would otherwise keep a
+ * crashed writer's lock alive for as long as it is ahead).
  */
-async function removeIfStaleLock(lockPath: string): Promise<boolean> {
+async function removeIfStaleLock(lockPath: string, wait: LockWait): Promise<boolean> {
   let stats: Stats;
   try {
     stats = await lstat(lockPath);
@@ -615,9 +668,42 @@ async function removeIfStaleLock(lockPath: string): Promise<boolean> {
     if (isMissing(error)) return true;
     throw error;
   }
-  if (Date.now() - stats.mtimeMs <= STALE_LOCK_MS) return false;
+  const now = performance.now();
+  const looksOld = Date.now() - stats.mtimeMs > STALE_LOCK_MS;
+  const waitedLong = now - wait.startedAt > STALE_LOCK_MS;
+  if (!looksOld && !waitedLong) return false;
+  if (wait.lastProbeAt !== undefined && now - wait.lastProbeAt < CLOCK_PROBE_INTERVAL_MS) {
+    return false;
+  }
+  wait.lastProbeAt = now;
+  const serverNow = await fileSystemNow(dirname(lockPath), lockPath);
+  // No probe possible (it could not be written): fall back to the local clock.
+  const age = (serverNow ?? Date.now()) - stats.mtimeMs;
+  if (age <= STALE_LOCK_MS) return false;
   await rmdir(lockPath).catch(() => {});
   return true;
+}
+
+/**
+ * The current time on the clock that stamps files in `directory` (the file
+ * server's, on a network mount): the mtime of a probe file created there now.
+ * The probe is named like a temp file of `nextTo`, so `list()` never shows it,
+ * and is removed at once. `undefined` if it cannot be created.
+ */
+async function fileSystemNow(directory: string, nextTo: string): Promise<number | undefined> {
+  const probePath = join(directory, tempNameFor(nextTo));
+  try {
+    const handle = await open(probePath, "wx");
+    try {
+      return (await handle.stat()).mtimeMs;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  } finally {
+    await rm(probePath, { force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -741,6 +827,16 @@ function isMissing(error: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
+/**
+ * The hint for EACCES/EPERM/EBUSY. On Windows these are also what a file held open
+ * by another program gives (after src/util/rename.ts has retried for a moment).
+ */
+function permissionHint(root: string): string {
+  const base = `Check that this process may read and write ${root}.`;
+  if (process.platform !== "win32") return base;
+  return `${base} If it may, another program (antivirus, a search indexer, a sync client) is holding the file open; exclude ${root} from scanning or try again.`;
+}
+
 /** A directory sitting where an object was expected is reported like a missing object. */
 function notAFileError(): Error {
   return Object.assign(new Error("not a regular file"), { code: "ENOENT" });
@@ -748,8 +844,10 @@ function notAFileError(): Error {
 
 /**
  * Maps a filesystem error to a `MongoShieldError`:
- * ENOENT/ENOTDIR → NOT_FOUND, EACCES/EPERM/EROFS → FORBIDDEN,
+ * ENOENT/ENOTDIR → NOT_FOUND, EACCES/EPERM/EBUSY/EROFS → FORBIDDEN,
  * ENOSPC/EDQUOT → INSUFFICIENT_SPACE, anything else → IO.
+ * Only EROFS is described as a read-only filesystem: EPERM and EACCES are
+ * permissions, or on Windows a file held open by another program.
  * Errors that are already typed (aborts, precondition failures, invalid keys,
  * typed errors thrown by the body stream) pass through unchanged.
  */
@@ -769,12 +867,17 @@ function storageError(
     case "ENOENT":
     case "ENOTDIR":
       return new MongoShieldError("MS_STORAGE_NOT_FOUND", message, { cause: error });
-    case "EACCES":
-    case "EPERM":
     case "EROFS":
       return new MongoShieldError("MS_STORAGE_FORBIDDEN", message, {
         cause: error,
-        hint: `Check that this process may read and write ${root} and that the filesystem is not read-only.`,
+        hint: `The filesystem holding ${root} is mounted read-only. Back up to a writable location.`,
+      });
+    case "EACCES":
+    case "EPERM":
+    case "EBUSY":
+      return new MongoShieldError("MS_STORAGE_FORBIDDEN", message, {
+        cause: error,
+        hint: permissionHint(root),
       });
     case "ENOSPC":
     case "EDQUOT":

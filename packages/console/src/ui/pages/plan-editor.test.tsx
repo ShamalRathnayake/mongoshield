@@ -19,6 +19,15 @@ async function openStep(user: ReturnType<typeof renderApp>["user"], title: strin
 /** The schedule in words and its next runs (the tab hint and summary repeat the words). */
 const schedulePreview = () => document.querySelector(".schedule-preview") as HTMLElement;
 
+describe("emptyPlanForm", () => {
+  it("starts on zstd, or on gzip when the server's Node.js has no zstd", () => {
+    expect(emptyPlanForm().compression).toBe("zstd");
+    expect(emptyPlanForm(true).compression).toBe("zstd");
+    // A console on Node.js 22.12-22.14 would save a zstd plan whose backups all fail.
+    expect(emptyPlanForm(false).compression).toBe("gzip");
+  });
+});
+
 describe("validatePlanForm", () => {
   it("reports every problem at once, keyed by field", () => {
     const result = validatePlanForm({

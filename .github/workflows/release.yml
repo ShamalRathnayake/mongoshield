@@ -7,17 +7,27 @@
 #                                                     -> `changeset publish`: publish to
 #     npm, push the git tags (mongoshield@X.Y.Z, @mongoshield/console@X.Y.Z) and create
 #     a GitHub release per package from its changelog
-# Then, if mongoshield was published, the Docker images are built for that version.
+# Then, if mongoshield was published, the Docker images are built for that version and
+# the GitHub Action's major tag (v2) is moved to the release commit.
 #
 # In pre mode (.changeset/pre.json says "mode": "pre") versions look like 2.0.0-next.3
 # and go to the `next` dist-tag. After `changeset pre exit` and the version PR they are
 # stable and go to `latest`. Nothing in this file changes between the two.
 #
 # Authentication: npm trusted publishing (OIDC). npmjs.com trusts this repository +
-# this workflow file (configure it per package, see RELEASING.md), so no NPM_TOKEN
-# secret exists. `changeset publish` runs `pnpm publish`; pnpm (v11+) does the OIDC
-# token exchange itself and attaches provenance automatically for a public package
-# from a public repository, so the npm CLI version on the runner does not matter.
+# this workflow file + the `release` environment (configure it per package, see
+# RELEASING.md), so no long-lived NPM_TOKEN secret exists.
+#
+# Supply-chain hardening:
+#   - Third-party actions are pinned to full commit SHAs (the comment names the
+#     release); Dependabot proposes updates. A moved or force-pushed tag cannot change
+#     what runs here.
+#   - The build (the whole toolchain: pnpm install with install scripts, tsdown, Vite)
+#     runs in the `build` job with read-only permissions. The `release` job, which holds
+#     the write token and the npm OIDC identity, installs with --ignore-scripts and only
+#     packs and publishes the dist/ folders the build job uploaded.
+#   - Publishing runs only on main, in the protected `release` environment (restrict
+#     its deployment branches to `main` in the repository settings, see RELEASING.md).
 name: Release
 
 on:
@@ -25,6 +35,7 @@ on:
     branches: [main]
   # Re-run a publish that failed half-way (e.g. one package published, the other not).
   # `changeset publish` skips versions that are already on npm, so this is safe.
+  # Only from main: the jobs below skip every other branch.
   workflow_dispatch:
 
 # One release at a time, and never cancel one half-way through a publish.
@@ -37,9 +48,46 @@ permissions:
   contents: read
 
 jobs:
+  # Builds and checks every package. No write permission and no OIDC token: whatever
+  # the toolchain runs (install scripts included) cannot publish or push anything.
+  build:
+    name: Build and check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      # Installs the pnpm version pinned in package.json ("packageManager"). It must
+      # come before setup-node, which looks for pnpm when it sets up its cache.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # The same package checks CI runs (publint + attw). Cheap, and a broken
+      # package must never reach npm even if CI was skipped for the merge.
+      - run: pnpm check:package
+      # Every package publishes only dist/ ("files" in its package.json). The common
+      # parent of the matches is packages/, so the artifact holds <package>/dist/….
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: packages/*/dist
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Version or publish
+    needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Protected environment: its deployment-branch rule (main only) and, optionally,
+    # required reviewers gate the npm publish. npm's trusted publisher names it too.
+    environment: release
     permissions:
       contents: write # push the version commit, tags and GitHub releases
       pull-requests: write # open/update the version pull request
@@ -50,26 +98,30 @@ jobs:
       # The mongoshield version just published (empty when it was not published).
       mongoshield-version: ${{ steps.versions.outputs.mongoshield }}
     steps:
-      - uses: actions/checkout@v5
-      # Installs the pnpm version pinned in package.json ("packageManager"). It must
-      # come before setup-node, which looks for pnpm when it sets up its cache.
-      - uses: pnpm/action-setup@v6
+      # The token stays in .git/config here on purpose: changesets/action pushes the
+      # version branch and the release tags with it.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       # No `registry-url` on purpose: it writes an .npmrc with a placeholder
       # NODE_AUTH_TOKEN, and a token (even a fake one) can get in the way of the OIDC
       # exchange. The default registry is registry.npmjs.org anyway.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      # The same package checks CI runs (publint + attw). Cheap, and a broken
-      # package must never reach npm even if CI was skipped for the merge.
-      - run: pnpm check:package
+      # Only the changesets CLI and pnpm's own packing are needed here, so no install
+      # scripts run next to the write token and the OIDC identity.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      # The dist/ folders the build job produced and checked.
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: dist
+          path: packages
 
       # `pnpm publish` is routed through the npm CLI by a stand-in `pnpm` placed first on
       # PATH (.github/scripts/npm-publish/pnpm): npm's own trusted publishing (OIDC) is the
       # documented path, and pnpm 12's native publish has reported OIDC problems. Trusted
-      # publishing needs npm 11.5.1 or newer.
+      # publishing needs npm 11.5.1 or newer; the exact version is pinned so a new npm
+      # release cannot change what publishes our packages.
       #
       # Every package publishes through its trusted publisher. Only a brand-new package
       # (no trusted publisher yet) needs a token: add an NPM_TOKEN secret for that one
@@ -80,7 +132,7 @@ jobs:
         env:
           HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
         run: |
-          npm install --global npm@11
+          npm install --global --ignore-scripts npm@11.21.1
           npm --version
           echo "REAL_PNPM=$(command -v pnpm)" >> "$GITHUB_ENV"
           echo "${GITHUB_WORKSPACE}/.github/scripts/npm-publish" >> "$GITHUB_PATH"
@@ -89,10 +141,10 @@ jobs:
           fi
 
       # changesets/action v2 needs @changesets/cli v3 (this repository uses v3).
-      - uses: changesets/action@v2
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         id: changesets
         with:
-          # `pnpm build` already ran above; this only publishes, tags and releases.
+          # The build job already built and checked dist/; this only publishes, tags and releases.
           publish-script: pnpm exec changeset publish
           pr-title: "chore: version packages"
           commit-message: "chore: version packages"
@@ -126,7 +178,7 @@ jobs:
   # released in lockstep (`fixed` in .changeset/config.json).
   docker:
     needs: release
-    if: needs.release.outputs.mongoshield-version != ''
+    if: github.ref == 'refs/heads/main' && needs.release.outputs.mongoshield-version != ''
     uses: ./.github/workflows/docker.yml
     with:
       version: ${{ needs.release.outputs.mongoshield-version }}
@@ -135,3 +187,39 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+
+  # GitHub Action users reference `ShamalRathnayake/mongoshield/action@v2`. After a
+  # stable release, point v<major> at the commit tagged mongoshield@X.Y.Z, so `@v2`
+  # runs the new release (the Action reads its default CLI version from that commit's
+  # packages/mongoshield/package.json). Prereleases (X.Y.Z-next.N) never move it.
+  # This replaces moving the tag by hand with `git push -f` (RELEASING.md).
+  action-tag:
+    name: Move the Action's major tag
+    needs: release
+    if: >-
+      github.ref == 'refs/heads/main'
+      && needs.release.outputs.mongoshield-version != ''
+      && !contains(needs.release.outputs.mongoshield-version, '-')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # create or move the v<major> tag
+    steps:
+      - name: Point v<major> at the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.mongoshield-version }}
+        run: |
+          set -euo pipefail
+          major="v${VERSION%%.*}"
+          # The commit changesets tagged mongoshield@VERSION ("@" is %40 in the URL).
+          sha="$(gh api "repos/${REPOSITORY}/commits/mongoshield%40${VERSION}" --jq .sha)"
+          if gh api "repos/${REPOSITORY}/git/ref/tags/${major}" > /dev/null 2>&1; then
+            gh api --method PATCH "repos/${REPOSITORY}/git/refs/tags/${major}" \
+              -f sha="${sha}" -F force=true > /dev/null
+          else
+            gh api --method POST "repos/${REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${major}" -f sha="${sha}" > /dev/null
+          fi
+          echo "Moved ${major} to ${sha} (mongoshield@${VERSION})" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -16,6 +16,25 @@ describe("redactMongoUri", () => {
     expect(out).toContain("replicaSet=rs0");
   });
 
+  it("hides the proxy password, the key passphrase and AWS session tokens", () => {
+    const out = redactMongoUri(
+      "mongodb://h:27017/?proxyHost=p&proxyUsername=bob&proxyPassword=proxy-secret" +
+        "&sslPEMKeyPassword=pem-secret&authMechanism=MONGODB-AWS" +
+        "&authMechanismProperties=AWS_SESSION_TOKEN:session-secret",
+    );
+    expect(out).not.toContain("proxy-secret");
+    expect(out).not.toContain("pem-secret");
+    expect(out).not.toContain("session-secret");
+    expect(out).toContain("proxyPassword=***");
+    // Options that are not secret stay readable.
+    expect(out).toContain("proxyUsername=bob");
+    expect(out).toContain("authMechanism=MONGODB-AWS");
+  });
+
+  it("matches secret option names regardless of their case", () => {
+    expect(redactMongoUri("mongodb://h/?PROXYPASSWORD=proxy-secret")).not.toContain("proxy-secret");
+  });
+
   it("leaves URIs without credentials alone", () => {
     expect(redactMongoUri("mongodb://localhost:27017")).toBe("mongodb://localhost:27017");
   });

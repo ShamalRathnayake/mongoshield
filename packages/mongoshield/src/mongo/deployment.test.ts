@@ -3,9 +3,15 @@
 // the test server cannot be (mongos, uninitiated replica set) are written by hand from
 // the MongoDB documentation.
 
-import { type Document, type MongoClient, MongoServerError } from "mongodb";
+import { type Document, type MongoClient, MongoServerError, ObjectId } from "mongodb";
 import { describe, expect, it } from "vitest";
-import { describeDeployment, topologyFromHello } from "./deployment.ts";
+import {
+  type DeploymentInfo,
+  deploymentIdentityWarning,
+  describeDeployment,
+  sameDeployment,
+  topologyFromHello,
+} from "./deployment.ts";
 
 describe("topologyFromHello", () => {
   it("recognises a mongos router by msg: isdbgrid", () => {
@@ -39,6 +45,10 @@ interface FakeServer {
   readonly buildInfo?: Document;
   /** `config.version`, or a function that throws (no privileges). */
   readonly configVersion?: Document | null | (() => Document | null);
+  /** The `replSetGetConfig` reply, or a function that throws (no clusterMonitor). */
+  readonly replSetConfig?: Document | (() => Document);
+  /** `local.system.replset`, or a function that throws (no access to `local`). */
+  readonly localReplset?: Document | null | (() => Document | null);
   readonly hosts?: readonly string[];
 }
 
@@ -52,17 +62,18 @@ function fakeClient(server: FakeServer): { client: MongoClient; commands: string
     typeof value === "function" ? value() : (value ?? {});
   const fake = {
     options: { hosts: (server.hosts ?? ["db1:27017"]).map((host) => ({ toString: () => host })) },
-    db: () => ({
+    db: (database: string) => ({
       command: async (command: Document) => {
         const name = Object.keys(command)[0] ?? "";
         commands.push(name);
         if (name === "hello") return reply(server.hello);
         if (name === "isMaster") return reply(server.isMaster);
+        if (name === "replSetGetConfig") return reply(server.replSetConfig);
         return reply(server.buildInfo);
       },
       collection: () => ({
         findOne: async () => {
-          const value = server.configVersion;
+          const value = database === "local" ? server.localReplset : server.configVersion;
           return typeof value === "function" ? value() : (value ?? null);
         },
       }),
@@ -180,5 +191,120 @@ describe("describeDeployment", () => {
     expect(unknown.topology).toBe("unknown");
     expect(unknown.supportsChangeStreams).toBe(false);
     expect(standalone.clusterId).not.toBe(unknown.clusterId);
+  });
+});
+
+describe("instanceId: telling apart replica sets with the same name", () => {
+  const unauthorized = () => {
+    throw new MongoServerError({ message: "not authorized", code: 13 });
+  };
+  const replicaSetWith = (server: Partial<FakeServer>) =>
+    describeDeployment(
+      fakeClient({ hello: { setName: "rs0" }, buildInfo: { version: "8.0.0" }, ...server }).client,
+    );
+
+  it("derives it from replSetGetConfig's settings.replicaSetId", async () => {
+    const id = new ObjectId();
+    const first = await replicaSetWith({
+      replSetConfig: { config: { settings: { replicaSetId: id } } },
+    });
+    const again = await replicaSetWith({
+      replSetConfig: { config: { settings: { replicaSetId: id } } },
+    });
+    const other = await replicaSetWith({
+      replSetConfig: { config: { settings: { replicaSetId: new ObjectId() } } },
+    });
+    expect(first.instanceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(again.instanceId).toBe(first.instanceId);
+    // Same set name, so the same clusterId, but a different deployment.
+    expect(other.clusterId).toBe(first.clusterId);
+    expect(other.instanceId).not.toBe(first.instanceId);
+  });
+
+  it("falls back to local.system.replset, then to no instanceId at all", async () => {
+    const id = new ObjectId();
+    const viaCommand = await replicaSetWith({
+      replSetConfig: { config: { settings: { replicaSetId: id } } },
+    });
+    const viaLocal = await replicaSetWith({
+      replSetConfig: unauthorized,
+      localReplset: { settings: { replicaSetId: id } },
+    });
+    expect(viaLocal.instanceId).toBe(viaCommand.instanceId);
+    const unknown = await replicaSetWith({
+      replSetConfig: unauthorized,
+      localReplset: unauthorized,
+    });
+    expect(unknown.instanceId).toBeUndefined();
+    expect(unknown.clusterId).toBe(viaCommand.clusterId);
+  });
+
+  it("is never read for other topologies", async () => {
+    const { client, commands } = fakeClient({
+      hello: { isWritablePrimary: true },
+      buildInfo: { version: "7.0.0" },
+    });
+    expect((await describeDeployment(client)).instanceId).toBeUndefined();
+    expect(commands).not.toContain("replSetGetConfig");
+  });
+
+  it("matches deployments on clusterId, and on instanceId only when both know it", () => {
+    const a = { clusterId: "c1", instanceId: "i1" };
+    expect(sameDeployment(a, { clusterId: "c1", instanceId: "i1" })).toBe(true);
+    expect(sameDeployment(a, { clusterId: "c1", instanceId: "i2" })).toBe(false);
+    // Old manifests (and users without the privilege) record no instanceId.
+    expect(sameDeployment(a, { clusterId: "c1" })).toBe(true);
+    expect(sameDeployment({ clusterId: "c1" }, a)).toBe(true);
+    expect(sameDeployment(a, { clusterId: "c2", instanceId: "i1" })).toBe(false);
+    expect(sameDeployment({}, {})).toBe(false);
+  });
+
+  it("warns when a replica set outside Atlas is known by its name alone", () => {
+    const base: DeploymentInfo = {
+      topology: "replicaSet",
+      serverVersion: "8.0.0",
+      clusterId: "c1",
+      supportsChangeStreams: true,
+      supportsSnapshotReads: true,
+      maxBsonObjectSize: 16 * 1024 * 1024,
+    };
+    expect(deploymentIdentityWarning(base)).toContain("clusterMonitor");
+    expect(deploymentIdentityWarning({ ...base, instanceId: "i1" })).toBeUndefined();
+    expect(
+      deploymentIdentityWarning({ ...base, atlas: { tier: "dedicated", signals: [] } }),
+    ).toBeUndefined();
+    expect(deploymentIdentityWarning({ ...base, topology: "sharded" })).toBeUndefined();
+  });
+});
+
+describe("compatible engines", () => {
+  it("recognises FerretDB by buildInfo and DocumentDB and Cosmos DB by host name", async () => {
+    const ferret = await describeDeployment(
+      fakeClient({
+        hello: { setName: "rs0" },
+        buildInfo: { version: "7.0.77", ferretdb: { version: "v2.0.0" } },
+      }).client,
+    );
+    expect(ferret.engine).toBe("ferretdb");
+    const documentdb = await describeDeployment(
+      fakeClient({
+        hello: { setName: "rs0" },
+        buildInfo: { version: "5.0.0" },
+        hosts: ["docs.cluster-abc.eu-west-1.docdb.amazonaws.com:27017"],
+      }).client,
+    );
+    expect(documentdb.engine).toBe("documentdb");
+    const cosmos = await describeDeployment(
+      fakeClient({
+        hello: { setName: "globaldb" },
+        buildInfo: { version: "7.0.0" },
+        hosts: ["acct.mongo.cosmos.azure.com:10255"],
+      }).client,
+    );
+    expect(cosmos.engine).toBe("cosmosdb");
+    const mongo = await describeDeployment(
+      fakeClient({ hello: { setName: "rs0" }, buildInfo: { version: "8.0.0" } }).client,
+    );
+    expect(mongo.engine).toBeUndefined();
   });
 });

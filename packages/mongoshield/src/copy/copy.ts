@@ -52,7 +52,13 @@ import {
   copyFingerprint,
   newCopyCheckpoint,
 } from "./copy-checkpoint.ts";
-import { createView, prepareTarget, toCopyError, UNORDERED_READING } from "./copy-namespace.ts";
+import {
+  createView,
+  prepareTarget,
+  toCopyError,
+  UNORDERED_READING,
+  warnAboutMaskedDefinitions,
+} from "./copy-namespace.ts";
 import {
   assertNoCopyConflicts,
   buildCopyPlan,
@@ -109,6 +115,8 @@ export async function runCopy(
   const detailed = await buildCopyPlan(context, effective, mask, resume.checkpoint);
   const { plan } = detailed;
   assertNoCopyConflicts(plan);
+  // Validators, partial indexes and views are copied as defined, values included.
+  if (mask !== undefined) warnAboutMaskedDefinitions(detailed.namespaces, mask, context.logger);
   if (resume.checkpoint !== undefined)
     await assertTargetsUnchanged(context.target, resume.checkpoint);
   const renameMapper = compileRenameMap(effective.rename);
@@ -168,6 +176,7 @@ export async function runCopy(
     mode: plan.mode,
     namespaces: detailed.namespaces.length,
   });
+  await assertCheckpointWritable(checkpoint);
 
   try {
     await copyAll(run, detailed.namespaces);
@@ -218,6 +227,28 @@ export async function planCopy(
       : compileMask(resume.options.mask, { logger: context.logger });
   const detailed = await buildCopyPlan(context, resume.options, mask, resume.checkpoint);
   return detailed.plan;
+}
+
+/**
+ * Writes the checkpoint once before anything touches the target. Step 3 may drop
+ * target collections, and the checkpoint is first written after it: a checkpoint
+ * folder that is not writable (a read-only root filesystem, a container's
+ * root-owned working directory) would otherwise only be noticed with the targets
+ * already dropped and empty. Failing here leaves the target exactly as it was.
+ *
+ * @throws MongoShieldError `MS_CONFIG_INVALID` when the file cannot be written.
+ */
+async function assertCheckpointWritable(checkpoint: CheckpointFile | undefined): Promise<void> {
+  if (checkpoint === undefined) return;
+  try {
+    await checkpoint.flush();
+  } catch (error) {
+    if (!isMongoShieldError(error)) throw error;
+    throw new MongoShieldError(error.code, `${error.message} Nothing was written to the target.`, {
+      cause: error.cause,
+      ...(error.hint === undefined ? {} : { hint: error.hint }),
+    });
+  }
 }
 
 /** Steps 3–7 of the file header. */

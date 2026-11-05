@@ -8,6 +8,7 @@
  */
 
 import type { ConnectionView, JobSummary, PlanView, StorageView, UserView } from "../shared/api.ts";
+import { redactSecretUriOptions, redactStorageUrl } from "../state/redact.ts";
 import type { ConnectionRecord, PlanRecord, StorageRecord, UserRecord } from "../state/types.ts";
 import { liveEditSettingsView } from "./live/access.ts";
 
@@ -25,12 +26,15 @@ export function userView(user: UserRecord): UserView {
   };
 }
 
-/** A connection, with only the redacted URI preview. */
+/**
+ * A connection, with only the redacted URI preview. The preview is redacted again on
+ * the way out: one saved by an older version may still hold `proxyPassword` in clear.
+ */
 export function connectionView(connection: ConnectionRecord): ConnectionView {
   return {
     id: connection.id,
     name: connection.name,
-    uri: { configured: true, preview: connection.uriPreview },
+    uri: { configured: true, preview: redactSecretUriOptions(connection.uriPreview) },
     production: connection.production,
     createdAt: connection.createdAt,
     liveEdits: liveEditSettingsView(connection),
@@ -38,13 +42,17 @@ export function connectionView(connection: ConnectionRecord): ConnectionView {
   };
 }
 
-/** A storage location, with credential names but never their values. */
+/**
+ * A storage location, with credential names but never their values. The URL hides the
+ * query string of an `endpoint=` parameter: a location saved before such endpoints were
+ * refused may carry an Azure SAS token there (jobs/storage.ts).
+ */
 export function storageView(storage: StorageRecord): StorageView {
   const names = storage.credentialNames ?? [];
   return {
     id: storage.id,
     name: storage.name,
-    url: storage.url,
+    url: redactStorageUrl(storage.url),
     credentials:
       storage.credentials === undefined
         ? { configured: false }

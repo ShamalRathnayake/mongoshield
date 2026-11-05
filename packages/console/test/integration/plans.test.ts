@@ -9,6 +9,7 @@ import {
   removeDataDir,
   setupAdmin,
   startConsole,
+  TEST_COMPRESSION,
   type TestClient,
   type TestConsole,
 } from "../helpers/console.ts";
@@ -25,7 +26,7 @@ function plan(overrides: Record<string, unknown> = {}) {
     storageId: ids.storage,
     include: [],
     exclude: [],
-    compression: "zstd",
+    compression: TEST_COMPRESSION,
     encryption: { kind: "none" },
     consistency: "auto",
     verify: "fast",

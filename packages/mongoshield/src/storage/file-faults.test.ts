@@ -9,7 +9,7 @@
  * the real filesystem in a temp directory.
  */
 
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ import { isMongoShieldError } from "../errors.ts";
 import type { StorageAdapter } from "./types.ts";
 
 /** Calls the wrapper can fail. */
-type FaultyCall = "open" | "mkdir" | "lstat" | "readdir" | "stat" | "statfs" | "link";
+type FaultyCall = "open" | "mkdir" | "lstat" | "readdir" | "stat" | "statfs" | "link" | "rename";
 
 /**
  * Scripted failures: for each call, a function of its path that returns the errno
@@ -25,6 +25,22 @@ type FaultyCall = "open" | "mkdir" | "lstat" | "readdir" | "stat" | "statfs" | "
  * throws an error without any code.
  */
 const faults = vi.hoisted(() => new Map<string, (path: string) => string | null | undefined>());
+
+/**
+ * When set, `link()` does its real work and THEN fails with EEXIST, like an NFSv3
+ * client whose first link succeeded on the server but whose reply was lost: the
+ * retransmitted call finds the name taken by that first attempt.
+ */
+const lostLinkReply = vi.hoisted(() => ({ enabled: false }));
+
+/**
+ * When set, `lstat(path, { bigint: true })` reports this inode number instead of
+ * the real one (`undefined` keeps the real one). Simulates NTFS's 64-bit file ids,
+ * which a JavaScript number cannot hold exactly.
+ */
+const fakeInode = vi.hoisted(() => ({
+  forPath: undefined as ((path: string) => bigint | undefined) | undefined,
+}));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:fs/promises")>();
@@ -46,11 +62,22 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...original,
     open: faulty("open", original.open),
     mkdir: faulty("mkdir", original.mkdir),
-    lstat: faulty("lstat", original.lstat),
+    lstat: faulty("lstat", async (...args: Parameters<typeof original.lstat>) => {
+      const stats = await original.lstat(...args);
+      const inode = fakeInode.forPath?.(String(args[0]));
+      if (inode === undefined || typeof stats.ino !== "bigint") return stats;
+      return Object.assign(stats, { ino: inode, dev: 1n });
+    }),
     readdir: faulty("readdir", original.readdir),
     stat: faulty("stat", original.stat),
     statfs: faulty("statfs", original.statfs),
-    link: faulty("link", original.link),
+    link: faulty("link", async (...args: Parameters<typeof original.link>) => {
+      await original.link(...args);
+      if (lostLinkReply.enabled) {
+        throw Object.assign(new Error("EEXIST: file already exists, link"), { code: "EEXIST" });
+      }
+    }),
+    rename: faulty("rename", original.rename),
   };
 });
 
@@ -95,6 +122,8 @@ describe("fileStorage when filesystem calls fail", () => {
 
   beforeEach(async () => {
     faults.clear();
+    lostLinkReply.enabled = false;
+    fakeInode.forPath = undefined;
     root = await mkdtemp(join(tmpdir(), "mongoshield-file-faults-"));
     storage = fileStorage({ path: root });
   });
@@ -129,6 +158,43 @@ describe("fileStorage when filesystem calls fail", () => {
       const full = await rejection(storage.put("a", Buffer.from("x")));
       expect(isMongoShieldError(full, "MS_STORAGE_INSUFFICIENT_SPACE")).toBe(true);
       expect(isMongoShieldError(full) && full.hint).toContain(root);
+    });
+
+    it("counts a conditional write as done when link() reports EEXIST for its own file", async () => {
+      lostLinkReply.enabled = true;
+      const info = await storage.put("a", Buffer.from("mine"), { ifNoneMatch: "*" });
+      expect(info.size).toBe(4);
+      expect(await storage.head("a")).toMatchObject({ size: 4 });
+      // The temp name is cleaned up as usual.
+      expect(await readdir(root)).toEqual(["a"]);
+    });
+
+    it("tells 64-bit file ids apart that are equal once rounded to a number", async () => {
+      lostLinkReply.enabled = true;
+      // 2^63 - 1 and 2^63 - 2 are both 9223372036854775808 as a JavaScript number.
+      fakeInode.forPath = (path) => (isTempFile(path) ? 2n ** 63n - 1n : 2n ** 63n - 2n);
+      expect(Number(2n ** 63n - 1n)).toBe(Number(2n ** 63n - 2n));
+      const error = await rejection(storage.put("a", Buffer.from("mine"), { ifNoneMatch: "*" }));
+      // Different files: the existing one is not ours, so the write is refused.
+      expect(isMongoShieldError(error, "MS_STORAGE_PRECONDITION_FAILED")).toBe(true);
+    });
+
+    it("still refuses a conditional write when the existing file is someone else's", async () => {
+      await storage.put("a", Buffer.from("theirs"));
+      const error = await rejection(storage.put("a", Buffer.from("mine"), { ifNoneMatch: "*" }));
+      expect(isMongoShieldError(error, "MS_STORAGE_PRECONDITION_FAILED")).toBe(true);
+    });
+
+    it("reports EPERM from a rename as a permission problem, not a read-only filesystem", async () => {
+      fail("rename", "EPERM", isTempFile, 1);
+      const error = await rejection(storage.put("a", Buffer.from("x")));
+      expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
+      expect(isMongoShieldError(error) && error.hint).not.toContain("read-only");
+      fail("open", "EROFS", isTempFile, 1);
+      const readOnly = await rejection(storage.put("a", Buffer.from("x")));
+      expect(isMongoShieldError(readOnly) && readOnly.hint).toContain("read-only");
+      // Neither failure left a temp file behind.
+      expect(await readdir(root)).toEqual([]);
     });
 
     it("reports a link() failure without an errno as MS_STORAGE_IO", async () => {

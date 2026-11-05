@@ -104,8 +104,9 @@ export interface PutOptions extends SignalOptions {
    * the put fails with `MS_CONFIG_INVALID` before any of `body` is read, so a backup
    * that asked for immutability never silently produces mutable files.
    * Must be in the future. Deleting or overwriting a retained object fails with
-   * `MS_STORAGE_FORBIDDEN` whose `details.objectLocked` is `true` (S3 is the
-   * exception: there a delete only hides the locked version behind a delete marker).
+   * `MS_STORAGE_FORBIDDEN` whose `details.objectLocked` is `true`. S3 would accept
+   * the delete and only hide the locked version behind a delete marker, so the S3
+   * adapter checks retention and legal holds first and refuses the same way.
    * Adapters that support retention take a `retention: { mode }` option, see
    * {@link RetentionMode}.
    */

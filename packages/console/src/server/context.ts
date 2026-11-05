@@ -8,6 +8,7 @@ import type { JobRunner } from "../jobs/runner.ts";
 import type { PlanSchedules } from "../jobs/schedules.ts";
 import type { StorageRegistry } from "../jobs/storage.ts";
 import type { TaskDeps } from "../jobs/tasks.ts";
+import type { ContainerEnvironment } from "../shared/api.ts";
 import type { AuditLog } from "../state/audit.ts";
 import type { StateStore } from "../state/store.ts";
 import type { UserRecord } from "../state/types.ts";
@@ -31,8 +32,31 @@ export interface ConsoleSettings {
    * turn off for plain-HTTP evaluation on a private network.
    */
   readonly cookieSecure: boolean;
-  /** The console's public URL, e.g. `https://backups.example.com`. Enables HSTS when https. */
+  /**
+   * The console's public URL, e.g. `https://backups.example.com`. Enables HSTS when
+   * https, is always an allowed Host (hosts.ts), and its path (if any) is the sub-path
+   * the console is served under, e.g. `https://example.com/mongoshield`.
+   */
   readonly publicUrl?: string;
+  /**
+   * More host names the console answers to (MONGOSHIELD_ALLOWED_HOSTS): names,
+   * `*.example.com`, or `*` to turn the Host check off. See hosts.ts.
+   */
+  readonly allowedHosts?: readonly string[];
+  /**
+   * Socket addresses (IPs or CIDR ranges) of trusted reverse proxies
+   * (MONGOSHIELD_TRUSTED_PROXIES). Only their `X-Forwarded-For`, `-Host` and `-Proto`
+   * headers are believed. Unset: those headers are ignored.
+   */
+  readonly trustedProxies?: readonly string[];
+  /**
+   * MONGOSHIELD_ALLOW_UNSAFE_TARGETS: let admins point webhooks and storage endpoints at
+   * cloud metadata and link-local addresses, use the console's own cloud identity with
+   * storage endpoints outside the cloud's domain, and use connection strings that
+   * authenticate with the console's workload identity (see network-targets.ts). Off by
+   * default: an admin account is not automatically trusted with the console's identity.
+   */
+  readonly allowUnsafeTargets?: boolean;
   /** Running behind TLS (from `publicUrl`): send HSTS. */
   readonly https: boolean;
   /** Grace period for running jobs at shutdown. */
@@ -44,8 +68,11 @@ export interface ConsoleSettings {
 /** Everything a console is made of. Created by `openConsole()` (services.ts). */
 export interface ConsoleServices {
   readonly dataDir: string;
-  /** Whether the console runs in a container; detected when absent (tests set it). */
-  readonly inContainer?: boolean;
+  /**
+   * Where the console runs (Docker, Podman, Kubernetes, …); detected when absent
+   * (container-environment.ts). Tests set it.
+   */
+  readonly container?: ContainerEnvironment;
   readonly store: StateStore;
   readonly audit: AuditLog;
   readonly runner: JobRunner;
@@ -61,6 +88,12 @@ export interface ConsoleServices {
   readonly passwordCost: number;
   /** The clock; tests move it. */
   readonly now: () => Date;
+  /**
+   * Every secret the console knows (stored ones, plus the OIDC client secret, proxy
+   * secret, metrics token and webhook secret), for scrubbing error messages and job
+   * logs. Computed on each call, so it follows changes to the state.
+   */
+  readonly knownSecrets: () => string[];
   /** The live data browser: pooled MongoDB clients and the live edit journal. */
   readonly live: { readonly clients: LiveClients; readonly journal: LiveJournal };
   /**
@@ -81,9 +114,23 @@ export interface Principal {
   readonly csrfToken: string;
 }
 
-/** The Hono environment: request-scoped variables set by the auth middleware. */
+/**
+ * Where a request came from, as far as the console can tell (security.ts,
+ * `resolveClient`): from the socket, or from the forwarding headers of a trusted proxy.
+ */
+export interface RequestClient {
+  /** The client's IP address, or "unknown" (in-process test requests have no socket). */
+  readonly address: string;
+  /** The host the client asked for (`Host`, or a trusted proxy's `X-Forwarded-Host`). */
+  readonly host: string | undefined;
+  /** True when the request arrived through a trusted proxy. */
+  readonly viaTrustedProxy: boolean;
+}
+
+/** The Hono environment: request-scoped variables set by the middleware. */
 export interface AppEnv {
   Variables: {
     principal: Principal | undefined;
+    client: RequestClient | undefined;
   };
 }

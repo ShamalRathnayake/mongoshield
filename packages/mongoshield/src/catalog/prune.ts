@@ -16,6 +16,15 @@
  * deleted newest first, so a prune stopped halfway leaves a chain shortened at its
  * newest end, never one with a hole in the middle.
  *
+ * Backups in use: a backup with a live use lease (a restore, verify or drill reading
+ * it, or its own run still writing; see use-leases.ts) is kept, and checked again
+ * right before it would be deleted, since a reader may have started after the listing.
+ * A backup skipped then (or for completing meanwhile, or being locked) keeps every
+ * ancestor of its chain too, like the planner's rule 8 does for kept backups.
+ * That leaves a window of one storage round trip between the check and the manifest's
+ * deletion; a restore starting inside it fails on a missing manifest or file (in drop
+ * mode during its pre-verification, before it drops anything).
+ *
  * Immutable backups: the planner keeps a backup until its manifest's
  * `immutableUntil`, so prune never asks the storage to delete a locked backup.
  * The storage can still refuse (a clock that runs ahead of the provider's, or an
@@ -27,6 +36,8 @@
 import { readCheckpoint } from "../engine/backup-checkpoint.ts";
 import { isMongoShieldError, throwIfAborted } from "../errors.ts";
 import { backupDir, checkpointKey, manifestKey } from "../format/layout.ts";
+import { isIncrementalManifest, type Manifest } from "../format/manifest.ts";
+import { readManifest } from "../format/manifest-io.ts";
 import { type Logger, silentLogger } from "../logger.ts";
 import { isObjectLockedError } from "../storage/retention.ts";
 import type { StorageAdapter } from "../storage/types.ts";
@@ -46,6 +57,7 @@ import {
   type RetentionPolicy,
 } from "./retention.ts";
 import { type BackupOrigin, isInScope, type PruneScope, validateScope } from "./scope.ts";
+import { describeUseLeases, liveUseLeases, liveUseLeasesByBackup } from "./use-leases.ts";
 
 /** Options for {@link pruneBackups}. */
 export interface PruneOptions {
@@ -91,8 +103,10 @@ export interface PruneResult {
   /** Total size in bytes of the deleted objects. */
   readonly deletedBytes: number;
   /**
-   * Ids that the plan removed but that were skipped: they completed meanwhile, or
-   * the storage refused to delete them because their objects are still locked.
+   * Ids that the plan removed but that were skipped: they completed meanwhile, came
+   * into use (a restore, verify or drill started), the storage refused to delete
+   * them because their objects are still locked, or another skipped backup's
+   * incremental chain depends on them (so the chain stays whole).
    * Deleted counts include any objects of a skipped backup removed before the refusal.
    */
   readonly skipped: string[];
@@ -138,11 +152,19 @@ export async function pruneBackups(
     entries,
     outOfScope.map((backup) => backup.id),
   );
+  // A restore, verify or drill reading it, or its own run still writing (use-leases.ts).
+  // One listing for the whole location; the re-check before each delete is per backup.
+  const leasesByBackup = await liveUseLeasesByBackup(storage, { signal });
   const backups: RetentionBackup[] = [];
   for (const entry of inScope) {
-    const backup = await toRetentionBackup(storage, entry, signal);
+    const backup = await toRetentionBackup(storage, entries, entry, signal);
     const neededBy = neededOutside.get(entry.id);
-    backups.push(neededBy === undefined ? backup : { ...backup, neededBy });
+    const leases = leasesByBackup.get(entry.id) ?? [];
+    backups.push({
+      ...backup,
+      ...(neededBy === undefined ? {} : { neededBy }),
+      ...(leases.length === 0 ? {} : { inUse: describeUseLeases(leases) }),
+    });
   }
 
   const planned = planRetention({ backups, policy, now: options.now ?? new Date() });
@@ -175,9 +197,28 @@ export async function pruneBackups(
   }
 
   const statusById = new Map(entries.map((entry) => [entry.id, entry.status]));
+  // A backup skipped below stays, so everything its chain depends on must stay too
+  // (retention keeps every parent of a kept backup, rule 8). Its ancestors are older,
+  // so with the newest-first order they come up later in this loop: ancestor id →
+  // the skipped backup that needs it.
+  const neededBySkipped = new Map<string, string>();
+  const keepAncestors = (id: string, ancestors: readonly string[]): void => {
+    for (const ancestor of ancestors) {
+      if (!neededBySkipped.has(ancestor)) neededBySkipped.set(ancestor, id);
+    }
+  };
   for (const removed of plan.remove) {
     throwIfAborted(signal);
 
+    const dependent = neededBySkipped.get(removed.id);
+    if (dependent !== undefined) {
+      logger.warn("Skipping a backup that a backup kept while pruning depends on", {
+        id: removed.id,
+        neededBy: dependent,
+      });
+      skipped.push(removed.id);
+      continue;
+    }
     // An incomplete run that was planned for removal may have committed its
     // manifest since we listed (a very slow backup finishing just now). Re-check
     // right before deleting so we never destroy a backup that just became good.
@@ -187,6 +228,20 @@ export async function pruneBackups(
     ) {
       logger.warn("Skipping a backup that completed while pruning", { id: removed.id });
       skipped.push(removed.id);
+      // The listing has no manifest for it: its chain comes from the fresh one.
+      keepAncestors(removed.id, await freshChainAncestors(storage, entries, removed.id, signal));
+      continue;
+    }
+    // Likewise a restore, verify or drill may have started on it since the listing.
+    const leases = await liveUseLeases(storage, removed.id, { signal });
+    if (leases.length > 0) {
+      logger.warn("Skipping a backup that came into use while pruning", {
+        id: removed.id,
+        inUse: describeUseLeases(leases),
+      });
+      skipped.push(removed.id);
+      // A restore of an incremental reads its whole chain.
+      keepAncestors(removed.id, chainAncestorIds(entries, removed.id));
       continue;
     }
 
@@ -200,6 +255,7 @@ export async function pruneBackups(
         error: error instanceof Error ? error.message : String(error),
       });
       skipped.push(removed.id);
+      keepAncestors(removed.id, chainAncestorIds(entries, removed.id));
       continue;
     }
     // Annotations and the checkpoint of a resumable run go last: until the data is
@@ -262,12 +318,20 @@ async function originOf(
   signal: AbortSignal | undefined,
 ): Promise<BackupOrigin | undefined> {
   if (entry.manifest !== undefined) {
-    return { clusterId: entry.manifest.source.clusterId, labels: entry.manifest.labels };
+    return {
+      clusterId: entry.manifest.source.clusterId,
+      instanceId: entry.manifest.source.instanceId,
+      labels: entry.manifest.labels,
+    };
   }
   try {
     const checkpoint = await readCheckpoint(storage, entry.id, signal);
     if (checkpoint === undefined) return undefined;
-    return { clusterId: checkpoint.source.clusterId, labels: checkpoint.labels };
+    return {
+      clusterId: checkpoint.source.clusterId,
+      instanceId: checkpoint.source.instanceId,
+      labels: checkpoint.labels,
+    };
   } catch (error) {
     // A damaged checkpoint says nothing reliable about the run: leave it alone.
     if (isMongoShieldError(error, "MS_MANIFEST_INVALID")) return undefined;
@@ -371,16 +435,43 @@ function dependenciesOf(
   return needed;
 }
 
+/**
+ * Whether a backup counts as verified for `minVerified`: a passed drill (a real test
+ * restore, the strongest proof a backup works), or a passed verify run that covered
+ * everything a restore of it reads.
+ *
+ * An incremental verified with `chain: "links"` (the scheduler's hourly check) had only
+ * its own files checked; its earlier members were checked for being there and lined up,
+ * not for intact data. It counts only when every earlier member passed a verify run or
+ * a drill of its own: then every file of the chain was checked at some point.
+ */
+export function countsAsVerified(entries: readonly CatalogEntry[], entry: CatalogEntry): boolean {
+  if (entry.lastDrill?.ok === true) return true;
+  const verification = entry.verification;
+  if (verification?.ok !== true) return false;
+  if (verification.chainScope !== "links") return true;
+  const byId = new Map(entries.map((candidate) => [candidate.id, candidate]));
+  const ancestors = chainAncestorIds(entries, entry.id);
+  // The base must be among them: a chain that cannot be followed back is not verified.
+  const base = entry.manifest?.chain?.base;
+  if (base === undefined || !ancestors.includes(base)) return false;
+  return ancestors.every((id) => passedOwnCheck(byId.get(id)));
+}
+
+/** A passed drill, or a passed verify run of any chain scope (its own files were checked). */
+function passedOwnCheck(entry: CatalogEntry | undefined): boolean {
+  return entry?.lastDrill?.ok === true || entry?.verification?.ok === true;
+}
+
 /** Converts a catalog entry into the planner's input. */
 async function toRetentionBackup(
   storage: StorageAdapter,
+  entries: readonly CatalogEntry[],
   entry: CatalogEntry,
   signal: AbortSignal | undefined,
 ): Promise<RetentionBackup> {
   const flags = {
-    // A passed drill (a real test restore) is the strongest proof a backup works,
-    // so it counts as verified just like a passed verify run.
-    verified: entry.verification?.ok === true || entry.lastDrill?.ok === true,
+    verified: countsAsVerified(entries, entry),
     held: entry.hold !== undefined,
   };
   const completedAt = completedAtOf(entry);
@@ -437,6 +528,29 @@ export async function deleteCheckpointOf(
   if ((await storage.head(key, signalOption)) !== undefined) {
     await storage.delete([key], signalOption);
   }
+}
+
+/**
+ * The chain ancestors of a backup that completed while pruning, from its manifest as
+ * it is now (the catalog listed it without one). None when it is a full backup, or
+ * its manifest cannot be read after all (then nothing says what it depends on).
+ */
+async function freshChainAncestors(
+  storage: StorageAdapter,
+  entries: readonly CatalogEntry[],
+  id: string,
+  signal: AbortSignal | undefined,
+): Promise<string[]> {
+  let manifest: Manifest | undefined;
+  try {
+    manifest = await readManifest(storage, id, signal ? { signal } : {});
+  } catch (error) {
+    if (isMongoShieldError(error, "MS_MANIFEST_INVALID")) return [];
+    throw error;
+  }
+  if (manifest === undefined || !isIncrementalManifest(manifest)) return [];
+  const parent = manifest.chain.parent;
+  return [parent, ...chainAncestorIds(entries, parent)];
 }
 
 /** True if the backup's manifest exists right now. */

@@ -15,13 +15,15 @@
 #     it creates do, with the MongoShield image,
 #   - the process is long-running and serves /healthz, /readyz and /metrics on 8080.
 
-ARG NODE_MAJOR=24
+# Base images are pinned by digest and npm installs honour NPM_BEFORE, as in
+# docker/Dockerfile (read it for why).
+ARG NPM_BEFORE=""
 
 
 # ---------------------------------------------------------------------------
 # Stage 1: build both packages and pack them as npm tarballs
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM node:${NODE_MAJOR}-trixie AS build
+FROM --platform=$BUILDPLATFORM node:24-trixie@sha256:8c761eca2bf7eec965f946cf47b8090143cb41f45f2f8699af0cc0298d2d2d19 AS build
 WORKDIR /repo
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
@@ -52,23 +54,27 @@ RUN pnpm --filter mongoshield build \
 # ---------------------------------------------------------------------------
 # Stage 2: install the tarballs like a user would (flat node_modules, no symlinks)
 # ---------------------------------------------------------------------------
-FROM node:${NODE_MAJOR}-trixie-slim AS deps
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS deps
+ARG NPM_BEFORE
 WORKDIR /app
 COPY --from=build /pack/mongoshield.tgz /pack/operator.tgz /tmp/
 RUN echo '{ "name": "mongoshield-operator-image", "private": true, "type": "module" }' > package.json
 
-# The library first (with the MongoDB driver, its required peer), then the operator,
-# whose `mongoshield` dependency is already satisfied. No install scripts run.
+# The library first (with the MongoDB driver, its required peer, at the exact version
+# in pnpm-lock.yaml), then the operator, whose `mongoshield` dependency is already
+# satisfied. No install scripts run.
 RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
-    npm install --omit=dev --ignore-scripts --no-audit --no-fund /tmp/mongoshield.tgz mongodb@^7 \
- && npm install --omit=dev --ignore-scripts --no-audit --no-fund /tmp/operator.tgz \
+    npm install --omit=dev --ignore-scripts --no-audit --no-fund \
+      ${NPM_BEFORE:+--before="$NPM_BEFORE"} /tmp/mongoshield.tgz mongodb@7.7.0 \
+ && npm install --omit=dev --ignore-scripts --no-audit --no-fund \
+      ${NPM_BEFORE:+--before="$NPM_BEFORE"} /tmp/operator.tgz \
  && test -f node_modules/@mongoshield/operator/dist/main.mjs
 
 
 # ---------------------------------------------------------------------------
 # Stage 3: distroless runtime, non-root
 # ---------------------------------------------------------------------------
-FROM gcr.io/distroless/nodejs${NODE_MAJOR}-debian13:nonroot AS runtime
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:b8cec4b2f2126ff7bd034ec9ac207ffb3272667dfdc48376e3b035d3270549ba AS runtime
 
 LABEL org.opencontainers.image.title="MongoShield Operator" \
       org.opencontainers.image.description="Kubernetes operator for MongoDB backups and restores with MongoShield." \

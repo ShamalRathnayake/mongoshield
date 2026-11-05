@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { BSON, type Document, Double, Int32, Long } from "mongodb";
+import { BSON, Code, DBRef, type Document, Double, Int32, Long } from "mongodb";
 import type { LiveDocument } from "../../shared/api.ts";
 import { relaxedText } from "../ejson-text.ts";
 import { invalid } from "../errors.ts";
@@ -215,10 +215,27 @@ export function parseUpdate(raw: unknown): Document {
   return update;
 }
 
-/** Refuses `$where`, `$function` and `$accumulator` anywhere in a parsed object. */
+/**
+ * Refuses `$where`, `$function` and `$accumulator` anywhere in a parsed object, also
+ * inside BSON values that carry nested objects: Extended JSON turns
+ * `{"$ref": …, "$id": …, "$where": …}` into a `DBRef` whose extra fields (and `$id`)
+ * would otherwise hide the operator from a walk over plain objects only.
+ */
 export function assertNoServerJavaScript(value: unknown, label: string): void {
   if (Array.isArray(value)) {
     for (const item of value) assertNoServerJavaScript(item, label);
+    return;
+  }
+  if (value instanceof DBRef) {
+    assertNoServerJavaScript(value.oid, label);
+    assertNoServerJavaScript(value.fields, label);
+    return;
+  }
+  // `{"$code": …, "$scope": {…}}`: the scope is an object too.
+  if (value instanceof Code) {
+    if (value.scope !== null && value.scope !== undefined) {
+      assertNoServerJavaScript(value.scope, label);
+    }
     return;
   }
   if (!isPlainObject(value)) return;

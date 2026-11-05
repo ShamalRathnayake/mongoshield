@@ -31,6 +31,7 @@ import { deleteAnnotations } from "./annotations.ts";
 import { type CatalogEntry, immutableUntilOf, listBackups } from "./catalog.ts";
 import { chainAncestorIds } from "./chain.ts";
 import { deleteBackup, deleteCheckpointOf } from "./prune.ts";
+import { describeUseLeases, liveUseLeases } from "./use-leases.ts";
 
 /** Options for {@link deleteBackupById}. */
 export interface DeleteBackupOptions {
@@ -73,6 +74,15 @@ export async function deleteBackupById(
   const entry = entries.find((candidate) => candidate.id === id);
   if (!entry) throw notFound(id);
   assertDeletable(entries, entry, now);
+  // A restore, verify or drill reading it right now (or its own run still writing).
+  const leases = await liveUseLeases(storage, id, { signal });
+  if (leases.length > 0) {
+    throw protectedError(
+      id,
+      `it is in use (${describeUseLeases(leases)})`,
+      "Wait until that finishes, then delete it.",
+    );
+  }
   throwIfAborted(signal);
 
   const totals = { deletedObjects: 0, deletedBytes: 0 };

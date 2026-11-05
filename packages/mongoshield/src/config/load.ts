@@ -11,14 +11,16 @@
  * the final configuration rather than one of its layers.
  */
 
-import { access } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { access, readFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { z } from "zod";
 import { MongoShieldError } from "../errors.ts";
 import { readEnvironmentConfig } from "./env.ts";
 import { CONFIG_PRESETS, isConfigPresetName } from "./presets.ts";
 import { ConfigSchema, type MongoShieldConfig, type MongoShieldConfigInput } from "./schema.ts";
+import { resolveSecretReferences } from "./secret-references.ts";
 
 /** File names searched, in order, when no `--config` path is given. */
 export const CONFIG_FILE_NAMES = [
@@ -51,10 +53,13 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   const cwd = options.cwd ?? process.cwd();
   const configFile = await findConfigFile(cwd, options.configPath);
   const fromFile = configFile ? await importConfigFile(configFile) : {};
-  const fromEnv = readEnvironmentConfig(options.env ?? process.env);
+  const env = options.env ?? process.env;
+  const fromEnv = readEnvironmentConfig(env);
 
   const merged = mergeConfigs(mergeConfigs(fromFile, fromEnv), options.overrides ?? {});
-  return { config: validateConfig(merged, configFile), configFile };
+  // `{ env: "NAME" }` / `{ file: "/path" }` for notify and heartbeat URLs (schema.ts).
+  const resolved = await resolveSecretReferences(merged, env);
+  return { config: validateConfig(resolved, configFile), configFile };
 }
 
 /** Validates a config object, turning schema problems into one readable error. */
@@ -112,9 +117,15 @@ async function fileExists(path: string): Promise<boolean> {
 /**
  * Imports a config file. jiti lets users write the config in TypeScript without
  * a build step, on every supported Node version.
+ *
+ * `import { defineConfig } from "mongoshield"` in the file resolves to the package
+ * that is running (see {@link mongoshieldAliases}), not to whatever Node would find
+ * next to the file: with `npx mongoshield` or the GitHub Action, the package lives
+ * in npm's cache and the config's folder has no node_modules/mongoshield at all.
  */
 async function importConfigFile(path: string): Promise<MongoShieldConfigInput> {
-  const jiti = createJiti(import.meta.url, { moduleCache: false });
+  const alias = await mongoshieldAliases(dirname(fileURLToPath(import.meta.url)));
+  const jiti = createJiti(import.meta.url, { moduleCache: false, alias });
   let loaded: unknown;
   try {
     loaded = await jiti.import(path, { default: true });
@@ -132,6 +143,66 @@ async function importConfigFile(path: string): Promise<MongoShieldConfigInput> {
     );
   }
   return loaded as MongoShieldConfigInput;
+}
+
+/** The package name config files import, and its subpaths (`mongoshield/storage/s3`). */
+const PACKAGE_NAME = "mongoshield";
+
+/** How many folders up from this module the package's own package.json may be. */
+const MAX_PACKAGE_DEPTH = 5;
+
+/**
+ * Module aliases that point `mongoshield` and each of its subpath exports at the
+ * files of the running copy of the package, for jiti: `{ "mongoshield":
+ * "/…/node_modules/mongoshield/dist/index.mjs", "mongoshield/storage/s3": "…" }`.
+ *
+ * Found by walking up from `fromDirectory` (this module's folder: `dist/` when
+ * installed, `src/config/` in the repository) to the package.json named
+ * "mongoshield", and reading its `exports`. Only targets that exist are listed, so
+ * a source checkout without a build simply resolves as before. Using the running
+ * copy also means a config and the CLI share one `defineConfig` and one set of
+ * storage adapters, even if the project has another version installed.
+ *
+ * @returns an empty object when the package.json cannot be found or read.
+ */
+export async function mongoshieldAliases(fromDirectory: string): Promise<Record<string, string>> {
+  const root = await findPackageRoot(fromDirectory);
+  if (root === undefined) return {};
+  let exportsField: unknown;
+  try {
+    const manifest: unknown = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    exportsField = isPlainObject(manifest) ? manifest.exports : undefined;
+  } catch {
+    return {};
+  }
+  if (!isPlainObject(exportsField)) return {};
+
+  const aliases: Record<string, string> = {};
+  for (const [subpath, target] of Object.entries(exportsField)) {
+    // "." → "mongoshield", "./storage/s3" → "mongoshield/storage/s3".
+    if (typeof target !== "string" || (subpath !== "." && !subpath.startsWith("./"))) continue;
+    const specifier = subpath === "." ? PACKAGE_NAME : `${PACKAGE_NAME}/${subpath.slice(2)}`;
+    const file = resolve(root, target);
+    if (await fileExists(file)) aliases[specifier] = file;
+  }
+  return aliases;
+}
+
+/** The nearest folder at or above `directory` whose package.json is named "mongoshield". */
+async function findPackageRoot(directory: string): Promise<string | undefined> {
+  let current = directory;
+  for (let depth = 0; depth <= MAX_PACKAGE_DEPTH; depth++) {
+    try {
+      const manifest: unknown = JSON.parse(await readFile(join(current, "package.json"), "utf8"));
+      if (isPlainObject(manifest) && manifest.name === PACKAGE_NAME) return current;
+    } catch {
+      // No (readable) package.json here: keep walking up.
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+  return undefined;
 }
 
 /**

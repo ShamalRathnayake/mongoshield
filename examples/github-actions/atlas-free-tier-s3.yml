@@ -45,8 +45,10 @@ permissions:
 
 env:
   # One place for the storage URL. `region=auto` is what R2 expects; AWS S3 users put
-  # their bucket's region here instead (and leave S3_ENDPOINT unset).
-  STORAGE: s3://${{ vars.BACKUP_BUCKET }}/atlas?region=auto${{ vars.S3_ENDPOINT != '' && format('&endpoint={0}', vars.S3_ENDPOINT) || '' }}
+  # their bucket's region here instead (and leave S3_ENDPOINT unset). With an endpoint
+  # (R2, B2, MinIO…) the AWS SDK's default CRC32 upload checksums are turned off:
+  # several S3-compatible stores fail multipart uploads (objects over 16 MiB) with them.
+  STORAGE: s3://${{ vars.BACKUP_BUCKET }}/atlas?region=auto${{ vars.S3_ENDPOINT != '' && format('&endpoint={0}&requestChecksumCalculation=WHEN_REQUIRED', vars.S3_ENDPOINT) || '' }}
   AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
 

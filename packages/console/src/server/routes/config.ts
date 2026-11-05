@@ -1,12 +1,17 @@
 /**
  * Config export and import.
  *
- *   GET  /api/config/export   viewer → `{ filename, content }` (a mongoshield.config.ts)
- *   POST /api/config/import   admin  → dry run or apply (see config-import.ts)
+ *   GET  /api/config/export   admin → `{ filename, content }` (a mongoshield.config.ts)
+ *   POST /api/config/import   admin → dry run or apply (see config-import.ts)
  *
- * The export contains no secrets (they are `process.env` references), which is
- * why viewers may download it. The import creates connections and storage and
- * changes plans, which is admin work; it is applied all or nothing, in one state
+ * The export contains no secrets (they are `process.env` references), but it is a
+ * map of the infrastructure: every connection's hosts, storage buckets and URLs, and
+ * what each plan includes. Viewers see plans and connections one by one in the UI,
+ * yet a single file of all of it is admin material, like the configuration it is
+ * made from (the UI offers the download to admins only).
+ *
+ * The import creates connections and storage and changes plans, which is admin
+ * work; it is applied all or nothing, in one state
  * update that re-plans against the current state, so a dry run that went stale
  * (someone renamed a plan meanwhile) cannot apply half of its changes.
  */
@@ -23,7 +28,7 @@ import { asObject } from "../validate.ts";
 /** Registers the config routes. */
 export function configRoutes(app: Hono<AppEnv>, services: ConsoleServices): void {
   app.get("/api/config/export", async (c) => {
-    const principal = requireRole(c, "viewer");
+    const principal = requireRole(c, "admin");
     const exported = renderConfig(services.store.current, services.dataDir, services.now());
     await recordAudit(services, { actor: principal, action: "config.export", outcome: "success" });
     return c.json(exported);
@@ -32,7 +37,12 @@ export function configRoutes(app: Hono<AppEnv>, services: ConsoleServices): void
   app.post("/api/config/import", async (c) => {
     const principal = requireRole(c, "admin");
     const request = parseImportRequest(asObject(await readJson(c)));
-    const context = { store: services.store, dataDir: services.dataDir, now: services.now() };
+    const context = {
+      store: services.store,
+      dataDir: services.dataDir,
+      now: services.now(),
+      allowUnsafeTargets: services.settings.allowUnsafeTargets === true,
+    };
 
     let plan: ImportPlan;
     if (request.dryRun) {

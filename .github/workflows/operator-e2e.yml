@@ -43,17 +43,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5 # v5: current major
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # Installs the pnpm version pinned in package.json ("packageManager"). It must
       # come before setup-node, which looks for pnpm when it sets up its cache.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7 # v5: current major
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
-      - uses: azure/setup-helm@v4 # v4: current major
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       # The cluster name must match scripts/e2e.ts (CLUSTER), so the script reuses it.
-      - uses: helm/kind-action@v1 # v1: current major
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: mongoshield-e2e
           wait: 180s

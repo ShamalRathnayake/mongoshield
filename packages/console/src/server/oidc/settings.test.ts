@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { EnvironmentError, readEnvironment, readOidcEnvironment } from "../config.ts";
-import { roleFromClaims, usernameFromClaims } from "./settings.ts";
+import { linkableNamesOf, roleFromClaims, usernameFromClaims } from "./settings.ts";
 
 const BASE = {
   MONGOSHIELD_OIDC_ISSUER: "https://login.example.com/realms/ops",
@@ -191,10 +191,25 @@ describe("usernames", () => {
     expect(
       usernameFromClaims({ preferred_username: "ann", email: "a@x.io", sub: "1" }, issuer),
     ).toBe("ann");
-    expect(usernameFromClaims({ email: "a@x.io", sub: "1" }, issuer)).toBe("a@x.io");
+    expect(usernameFromClaims({ email: "a@x.io", email_verified: true, sub: "1" }, issuer)).toBe(
+      "a@x.io",
+    );
     expect(usernameFromClaims({ email: "a@x.io", email_verified: false, sub: "s-1" }, issuer)).toBe(
       "s-1",
     );
+    // A missing email_verified counts as unverified.
+    expect(usernameFromClaims({ email: "a@x.io", sub: "s-2" }, issuer)).toBe("s-2");
+  });
+
+  it("links prepared accounts only by a verified email or the subject", () => {
+    expect(linkableNamesOf({ sub: "s-1", email: "Ann@X.io", email_verified: true })).toEqual({
+      subject: "s-1",
+      email: "ann@x.io",
+    });
+    expect(linkableNamesOf({ sub: "s-1", email: "ann@x.io" })).toEqual({ subject: "s-1" });
+    expect(linkableNamesOf({ sub: "s-1", email: "ann@x.io", email_verified: "true" })).toEqual({
+      subject: "s-1",
+    });
   });
 
   it("derives a stable name when nothing fits the username rule", () => {

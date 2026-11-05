@@ -19,6 +19,7 @@ import type {
   CheckpointedBackupResult,
   CompletedBackupResult,
 } from "../../src/types.ts";
+import { TEST_COMPRESSION } from "../helpers/compression.ts";
 import { uniqueDb, useMongoClient } from "../helpers/mongo.ts";
 import { backupContext, sourceDocuments } from "./backup-test-utils.ts";
 
@@ -157,8 +158,11 @@ describe("checkpoints and resume", () => {
       code: "MS_CONFIG_INVALID",
       message: expect.stringMatching(/include/),
     });
+    // Any compression other than the one the first run used (TEST_COMPRESSION is
+    // gzip itself on a Node.js without zstd).
+    const otherCompression = TEST_COMPRESSION === "gzip" ? "none" : "gzip";
     await expect(
-      runBackup(backupContext(client(), storage, { compression: "gzip" }), {
+      runBackup(backupContext(client(), storage, { compression: otherCompression }), {
         ...sliced,
         resume: first.id,
       }),

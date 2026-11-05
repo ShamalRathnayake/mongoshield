@@ -79,6 +79,10 @@ interface FakeBehaviour {
   readonly clusterId?: string;
   /** Record no `clusterId` at all (as old writers did). */
   readonly noClusterId?: boolean;
+  /** The replica set's `instanceId` recorded in manifests. Defaults to none. */
+  readonly instanceId?: string;
+  /** Like `auto` falling back: consistency `none`, with this warning in the result. */
+  readonly degradedConsistency?: string;
 }
 
 /**
@@ -94,7 +98,10 @@ function nextStart(): Date {
 /** A shield whose backup writes a manifest to memory storage, honouring the hook like the engine. */
 function fakeShield(storage: MemoryStorage, behaviour: FakeBehaviour = {}) {
   const errors = [...(behaviour.backupErrors ?? [])];
-  const clusterId = behaviour.noClusterId ? {} : { clusterId: behaviour.clusterId ?? CLUSTER };
+  const clusterId = {
+    ...(behaviour.noClusterId ? {} : { clusterId: behaviour.clusterId ?? CLUSTER }),
+    ...(behaviour.instanceId === undefined ? {} : { instanceId: behaviour.instanceId }),
+  };
   const backup = vi.fn(async (options: BackupOptions = {}): Promise<BackupResult> => {
     const error = errors.shift();
     if (error) throw error;
@@ -128,11 +135,22 @@ function fakeShield(storage: MemoryStorage, behaviour: FakeBehaviour = {}) {
         labels: { ...options.labels },
         source: { topology: "replicaSet", serverVersion: "8.0.0", ...clusterId },
         namespaces: behaviour.empty ? [] : [entry("app.users", behaviour.documents ?? 100)],
+        ...(behaviour.degradedConsistency === undefined
+          ? {}
+          : { consistency: { mode: "none" as const, warning: behaviour.degradedConsistency } }),
       }),
     );
     await options.beforeCommit?.(manifest, {});
     await writeManifest(storage, manifest);
-    return { status: "complete", id: manifest.id, manifest, durationMs: 5 };
+    const warnings =
+      behaviour.degradedConsistency === undefined ? [] : [behaviour.degradedConsistency];
+    return {
+      status: "complete",
+      id: manifest.id,
+      manifest,
+      durationMs: 5,
+      ...(warnings.length === 0 ? {} : { warnings }),
+    };
   });
   const verify = vi.fn(
     async (options: { backup: unknown; mode?: "fast" | "deep" }): Promise<VerifyReport> => ({
@@ -193,6 +211,7 @@ async function putJobBackup(
   options: {
     selection?: BackupShapeInput;
     clusterId?: string;
+    instanceId?: string;
     labels?: Record<string, string>;
   } = {},
 ): Promise<void> {
@@ -202,6 +221,7 @@ async function putJobBackup(
       topology: "replicaSet",
       serverVersion: "8.0.0",
       clusterId: options.clusterId ?? CLUSTER,
+      ...(options.instanceId === undefined ? {} : { instanceId: options.instanceId }),
     },
   });
 }
@@ -233,6 +253,19 @@ describe("runScheduledJob", () => {
       leaseMs: 60_000,
     }).tryAcquire();
     expect(next.acquired).toBe(true);
+  });
+
+  it("reports the consistency a backup really used, and why auto fell back to none", async () => {
+    const storage = memoryStorage();
+    const warning = 'Consistency "auto" used "none": the user cannot open a change stream.';
+    const { shield } = fakeShield(storage, { degradedConsistency: warning });
+    const report = await runScheduledJob(shield, BASE_CONFIG, FAST);
+    expect(report.status).toBe("success");
+    expect(report.backup).toMatchObject({ consistency: "none", warnings: [warning] });
+
+    const fine = await runScheduledJob(fakeShield(memoryStorage()).shield, BASE_CONFIG, FAST);
+    expect(fine.backup?.consistency).toBeDefined();
+    expect(fine.backup?.warnings).toBeUndefined();
   });
 
   it("labels backups with their include/exclude shape", async () => {
@@ -798,6 +831,30 @@ describe("runScheduledJob with replicate targets", () => {
     expect(await listBackups(storage)).toHaveLength(1);
     expect(await listBackups(working)).toHaveLength(1);
   });
+
+  it("scrubs the run's secrets and connection strings out of a replication error", async () => {
+    const passphrase = "correct horse battery staple";
+    const brokenBase = memoryStorage({ name: "broken" });
+    const broken: MemoryStorage = {
+      ...brokenBase,
+      async put() {
+        throw new MongoShieldError(
+          "MS_STORAGE_IO",
+          `failed with ${passphrase} via mongodb://admin:hunter2@db.example.com/x`,
+        );
+      },
+    };
+    const { shield } = fakeShield(memoryStorage(), { empty: true });
+    const report = await runScheduledJob(
+      shield,
+      { ...BASE_CONFIG, replicate: [{ storage: broken }] },
+      { ...FAST, decryption: { passphrase } },
+    );
+    const error = report.replicate?.[0]?.error ?? "";
+    expect(error).toContain("failed with");
+    expect(error).not.toContain(passphrase);
+    expect(error).not.toContain("hunter2");
+  });
 });
 
 describe("runScheduledJob retention scopes (jobs sharing one storage location)", () => {
@@ -863,6 +920,22 @@ describe("runScheduledJob retention scopes (jobs sharing one storage location)",
       FAST,
     );
     expect(await idsIn(storage)).toEqual([first.backup?.id, third.backup?.id]);
+  });
+
+  it("never prunes a same-named replica set's backups: the instanceId keeps them apart", async () => {
+    const storage = memoryStorage();
+    // Staging and prod are both `rs0`: one clusterId, different instanceIds.
+    const staging = idAt("2026-10-17T03:00:00Z");
+    await putJobBackup(storage, staging, { instanceId: "staging" });
+    await putJobBackup(storage, idAt("2026-10-18T03:00:00Z"), { instanceId: "prod" });
+    const report = await runScheduledJob(
+      fakeShield(storage, { instanceId: "prod" }).shield,
+      { ...BASE_CONFIG, retention: { last: 1 } },
+      FAST,
+    );
+    // Only prod's older backup went; staging's (older still) is out of scope.
+    expect(report.prune).toMatchObject({ deletedBackups: 1, kept: 1, outOfScope: 1 });
+    expect(await idsIn(storage)).toEqual([staging, report.backup?.id]);
   });
 
   it("scopes by scopeLabels instead of the shape, and labels every backup with them", async () => {

@@ -42,11 +42,37 @@ variable, so it is not visible in the Lambda console.
 |---|---|---|
 | Runtime | `nodejs22.x` or `nodejs24.x` | MongoShield needs Node.js 22.12+ |
 | Timeout | 900 s | Lambda's maximum; abort the backup ~60 s earlier |
-| Memory | 1769 MB | memory buys CPU (1 vCPU at 1769 MB); memory use itself stays flat |
+| Memory | 1769 MB | memory buys CPU (1 vCPU at 1769 MB); memory use stays flat, at the level [below](#memory-use) |
 | Architecture | `arm64` | cheaper per second, same throughput |
 | Reserved concurrency | 1 | one run at a time |
 | Async retries | 0 | a failed 15-minute run should alert, not repeat for 45 minutes |
 | IAM | `s3:ListBucket`, `GetObject`, `PutObject`, `DeleteObject` on the bucket | delete is for retention |
+
+## Memory use
+
+Memory does not grow with the size of the database, but it has a floor set by the upload
+buffers. Each collection being dumped uploads one file at a time, and an S3 upload buffers
+up to `partSize × queueSize` bytes: 16 MiB × 4 = 64 MiB by default. With the default
+`parallelism` of 4 collections at once, that is about **256 MiB of upload buffers**, plus
+the Node.js runtime, the driver and the SDK (roughly 100-150 MiB more). At the
+recommended 1769 MB this does not matter. On a 256 or 512 MB function (or Vercel/Netlify
+functions, which have similar limits), shrink the buffers:
+
+```js
+const shield = new MongoShield({
+  source: { uri: process.env.MONGODB_URI },
+  // 8 MiB × 2 = 16 MiB per upload. The largest single file is partSize × 10,000
+  // (80 GiB here), far beyond what a function can dump in 15 minutes.
+  storage: s3Storage({ bucket: process.env.BACKUP_BUCKET, partSize: 8 * 1024 * 1024, queueSize: 2 }),
+});
+await shield.backup({ parallelism: 2 }); // 2 collections × 16 MiB ≈ 32 MiB of buffers
+```
+
+With a storage URL (CLI or config file) the same settings are
+`s3://bucket/prefix?partSizeMiB=8&queueSize=2`. Google Cloud Storage takes
+`gs://…?chunkSizeMiB=8` (default 16 MiB per upload), Azure
+`az://…?blockSizeMiB=4&uploadConcurrency=2` (default 8 MiB × 4). Smaller parts mean more
+requests, so keep the defaults wherever memory is not tight.
 
 ## The 15-minute limit
 

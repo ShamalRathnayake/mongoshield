@@ -71,7 +71,7 @@ Or with plain manifests:
 
 ```bash
 kubectl apply --server-side -f deploy/operator/crds.yaml
-kubectl apply -f deploy/operator/operator.yaml   # edit the two image tags first
+kubectl apply -f deploy/operator/operator.yaml   # images pinned to the release
 ```
 
 Useful values ([`values.yaml`](../../deploy/helm/mongoshield-operator/values.yaml) documents
@@ -79,11 +79,16 @@ all of them):
 
 | Value | Default | Meaning |
 |---|---|---|
-| `jobImage.repository` / `.tag` | `ghcr.io/shamalrathnayake/mongoshield:latest` | Image the backup and restore Jobs run. Pin a version. Use a `CLOUD_SDKS=all` build for GCS/Azure. |
-| `watchNamespaces` | `[]` (all) | Only manage these namespaces (RoleBindings instead of a ClusterRoleBinding). |
+| `jobImage.repository` / `.tag` | `ghcr.io/shamalrathnayake/mongoshield`, tag = the chart's `appVersion` | Image the backup and restore Jobs run, pinned to the release the operator ships with (never `latest`). Use a `CLOUD_SDKS=all` build for GCS/Azure. |
+| `jobPolicy.allowedImages` | `[]`: only `jobImage.repository` | Image repositories a plan's `spec.job.image` may name (`registry.example.com/*` for a prefix, `["*"]` for any). |
+| `jobPolicy.allowedServiceAccounts` | `["*"]` | `namespace/name` service accounts `spec.job.serviceAccountName` may name (`prod/*`, `*/irsa-backups`). |
+| `jobPolicy.allowEnvFrom` | `false` | Accept `spec.job.envFrom` while images are restricted (see "What plans may run" below). |
+| `watchNamespaces` | `[]` (all) | Only manage these namespaces (RoleBindings instead of a ClusterRoleBinding). Recommended: cluster-wide, the operator can list every Pod and read every Pod's logs, kube-system included. |
 | `replicaCount` | `1` | `2` for fast failover; leader election keeps one active. |
 | `rbac.aggregateToDefaultRoles` | `true` | Grant the MongoShield kinds to the built-in `view`/`edit`/`admin` roles. |
-| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor. |
+| `metrics.auth.enabled` | `true` | `/metrics` requires a bearer token from a Secret the chart generates (or `metrics.auth.existingSecret`). |
+| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor (it sends the token). |
+| `networkPolicy.enabled` | `false` | A NetworkPolicy allowing port 8080 only from `networkPolicy.from`. |
 
 ## Back up
 
@@ -319,8 +324,50 @@ standing by). Logs are JSON lines.
 - **RBAC** ([`templates/rbac.yaml`](../../deploy/helm/mongoshield-operator/templates/rbac.yaml)):
   the MongoShield kinds and their status; CronJobs; Jobs; ConfigMaps (get/create/update);
   pods (list) and pods/log (get) to read results; events; one Lease in its own namespace.
-  No Secrets. Creating Jobs that mount Secrets is still powerful, which is what
-  `watchNamespaces` is for.
+  No Secrets. Creating Jobs that mount Secrets is still powerful, and with the default
+  `watchNamespaces: []` all of it is bound cluster-wide: the operator can list every Pod
+  spec and read every Pod's logs, kube-system included. Set `watchNamespaces` to the
+  namespaces that hold plans; the permissions are then bound only there.
+- **What plans may run** (`jobPolicy`): `spec.job` is copied into every Job's pod, so
+  the operator only accepts a `spec.job.image` from the allowed repositories (by default
+  the default image's repository, any tag or digest) and a `spec.job.serviceAccountName`
+  from the allowed list (by default any). A plan outside the policy is `Ready=False`,
+  reason `InvalidSpec`, and nothing runs. Restrict `allowedServiceAccounts` when people
+  who cannot create Pods can create plans (a custom role rather than `edit`).
+- **The environment of restricted images**: the image runs `node`, so an environment
+  variable could otherwise change what an allowed image runs (`NODE_OPTIONS=--import=…`
+  is arbitrary code, `LD_PRELOAD` loads a library). While `allowedImages` is not `["*"]`
+  (the default):
+  - `spec.job.env` may not name `NODE_PATH`, `NODE_COMPILE_CACHE`,
+    `NODE_REPL_EXTERNAL_MODULE`, `GCONV_PATH`, `OPENSSL_CONF`, `OPENSSL_MODULES`,
+    `OPENSSL_ENGINES` or anything starting with `LD_` or `DYLD_`. `NODE_OPTIONS` is
+    accepted as a literal value made only of `--max-old-space-size=<n>`,
+    `--max-semi-space-size=<n>`, `--no-warnings`, `--trace-warnings`, `--trace-uncaught`
+    and `--enable-source-maps`. `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and
+    `SSL_CERT_DIR` stay allowed: they only add trusted CAs, for endpoints the plan
+    chooses anyway.
+  - Nor may it name the variables the operator sets for the run (`MONGODB_URI`,
+    `MONGOSHIELD_URI`, `MONGOSHIELD_URI_FILE`, `MONGOSHIELD_DRILL_URI`,
+    `MONGOSHIELD_PASSPHRASE`, `MONGOSHIELD_IDENTITY_FILE`): they come from the plan's
+    `source`, `drill` and `encryption` and the Secrets those name.
+  - `spec.job.envFrom` is refused, since a ConfigMap or Secret can carry any name and
+    the operator does not read them. `jobPolicy.allowEnvFrom: true`
+    (`MONGOSHIELD_ALLOW_JOB_ENV_FROM=true`) accepts it.
+  - Every job pod gets `NODE_OPTIONS` (empty, or the plan's allowed value), `NODE_PATH`,
+    `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH` and `GCONV_PATH` set empty,
+    `NODE_DISABLE_COMPILE_CACHE=1` and `OPENSSL_CONF=/dev/null`, last in `env`. `env`
+    wins over `envFrom` in Kubernetes, so the same names in the storage credentials
+    Secret (`spec.storage.credentialsSecretRef`) or an allowed `envFrom` have no effect.
+
+  A plan that breaks these rules is `Ready=False`, reason `InvalidSpec`, with a Warning
+  event naming the variable. With `allowedImages: ["*"]` none of this applies: a plan
+  could run any code through its image anyway.
+- **Metrics** carry namespace and plan names, so `/metrics` requires a bearer token
+  (`METRICS_TOKEN`; Helm: `metrics.auth`, on by default). For other scrapers, read the
+  token from the Secret named in the install notes and send `Authorization: Bearer <token>`.
+  `networkPolicy.enabled: true` additionally limits who can reach port 8080.
+- **Networking:** the operator listens on `::` (IPv4 and IPv6), falling back to
+  `0.0.0.0` where the node has no IPv6, so probes work in IPv6-only clusters too.
 
 ## Design notes
 

@@ -104,10 +104,24 @@ The manifest is plaintext by design. It reveals:
 - backup times, the source server version and topology, labels;
 - file names, sizes and checksums of the *encrypted* files;
 - the encryption scheme (`age-v1`) and the **public** recipients, `scrypt`, or the KMS
-  key identifiers (`kms:aws:arn:aws:kms:…`; identifiers, not key material).
+  key identifiers (`kms:aws:arn:aws:kms:…`; identifiers, not key material);
+- **`_id` values at part boundaries.** A collection large enough to be split into parts
+  (over 256 MiB by default, see [PARTS-AND-RESUME.md](PARTS-AND-RESUME.md)) records each
+  part's `_id` range in `files[].range` (`from` / `to`, as canonical Extended JSON). These
+  are real `_id`s of real documents, in plain text: with ObjectIds they reveal little more
+  than creation times, but when `_id` is meaningful (an email address, a customer number,
+  a username) a few of them are readable by anyone who can read the bucket. The checkpoint
+  of a resumable run (`_state/checkpoints/<id>.json`) records the same boundaries while
+  the run is in progress.
 
-It never contains keys, passphrases or connection strings. If namespace names are
-sensitive, protect the storage location itself as well.
+It never contains keys, passphrases or connection strings. If namespace names, sizes or
+meaningful `_id` values are sensitive, protect the storage location itself as well (read
+access only for the roles that restore), or use `_id`s that carry no personal data.
+
+The ranges stay in plain text on purpose: a resumed backup continues each part exactly at
+its recorded bound, and readers of older backups rely on the field's shape. Replacing them
+with hashes or encrypting them would need a format change that older releases could not
+read.
 
 ## Passphrase backups
 

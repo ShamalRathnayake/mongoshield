@@ -143,7 +143,12 @@ and replicate handle chains: `mongoshield rekey <incremental>` and `mongoshield 
 - `mongoshield verify <incremental>` checks the whole chain: every member's files, in the
   same mode (`--deep` decrypts and parses every member), and every link. A missing or
   damaged member is reported as `chain <id>` or `<member id>/<file key>`. `--chain links`
-  checks only the links and the incremental's own files.
+  checks only the links and the incremental's own files (scheduled runs do this): such a
+  result is recorded as links-only, and counts towards retention's `minVerified` only
+  once every earlier member of the chain passed a verify run or a drill of its own.
+- A backup whose last verification failed, or whose chain holds one, is never continued:
+  the next incremental picks the newest intact backup instead (or, with `fallbackToFull`,
+  a full backup is taken).
 - `find`, `history`, `diff`, `export`, `restore-tenant` and `drill` read an incremental as
   its base with the chain's changes overlaid, so they show the data as of that
   incremental. Collections created after the base can only be read by restoring.

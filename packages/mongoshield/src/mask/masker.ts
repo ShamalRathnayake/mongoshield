@@ -77,6 +77,8 @@ export interface NamespaceMask {
   readonly ns: string;
   /** Short descriptions of the rules, `path: operation`, for plans. */
   readonly summary: readonly string[];
+  /** The rules' field paths as written (`email`, `addresses.*.street`), one per rule. */
+  readonly paths: readonly string[];
   /** Masks `document` in place and returns it. */
   apply(document: Document): Document;
 }
@@ -179,6 +181,7 @@ function createNamespaceMask(
     summary: states.map(
       (state) => `${state.rule.path}: ${describeOperation(state.rule.operation)}`,
     ),
+    paths: states.map((state) => state.rule.path),
     apply(document) {
       for (const state of states) {
         state.values += visitPath(document, state.rule.segments, (value, location) =>

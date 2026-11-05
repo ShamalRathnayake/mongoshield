@@ -10,6 +10,7 @@
  * user sees them and can change them without looking up what the preset does.
  */
 
+import { isZstdAvailable } from "../../compression/index.ts";
 import { CONFIG_PRESETS, type ConfigPresetName } from "../../config/presets.ts";
 
 /** What the template needs to know. */
@@ -48,7 +49,7 @@ export function generateConfigText(answers: InitAnswers): string {
     "  // (S3 credentials come from the usual AWS environment/profile, never from here).",
     `  storage: ${JSON.stringify(answers.storage)},`,
     "",
-    '  compression: "zstd",',
+    ...compressionSection(),
     "",
     ...encryptionSection(answers),
     "",
@@ -58,6 +59,18 @@ export function generateConfigText(answers: InitAnswers): string {
     "});",
     "",
   ].join("\n");
+}
+
+/**
+ * The `compression` line: zstd when this Node.js has it, gzip otherwise. Writing
+ * "zstd" on Node 22.12-22.14 (which lack it) would make the first backup fail.
+ */
+function compressionSection(): string[] {
+  if (isZstdAvailable()) return ['  compression: "zstd",'];
+  return [
+    "  // zstd is smaller and faster, but needs Node.js 22.15 / 23.8 or later.",
+    '  compression: "gzip",',
+  ];
 }
 
 /** The `encryption` block, or a commented-out example when encryption is off. */

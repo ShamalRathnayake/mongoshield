@@ -104,17 +104,39 @@ describe("loadOrCreateSecretKey", () => {
     expect(await readFile(join(dataDir, SECRET_KEY_FILE), "utf8")).toBe("abc123\n");
   });
 
-  posixOnly("refuses a key readable by other users and says how to fix it", async () => {
+  posixOnly("refuses a key any user of the machine can access and says how to fix it", async () => {
     const dataDir = await tempDir();
     const path = join(dataDir, SECRET_KEY_FILE);
     await writeFile(path, `${"cd".repeat(32)}\n`, { mode: 0o600 });
     await chmod(path, 0o644);
     await expect(loadOrCreateSecretKey(dataDir)).rejects.toThrow(/mode 644.*chmod 600/s);
-    await chmod(path, 0o640);
-    await expect(loadOrCreateSecretKey(dataDir)).rejects.toThrow(SecretKeyError);
+    // Any "other" bit is refused, even without group access.
+    for (const mode of [0o604, 0o602, 0o601, 0o666]) {
+      await chmod(path, mode);
+      await expect(loadOrCreateSecretKey(dataDir), mode.toString(8)).rejects.toThrow(
+        SecretKeyError,
+      );
+    }
     await chmod(path, 0o600);
     await expect(loadOrCreateSecretKey(dataDir)).resolves.toMatchObject({ created: false });
   });
+
+  posixOnly(
+    "accepts group access, as a Kubernetes fsGroup mount gives it (0640, 0660)",
+    async () => {
+      const dataDir = await tempDir();
+      const path = join(dataDir, SECRET_KEY_FILE);
+      const secret = "cd".repeat(32);
+      await writeFile(path, `${secret}\n`, { mode: 0o600 });
+      for (const mode of [0o640, 0o660]) {
+        await chmod(path, mode);
+        await expect(loadOrCreateSecretKey(dataDir), mode.toString(8)).resolves.toMatchObject({
+          secret,
+          created: false,
+        });
+      }
+    },
+  );
 
   posixOnly("refuses a symlink, which could point outside the volume", async () => {
     const dataDir = await tempDir();

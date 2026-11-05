@@ -73,6 +73,21 @@ export function UsersPage() {
     }
   };
 
+  // After a lost laptop or a leaked cookie: end the user's sessions in every browser.
+  const signOut = async (user: UserView) => {
+    try {
+      const { revoked } = await client.call("POST /api/users/:id/sign-out", undefined, {
+        params: { id: user.id },
+      });
+      toast.show(
+        "success",
+        `Signed ${user.username} out of ${revoked} session${revoked === 1 ? "" : "s"}.`,
+      );
+    } catch (error) {
+      toast.show("error", describeError(error));
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -162,6 +177,18 @@ export function UsersPage() {
                     aria-label={`Edit ${user.username}`}
                   >
                     Edit
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => void signOut(user)}
+                    aria-label={`Sign out ${user.username} everywhere`}
+                    title={
+                      user.id === me?.id
+                        ? "Ends your other sessions; this one stays signed in."
+                        : "Ends every session of this user, in every browser."
+                    }
+                  >
+                    Sign out
                   </Button>
                   <Button
                     size="small"

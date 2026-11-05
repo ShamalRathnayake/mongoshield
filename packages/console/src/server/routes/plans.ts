@@ -25,7 +25,7 @@
  */
 
 import type { Hono } from "hono";
-import { generateIdentity } from "mongoshield";
+import { generateIdentity, isZstdAvailable } from "mongoshield";
 import { checkSchedule } from "../../jobs/schedules.ts";
 import {
   backupJob,
@@ -49,6 +49,7 @@ import { recordAudit } from "../audit.ts";
 import { requireRole } from "../auth.ts";
 import type { AppEnv, ConsoleServices } from "../context.ts";
 import { ConsoleError, invalid, notFound } from "../errors.ts";
+import { UNSAFE_TARGET_HINT, unsafeWebhookReason } from "../network-targets.ts";
 import { readJson } from "../security.ts";
 import {
   asObject,
@@ -259,7 +260,7 @@ function parsePlan(
     storageId,
     include: optionalStringArray(body, "include") ?? [],
     exclude: optionalStringArray(body, "exclude") ?? [],
-    compression: oneOf(body, "compression", ["zstd", "gzip", "none"]),
+    compression: availableCompression(oneOf(body, "compression", ["zstd", "gzip", "none"])),
     encryption: parseEncryption(services, id, body.encryption, existing),
     consistency: oneOf(body, "consistency", ["auto", "none", "snapshot", "converge"]),
     verify: oneOf(body, "verify", ["none", "fast", "deep"]),
@@ -418,6 +419,11 @@ function parseNotify(
       return { ...kept, type };
     }
     if (!/^https?:\/\//i.test(url)) throw invalid(`"notify[${index}].url" must be an http(s) URL.`);
+    // No webhooks into the cloud's metadata service (blind SSRF), see network-targets.ts.
+    const unsafe = unsafeWebhookReason(url, services.settings.allowUnsafeTargets === true);
+    if (unsafe !== undefined) {
+      throw invalid(`"notify[${index}].url" is refused: ${unsafe}.`, UNSAFE_TARGET_HINT);
+    }
     return {
       type,
       url: sealNotifyUrl(services.store, planId, url),
@@ -460,4 +466,18 @@ function assertNameFree(
   if (plans.some((plan) => plan.name === name && plan.id !== exceptId)) {
     throw new ConsoleError(409, "CONSOLE_CONFLICT", `A plan named "${name}" already exists.`);
   }
+}
+
+/**
+ * Refuses zstd when this server's Node.js has none (before 22.15 / 23.8): the plan would
+ * save, then every one of its backups would fail when it runs.
+ */
+function availableCompression<Value extends "zstd" | "gzip" | "none">(compression: Value): Value {
+  if (compression === "zstd" && !isZstdAvailable()) {
+    throw invalid(
+      `zstd compression is not available in this console's Node.js ${process.version}.`,
+      "Choose gzip, or run the console on Node.js 22.15 or newer (the Docker image already does).",
+    );
+  }
+  return compression;
 }

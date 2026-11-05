@@ -58,20 +58,28 @@ import type { CatalogStatus } from "./catalog.ts";
 export interface RetentionPolicy {
   /** Keep the N most recently completed backups. */
   readonly last?: number;
-  /** Keep the newest backup of each of the last N hours that have one (UTC). */
+  /** Keep the newest backup of each of the last N hours that have one (UTC, or `timeZone`). */
   readonly hourly?: number;
-  /** Keep the newest backup of each of the last N days that have one (UTC). */
+  /** Keep the newest backup of each of the last N days that have one (UTC, or `timeZone`). */
   readonly daily?: number;
-  /** Keep the newest backup of each of the last N ISO weeks that have one (UTC). */
+  /** Keep the newest backup of each of the last N ISO weeks that have one (UTC, or `timeZone`). */
   readonly weekly?: number;
-  /** Keep the newest backup of each of the last N months that have one (UTC). */
+  /** Keep the newest backup of each of the last N months that have one (UTC, or `timeZone`). */
   readonly monthly?: number;
-  /** Keep the newest backup of each of the last N years that have one (UTC). */
+  /** Keep the newest backup of each of the last N years that have one (UTC, or `timeZone`). */
   readonly yearly?: number;
   /** Always keep at least this many verified backups. Defaults to 0. */
   readonly minVerified?: number;
   /** Incomplete runs younger than this may still be running and are kept. Defaults to 24 hours. */
   readonly incompleteGraceMs?: number;
+  /**
+   * IANA time zone (`"Asia/Colombo"`, `"Europe/Berlin"`) the hourly, daily, weekly,
+   * monthly and yearly periods are counted in. Defaults to UTC. Scheduled runs and
+   * `mongoshield prune` pass `schedule.timezone`, the zone the cron runs in, so "one
+   * backup per day" means per local day: in Sri Lanka a UTC day turns at 05:30, which
+   * would otherwise let two backups of one local day fill two daily slots.
+   */
+  readonly timeZone?: string;
 }
 
 /** One backup as the planner sees it. */
@@ -87,6 +95,12 @@ export interface RetentionBackup {
   readonly verified: boolean;
   /** The backup is on hold (legal hold, pinned by a user) and must never be deleted. */
   readonly held: boolean;
+  /**
+   * Set while something holds a use lease on the backup (a restore, verify or drill
+   * reading it, or the backup run still writing it; see use-leases.ts), describing
+   * who. Such a backup is kept, like a held one, until the lease is gone.
+   */
+  readonly inUse?: string;
   /**
    * End of the backup's write-once retention (the manifest's `immutableUntil`).
    * Until then the storage refuses to delete it, so the planner keeps it.
@@ -187,6 +201,8 @@ export function planRetention(input: RetentionInput): RetentionPlan {
 
     // Safety rule 3: holds exist precisely to override retention.
     if (backup.held) reasons.add(backup.id, "held");
+    // A restore, verify or drill is reading it right now, or its run is still writing.
+    if (backup.inUse !== undefined) reasons.add(backup.id, `in use (${backup.inUse})`);
 
     // Safety rule 7: the storage itself refuses to delete a locked backup (or, on
     // S3, would only hide it behind a delete marker while still billing it), so
@@ -251,7 +267,7 @@ export function planRetention(input: RetentionInput): RetentionPlan {
 
   for (const bucket of BUCKETS) {
     const count = input.policy[bucket] ?? 0;
-    for (const [id, period] of selectByPeriod(candidates, bucket, count)) {
+    for (const [id, period] of selectByPeriod(candidates, bucket, count, input.policy.timeZone)) {
       reasons.add(id, `${bucket} ${period}`);
     }
   }
@@ -306,13 +322,14 @@ export function selectByPeriod(
   candidates: readonly RetentionBackup[],
   bucket: RetentionBucket,
   count: number,
+  timeZone?: string,
 ): Map<string, string> {
   const selected = new Map<string, string>();
   let previousPeriod: string | undefined;
 
   for (const backup of candidates) {
     if (selected.size >= count) break;
-    const period = periodOf(bucket, backup.completedAt);
+    const period = periodOf(bucket, backup.completedAt, timeZone);
     if (period !== previousPeriod) {
       selected.set(backup.id, period);
       previousPeriod = period;
@@ -322,10 +339,58 @@ export function selectByPeriod(
 }
 
 /**
- * The calendar period (UTC) a moment falls in, as a sortable label:
- * `2026-10-20T13`, `2026-10-20`, `2026-W43`, `2026-10` or `2026`.
+ * The calendar period a moment falls in, as a sortable label:
+ * `2026-10-20T13`, `2026-10-20`, `2026-W43`, `2026-10` or `2026`. In UTC, or in
+ * `timeZone` (IANA name) when given: the label is then that zone's wall clock.
  */
-export function periodOf(bucket: RetentionBucket, date: Date): string {
+export function periodOf(bucket: RetentionBucket, date: Date, timeZone?: string): string {
+  // The moment as a Date whose UTC fields read like the zone's wall clock, so the
+  // UTC arithmetic below (ISO weeks included) works unchanged for any zone.
+  const local = timeZone === undefined ? date : wallClockOf(date, timeZone);
+  return utcPeriodOf(bucket, local);
+}
+
+/** Formatters per time zone: building one is far slower than using it. */
+const WALL_CLOCK_FORMATS = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * `date` shifted so its UTC fields show `timeZone`'s local date and time
+ * (`2026-10-20T00:30Z` in Asia/Colombo → `2026-10-20T06:00Z`).
+ *
+ * @throws MongoShieldError `MS_CONFIG_INVALID` for an unknown time zone.
+ */
+function wallClockOf(date: Date, timeZone: string): Date {
+  let format = WALL_CLOCK_FORMATS.get(timeZone);
+  if (format === undefined) {
+    try {
+      format = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+      });
+    } catch {
+      throw new MongoShieldError("MS_CONFIG_INVALID", `Unknown time zone "${timeZone}".`, {
+        hint: 'Use an IANA name such as "Europe/Berlin" or "Asia/Colombo", or leave it out for UTC.',
+      });
+    }
+    WALL_CLOCK_FORMATS.set(timeZone, format);
+  }
+  const fields: Record<string, number> = {};
+  for (const part of format.formatToParts(date)) {
+    if (part.type !== "literal") fields[part.type] = Number(part.value);
+  }
+  // Periods are an hour or longer, so minutes do not matter (zones with 30- or
+  // 45-minute offsets still turn their hour at the right moment).
+  return new Date(
+    Date.UTC(fields.year ?? 1970, (fields.month ?? 1) - 1, fields.day ?? 1, fields.hour ?? 0),
+  );
+}
+
+/** {@link periodOf} for a Date read in UTC. */
+function utcPeriodOf(bucket: RetentionBucket, date: Date): string {
   const iso = date.toISOString(); // "2026-10-20T13:45:00.000Z", always UTC
   switch (bucket) {
     case "hourly":
@@ -498,6 +563,8 @@ function validatePolicy(policy: RetentionPolicy): void {
       );
     }
   }
+  // An unknown zone fails before planning, not halfway through it.
+  if (policy.timeZone !== undefined) wallClockOf(new Date(0), policy.timeZone);
 }
 
 /** 86_400_000 → "24h", 90_000 → "1.5m". Only used in human-readable reasons. */

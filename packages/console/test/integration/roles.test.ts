@@ -2,7 +2,10 @@
  * The role matrix: for every route in the API contract, who may call it.
  *
  * The table is typed as `Record<keyof ApiRoutes, …>`, so adding a route to the
- * contract without deciding its role here is a type error.
+ * contract without deciding its role here is a type error. Routes outside the JSON
+ * contract (the SSE stream, OIDC redirects, health and metrics) are listed in
+ * `OTHER_ROUTES`, and a test compares both tables with the routes the app actually
+ * registers: a route added to the server but to neither table fails it.
  *
  * Requests use ids that do not exist and empty bodies: an authorized caller then
  * gets 400/404 (validation or lookup, which run after the role check), an
@@ -36,6 +39,7 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
   "POST /api/users": "admin",
   "PUT /api/users/:id": "admin",
   "DELETE /api/users/:id": "admin",
+  "POST /api/users/:id/sign-out": "admin",
 
   "GET /api/connections": "viewer",
   "POST /api/connections": "admin",
@@ -99,8 +103,22 @@ const MATRIX: Record<keyof ApiRoutes, Access> = {
 
   "GET /api/audit": "viewer",
 
-  "GET /api/config/export": "viewer",
+  // Admin only: the export maps every connection, bucket and plan in one file.
+  "GET /api/config/export": "admin",
   "POST /api/config/import": "admin",
+};
+
+/**
+ * Routes that are not in the JSON contract, with who may call them:
+ *   "token"   needs MONGOSHIELD_METRICS_TOKEN (404 while it is not configured)
+ *   "public"  anyone (the OIDC routes answer 404 while OIDC is not configured)
+ */
+const OTHER_ROUTES: Record<string, Access | "token"> = {
+  "GET /api/jobs/:id/events": "viewer",
+  "GET /api/oidc/login": "public",
+  "GET /api/oidc/callback": "public",
+  "GET /healthz": "public",
+  "GET /metrics": "token",
 };
 
 /** `"POST /api/plans/:id/run"` → method and a concrete path with ids that do not exist. */
@@ -174,6 +192,44 @@ describe("role matrix", () => {
     }
     const writer = await clients.writer.request(method, path, body);
     expect([401, 403], `${route} with data:write: ${writer.text}`).not.toContain(writer.status);
+  });
+
+  it("lists every route the app registers, and only those", () => {
+    const registered = new Set(
+      testConsole.app.routes
+        // Middleware and the API's catch-all 404 are registered for every method.
+        .filter((route) => route.method !== "ALL")
+        .map((route) => `${route.method} ${route.path}`),
+    );
+    const listed = new Set([...Object.keys(MATRIX), ...Object.keys(OTHER_ROUTES)]);
+    expect(
+      [...registered].filter((route) => !listed.has(route)),
+      "registered but not listed",
+    ).toEqual([]);
+    expect(
+      [...listed].filter((route) => !registered.has(route)),
+      "listed but not registered",
+    ).toEqual([]);
+  });
+
+  it("streams job events to viewers, and to nobody signed out", async () => {
+    const path = "/api/jobs/missing/events";
+    expect((await testConsole.client().request("GET", path)).status).toBe(401);
+    for (const role of ["viewer", "operator", "admin"] as const) {
+      // An unknown job: past the role check, so 404.
+      expect((await clients[role].request("GET", path)).status, role).toBe(404);
+    }
+  });
+
+  it("answers health, metrics and the OIDC routes without a session", async () => {
+    const anonymous = testConsole.client();
+    expect((await anonymous.request("GET", "/healthz")).status).toBe(200);
+    // Metrics need their own token; without one configured the endpoint does not exist.
+    expect((await anonymous.request("GET", "/metrics")).status).toBe(404);
+    expect((await clients.admin.request("GET", "/metrics")).status).toBe(404);
+    // OIDC is not configured in this console.
+    expect((await anonymous.request("GET", "/api/oidc/login")).status).toBe(404);
+    expect((await anonymous.request("GET", "/api/oidc/callback")).status).toBe(404);
   });
 
   it("lets every signed-in user log out, and nobody else", async () => {

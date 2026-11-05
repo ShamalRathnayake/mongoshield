@@ -8,7 +8,8 @@
 
 import { randomUUID } from "node:crypto";
 import { ContainerClient } from "@azure/storage-blob";
-import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+// Types only: the module is loaded lazily in `beforeAll` (see ../helpers/docker.ts).
+import type { StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe } from "vitest";
 import { azureStorage } from "../../src/storage/azure.ts";
 import { isDockerAvailable } from "../helpers/docker.ts";
@@ -21,6 +22,7 @@ const CONTAINER = "mongoshield-conformance";
 const AZURITE_ACCOUNT_KEY =
   "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
+// False without Docker, and below Node.js 22.22, which Testcontainers 12 needs.
 const dockerAvailable = await isDockerAvailable();
 
 describe.skipIf(!dockerAvailable)("azureStorage against Azurite", () => {
@@ -28,6 +30,7 @@ describe.skipIf(!dockerAvailable)("azureStorage against Azurite", () => {
   let connectionString: string;
 
   beforeAll(async () => {
+    const { GenericContainer, Wait } = await import("testcontainers");
     container = await new GenericContainer(AZURITE_IMAGE)
       .withExposedPorts(BLOB_PORT)
       .withCommand([

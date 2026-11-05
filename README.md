@@ -74,12 +74,15 @@
 ### 1. Web console
 
 ```bash
-docker run -d --name mongoshield-console -p 8080:8080 -v mongoshield:/data \
+docker run -d --name mongoshield-console -p 127.0.0.1:8080:8080 \
+  --add-host=host.docker.internal:host-gateway -v mongoshield:/data \
   ghcr.io/shamalrathnayake/mongoshield-console
 ```
 
 Open **http://localhost:8080** → create your admin → paste a connection string →
-**Back up now**. An encrypted, verified backup in three clicks.
+**Back up now**. An encrypted, verified backup in three clicks. (`127.0.0.1:` keeps the
+console on this machine while the first visitor can still become admin; `--add-host` lets
+it reach a MongoDB on this machine on Linux too.)
 
 ### 2. CLI
 
@@ -238,14 +241,17 @@ wizard and a live data browser.
 
 ```bash
 docker run -d --name mongoshield-console --restart unless-stopped \
-  -p 8080:8080 -v mongoshield:/data \
+  -p 127.0.0.1:8080:8080 --add-host=host.docker.internal:host-gateway \
+  -v mongoshield:/data \
   ghcr.io/shamalrathnayake/mongoshield-console
 ```
 
 Then open **http://localhost:8080**. There's nothing to configure first: the console creates
 its own secret, the first visitor creates the admin (within 15 minutes of start; after
 that, use the link in `docker logs mongoshield-console`), and a **Local backups** folder is
-ready. Everything lives in the `mongoshield` volume, so updating or recreating the container
+ready. The port is published on `127.0.0.1` only, so nobody else on your network can be
+that first visitor; for access from other machines, put HTTPS in front
+([Docker guide](./docs/guides/docker.md#plain-http-https-and-other-machines)). Everything lives in the `mongoshield` volume, so updating or recreating the container
 keeps your account, connections, keys and backups.
 
 ### Connect your database
@@ -261,8 +267,10 @@ When a connection fails, the console tells you why in plain words (IP access lis
 password, paused cluster, a typo, TLS) and how to fix it.
 
 > [!TIP]
-> **On Linux**, for a database on the same machine, add
-> `--add-host=host.docker.internal:host-gateway` to `docker run`.
+> **On Linux**, a database on the same machine is reached through
+> `--add-host=host.docker.internal:host-gateway` (already in the commands above; Docker
+> Desktop and OrbStack don't need it, and it is harmless there). Make mongod listen on
+> more than 127.0.0.1 (`bindIp`) so the container can reach it.
 
 ### Everyday commands
 
@@ -301,6 +309,11 @@ Each backup plan chooses how its backups are encrypted:
 - Put an HTTPS reverse proxy (Caddy, nginx, Traefik, an ingress) in front and set
   `MONGOSHIELD_PUBLIC_URL=https://backups.example.com`. Sign-in cookies are `Secure`, so plain
   `http://` only works on `localhost`.
+- The console only answers to host names it knows: IP addresses, `localhost`, private names
+  (`.local`, `.internal`, `.lan`, …) and the host of `MONGOSHIELD_PUBLIC_URL`. Any other name
+  gets `421 CONSOLE_UNKNOWN_HOST` (this stops DNS rebinding); list extra names in
+  `MONGOSHIELD_ALLOWED_HOSTS`. Behind a proxy, set `MONGOSHIELD_TRUSTED_PROXIES` so its
+  `X-Forwarded-*` headers are believed.
 - Generating key pairs in the browser also needs HTTPS (or `localhost`).
 - A Compose file with MongoDB and the console: [`examples/console-compose`](./examples/console-compose).
 - Use `docker stop -t 70` while a backup may be running; jobs get 60 seconds to finish.
@@ -308,7 +321,7 @@ Each backup plan chooses how its backups are encrypted:
 ### ⚙️ Settings (environment variables)
 
 <details>
-<summary><b>&nbsp;👉&nbsp; Show all 10 settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
+<summary><b>&nbsp;👉&nbsp; Show all 13 settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
 <br>
 
 All optional; the defaults suit a single machine.
@@ -319,12 +332,15 @@ All optional; the defaults suit a single machine.
 | `MONGOSHIELD_ADMIN_USERNAME` · `MONGOSHIELD_ADMIN_PASSWORD` | Create the first admin at start (`…_PASSWORD_FILE` for a file) |
 | `MONGOSHIELD_SETUP_WINDOW_MINUTES` | How long the first visitor may create the admin (default `15`; `0` always needs the link) |
 | `MONGOSHIELD_PUBLIC_URL` | The HTTPS address behind a proxy |
+| `MONGOSHIELD_ALLOWED_HOSTS` | More host names it answers to, comma-separated (`*.example.com`; `*` turns the check off) |
+| `MONGOSHIELD_TRUSTED_PROXIES` | IPs or CIDR ranges of the proxies whose `X-Forwarded-*` headers are believed |
+| `MONGOSHIELD_ALLOW_UNSAFE_TARGETS=true` | Allow webhooks and storage endpoints on cloud metadata and link-local addresses |
 | `MONGOSHIELD_COOKIE_SECURE=false` | Allow sign-in over plain HTTP on a trusted network (evaluation only) |
 | `MONGOSHIELD_DEFAULT_STORAGE=false` | Don't create the "Local backups" folder |
 | `MONGOSHIELD_SHUTDOWN_GRACE_SECONDS` | How long running jobs may finish on stop (default `60`) |
 | `MONGOSHIELD_OIDC_ISSUER` · `…_CLIENT_ID` · `…_CLIENT_SECRET` | Single sign-on with OpenID Connect |
 | `MONGOSHIELD_METRICS_TOKEN` | Prometheus metrics at `/metrics` |
-| `PORT` · `HOST` | Where it listens (default `8080`, `0.0.0.0`) |
+| `PORT` · `HOST` | Where it listens (default `8080`, `::` for IPv6 and IPv4, or `0.0.0.0` without IPv6) |
 
 Everything else, and the trade-offs: [console specification](./docs/specs/CONSOLE.md) ·
 [security checklist](./docs/console-security.md).
@@ -342,7 +358,7 @@ Everything else, and the trade-offs: [console specification](./docs/specs/CONSOL
 | ⚡ No install | `npx mongoshield <command>` | Trying it, one-off jobs |
 | 🌍 Global | `npm install -g mongoshield` | Your own machine, servers |
 | 📌 In a project | `npm install -D mongoshield`, then `npx mongoshield` | Pinning a version per repository |
-| 🐳 Docker | `docker run --rm ghcr.io/shamalrathnayake/mongoshield:2 <command>` | Containers, Kubernetes |
+| 🐳 Docker | `docker run --rm --add-host=host.docker.internal:host-gateway ghcr.io/shamalrathnayake/mongoshield:2 <command>` | Containers, Kubernetes |
 | 🥟 Bun | `bunx --bun mongoshield <command>` | Bun 1.4+ |
 | 🦕 Deno | `deno run -A npm:mongoshield <command>` | Deno 2.9+ |
 
@@ -391,7 +407,7 @@ No config file? The same settings work as environment variables:
 | `MONGOSHIELD_RECIPIENTS` | Public keys to encrypt for (`age1…`, comma-separated) |
 | `MONGOSHIELD_IDENTITY` · `MONGOSHIELD_IDENTITY_FILE` | The private key, for restores and deep verification |
 | `MONGOSHIELD_PASSPHRASE` | A passphrase instead of keys |
-| `MONGOSHIELD_COMPRESSION` | `zstd` (default), `gzip` or `none` |
+| `MONGOSHIELD_COMPRESSION` | `zstd` (default; `gzip` on Node.js without zstd, before 22.15), `gzip` or `none` |
 
 ### 🍳 Recipes
 
@@ -698,7 +714,7 @@ A complete workflow that signs in to AWS with OIDC (no stored keys):
 The CLI as an image.
 
 ```bash
-docker run --rm --init \
+docker run --rm --init --add-host=host.docker.internal:host-gateway \
   -e MONGODB_URI='mongodb+srv://backup:…@cluster0.example.mongodb.net/' \
   -e MONGOSHIELD_STORAGE='s3://acme-backups/prod?region=eu-west-1' \
   -e MONGOSHIELD_RECIPIENTS='age1…' \
@@ -768,7 +784,7 @@ The CLI builds one configuration from four layers. A higher layer wins, key by k
 
 | Key | `atlas-free` | `atlas-flex` |
 |:--|:--|:--|
-| `compression` | `zstd` | `zstd` |
+| `compression` | `zstd` (`gzip` without zstd) | `zstd` (`gzip` without zstd) |
 | `backup.consistency` | `auto` | `auto` |
 | `backup.parallelism` | `2` | `2` |
 | `backup.maxBytesPerSecond` | 4 MiB/s | 8 MiB/s |
@@ -906,6 +922,7 @@ For the CLI and storage URLs.
 | `MONGOSHIELD_IDENTITY` | `decryption.identities` | One age private key |
 | `MONGOSHIELD_IDENTITY_FILE` | `decryption.identityFiles` | One age key file path |
 | `MONGOSHIELD_DRILL_URI` | `drill.targetUri` | The drill's scratch deployment; also the default of `--target-uri` |
+| `MONGOSHIELD_HEARTBEAT_URL` | `heartbeat` | The dead man's switch ping URL, kept out of the config file (notify URLs: `{ "env": "NAME" }`) |
 | `MONGOSHIELD_ERASURE_SECRET` | `erasures.secret` | The erasure ledger's secret (wins over the config file) |
 | `MONGOSHIELD_MASK_SECRET` | | The masking secret when the mask file sets none (`copy`, `pull`; see `--mask-secret-env`) |
 | `MONGOSHIELD_WEBHOOK_SECRET` | | Signs webhook notifications (HMAC-SHA256) from `run`, `schedule` and `journal` |
@@ -996,7 +1013,7 @@ Durations take `ms` `s` `m` `h`, e.g. `90s` or `1h30m`. Flags marked "repeatable
 | `--uri` | `<mongodb-uri>` | Connection string (default: config, `MONGOSHIELD_URI` or `MONGODB_URI`) |
 | `--to` | `<storage-url>` | Where to store the backup |
 | `--include` · `--exclude` | `<pattern>` | See shared flags |
-| `--compression` | `zstd` · `gzip` · `none` | Compression (default `zstd`) |
+| `--compression` | `zstd` · `gzip` · `none` | Compression (default `zstd`; `gzip` on Node.js without zstd) |
 | `--recipient` | `<age1…>`, repeatable | Encrypt for this public key |
 | `--passphrase-env` | `<VAR>` | Encrypt with the passphrase in this variable |
 | `--consistency` | `auto` · `none` · `snapshot` · `converge` | Consistency across collections (default `auto`) |
@@ -1528,15 +1545,18 @@ Write your own by implementing `StorageAdapter` ([`src/storage/types.ts`](./pack
 Every environment variable.
 
 <details>
-<summary><b>&nbsp;👉&nbsp; Show all 22 console settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
+<summary><b>&nbsp;👉&nbsp; Show all 25 console settings</b>&nbsp; <sub><i>click to expand</i></sub></summary>
 <br>
 
 | Variable | Default | What it does |
 |:--|:--|:--|
 | `MONGOSHIELD_SECRET` · `MONGOSHIELD_SECRET_FILE` | generated into the data folder | Your own secret, 32+ characters (set one, not both) |
 | `MONGOSHIELD_DATA_DIR` | `/data` | Where the console keeps its data |
-| `PORT` · `HOST` | `8080` · `0.0.0.0` | Where it listens |
-| `MONGOSHIELD_PUBLIC_URL` | none | Its public address: setup link, origin check, HSTS on https |
+| `PORT` · `HOST` | `8080` · `::` (`0.0.0.0` without IPv6) | Where it listens |
+| `MONGOSHIELD_PUBLIC_URL` | none | Its public address: setup link, origin and Host checks, HSTS on https |
+| `MONGOSHIELD_ALLOWED_HOSTS` | none | More host names it answers to, comma-separated: `backups.example.com`, `*.example.com`, or `*` (no Host check). Other public names get `421` |
+| `MONGOSHIELD_TRUSTED_PROXIES` | none | IPs or CIDR ranges of proxies whose `X-Forwarded-For` / `-Host` / `-Proto` are believed |
+| `MONGOSHIELD_ALLOW_UNSAFE_TARGETS` | `false` | `true`: allow metadata/link-local webhooks and storage endpoints |
 | `MONGOSHIELD_SETUP_WINDOW_MINUTES` | `15` | How long the first visitor may create the admin without the link (0–1440) |
 | `MONGOSHIELD_ADMIN_USERNAME` (or `MONGOSHIELD_ADMIN_EMAIL`) | none | Create this admin at start, while no user exists |
 | `MONGOSHIELD_ADMIN_PASSWORD` · `MONGOSHIELD_ADMIN_PASSWORD_FILE` | none | Its password, 12+ characters |
@@ -1580,8 +1600,8 @@ Inputs, outputs, build args.
 | `identity` | `""` | An age private key, for `restore` and `verify --deep` (masked) |
 | `config` | `""` | Path to a config file |
 | `args` | `""` | Extra arguments, split on spaces |
-| `packages` | `""` | Extra npm packages; the SDK for the `storage` input's scheme is added for you |
-| `version` | `latest` | The mongoshield npm version or tag |
+| `packages` | `""` | Extra npm packages; the SDK for the storage scheme (in `storage`, `MONGOSHIELD_STORAGE` or the config file) is added for you |
+| `version` | `""` | The mongoshield npm version or tag. Empty: the release of the Action ref you use; `latest`: the newest |
 | `node-version` | `24` | Node.js to set up; `""` uses the runner's |
 | `working-directory` | `.` | Where to run |
 
@@ -1593,7 +1613,7 @@ The Action always adds `--json --yes`. Outputs: `backup-id` (the backup made, ch
 |:--|:--|:--|
 | Dockerfile | `docker/Dockerfile` | `docker/console.Dockerfile` |
 | Build arg `CLOUD_SDKS` | `s3` (S3 and AWS KMS) | `all` |
-| Build arg `NODE_MAJOR` | `24` | `24` |
+| Base images | Node.js 24, pinned by digest | Node.js 24, pinned by digest |
 | User | `65532:65532` (distroless, no shell) | `65532:65532` |
 | Entrypoint | `node …/mongoshield/dist/cli.mjs` | `node …/console/dist/server/main.mjs` |
 | Default command | `schedule` | |
@@ -1639,13 +1659,16 @@ Helm values and the operator's resources.
 | Value | Default | What it does |
 |:--|:--|:--|
 | `image.*` | `ghcr.io/shamalrathnayake/mongoshield-operator` | The operator image |
-| `jobImage.repository` · `.tag` · `.pullPolicy` | `ghcr.io/shamalrathnayake/mongoshield` · `latest` · `""` | The image backup and restore Jobs use |
-| `watchNamespaces` | `[]` (all) | Only manage these namespaces |
+| `jobImage.repository` · `.tag` · `.pullPolicy` | `ghcr.io/shamalrathnayake/mongoshield` · the chart's `appVersion` · `""` | The image backup and restore Jobs use |
+| `jobPolicy.allowedImages` · `.allowedServiceAccounts` | `[]` (only `jobImage.repository`) · `["*"]` | What a plan's `spec.job.image` and `.serviceAccountName` may name |
+| `watchNamespaces` | `[]` (all; cluster-wide Pod and log access) | Only manage these namespaces (recommended) |
 | `replicaCount` · `leaderElection.enabled` | `1` · `true` | Failover |
 | `workers` · `resyncSeconds` · `logLevel` | `2` · `600` · `info` | Parallel reconciles, re-check interval, `debug` · `info` · `warn` · `error` |
 | `rbac.create` · `rbac.aggregateToDefaultRoles` | `true` · `true` | RBAC, and access through the default view/edit/admin roles |
 | `serviceAccount.*` · `service.port` | `create: true` · `8080` | Identity; `/healthz`, `/readyz`, `/metrics` |
-| `metrics.serviceMonitor.enabled` · `.interval` · `.labels` | `false` · `30s` · `{}` | A Prometheus Operator ServiceMonitor |
+| `metrics.auth.enabled` · `.existingSecret` | `true` · `""` (generated) | `/metrics` needs a bearer token from a Secret |
+| `metrics.serviceMonitor.enabled` · `.interval` · `.labels` | `false` · `30s` · `{}` | A Prometheus Operator ServiceMonitor (sends the token) |
+| `networkPolicy.enabled` · `.from` | `false` · `[]` | A NetworkPolicy limiting who may reach port 8080 |
 | `podDisruptionBudget.enabled` · `priorityClassName` | `true` · `""` | Availability |
 | `imagePullSecrets` · `nameOverride` · `fullnameOverride` · `podAnnotations` · `podLabels` · `resources` · `podSecurityContext` · `securityContext` · `nodeSelector` · `tolerations` · `affinity` | | Pod settings |
 

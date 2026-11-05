@@ -8,6 +8,7 @@
  */
 
 import type { GuardFinding } from "../engine/backup-guard.ts";
+import type { ConsistencyMode } from "../format/manifest.ts";
 import type { VerifyMode, VerifyProblem } from "../types.ts";
 import type { LockKind } from "./lock.ts";
 
@@ -70,6 +71,19 @@ export interface RunReport {
     readonly changes?: number;
     /** Set when the job takes incrementals but this run took a full backup: why. */
     readonly fullBackupReason?: string;
+    /**
+     * The consistency the backup actually used (the manifest's `consistency.mode`).
+     * With `auto` it is `none` when converge was not available: then `warnings` says
+     * why, and the backup cannot be the base of incrementals or point-in-time restores.
+     * Absent in reports of releases before 2.0.2, and for checkpointed runs.
+     */
+    readonly consistency?: ConsistencyMode;
+    /**
+     * Problems that did not fail the run but should be fixed (the backup result's
+     * `warnings`): `auto` consistency fell back to `none`, incrementals keep falling
+     * back to full backups (`MS_SNAPSHOT_TOO_OLD`), … Absent when there are none.
+     */
+    readonly warnings?: readonly string[];
   };
   readonly guard?: {
     readonly ok: boolean;
@@ -137,11 +151,20 @@ export function summarizeReport(report: RunReport): string {
     report.prune && report.prune.deletedBackups > 0
       ? `, pruned ${report.prune.deletedBackups} old backup${report.prune.deletedBackups === 1 ? "" : "s"}`
       : "";
+  const warned = warningsLabel(backup.warnings);
   if (backup.kind === "incremental") {
     const changes = (backup.changes ?? 0).toLocaleString("en-US");
-    return `Incremental backup ${backup.id} succeeded: ${changes} changes since ${backup.parent ?? "its parent"}${verified}${pruned}.`;
+    return `Incremental backup ${backup.id} succeeded: ${changes} changes since ${backup.parent ?? "its parent"}${verified}${pruned}.${warned}`;
   }
-  return `Backup ${backup.id} succeeded: ${backup.namespaces} namespaces, ${backup.documents.toLocaleString("en-US")} documents${verified}${pruned}.`;
+  return `Backup ${backup.id} succeeded: ${backup.namespaces} namespaces, ${backup.documents.toLocaleString("en-US")} documents${verified}${pruned}.${warned}`;
+}
+
+/** ` Warning: …` (the first warning, and how many more) for summaries, or `""`. */
+function warningsLabel(warnings: readonly string[] | undefined): string {
+  const [first] = warnings ?? [];
+  if (first === undefined) return "";
+  const more = (warnings?.length ?? 1) - 1;
+  return ` Warning: ${first}${more > 0 ? ` (+${more} more)` : ""}`;
 }
 
 /**

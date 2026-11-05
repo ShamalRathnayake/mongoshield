@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ConsoleState } from "../state/types.ts";
-import { renderConfig } from "./config-export.ts";
+import { literal, renderConfig } from "./config-export.ts";
 
 const state: ConsoleState = {
   version: 1,
@@ -128,6 +128,53 @@ describe("renderConfig", () => {
     expect(content).toContain("MONGOSHIELD_PASSPHRASE_UNNAMED");
     expect(content).toContain("export default planNightly;");
     expect(content).not.toContain("sealed");
+  });
+
+  it("keeps names that end comments inside their comments (*/, U+2028, U+2029)", () => {
+    const base = state.plans[0];
+    const connection = state.connections[0];
+    if (base === undefined || connection === undefined) throw new Error("fixture");
+    const hostile: ConsoleState = {
+      ...state,
+      connections: [{ ...connection, name: "db */ process.exit(1); /*" }],
+      plans: [
+        { ...base, name: "a */ require('child_process').execSync('id'); /* b" },
+        { ...base, id: "p9", name: "line\u2028process.exit(2)\u2029end" },
+      ],
+    };
+    const { content } = renderConfig(hostile, "/data", new Date("2026-10-21T00:00:00Z"));
+    // No comment can be closed early: the only "*/" left are the file's own comment ends.
+    for (const line of content.split("\n")) {
+      if (line.includes("*/")) expect(line.trimEnd().endsWith("*/"), line).toBe(true);
+      expect(line.indexOf("*/"), line).toBe(line.lastIndexOf("*/"));
+    }
+    expect(content).not.toMatch(/[\u2028\u2029]/);
+    expect(content).toContain("a *\\/ require");
+    expect(content).toContain("line\\u2028process.exit(2)\\u2029end");
+    // Still valid JavaScript string literals that read back as the original names.
+    expect(JSON.parse(literal("a */ b\u2028"))).toBe("a */ b\u2028");
+  });
+
+  it("does not export a SAS token left in an old location's endpoint", () => {
+    const base = state.plans[0];
+    if (base === undefined) throw new Error("fixture");
+    const endpoint = encodeURIComponent("https://acct.blob.core.windows.net/?sv=1&sig=secret");
+    const withSas: ConsoleState = {
+      ...state,
+      storage: [
+        {
+          id: "az",
+          name: "az",
+          url: `az://acct/c?endpoint=${endpoint}`,
+          createdAt: "",
+          updatedAt: "",
+        },
+      ],
+      plans: [{ ...base, storageId: "az" }],
+    };
+    const { content } = renderConfig(withSas, "/data", new Date());
+    expect(content).not.toContain("sig");
+    expect(content).toContain("az://acct/c?endpoint=");
   });
 
   it("exports a minimal default config when there are no plans", () => {

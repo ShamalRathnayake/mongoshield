@@ -1,0 +1,28 @@
+{{- /*
+Optional NetworkPolicy for the operator's pods (values.yaml: networkPolicy). Ingress is
+limited to port 8080 from the listed peers; the kubelet's probes are not affected by
+NetworkPolicies. Egress stays open: the operator only talks to the Kubernetes API
+server, whose address and port differ from cluster to cluster.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mongoshield-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mongoshield-operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mongoshield-operator.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: http
+          protocol: TCP
+      {{- with .Values.networkPolicy.from }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

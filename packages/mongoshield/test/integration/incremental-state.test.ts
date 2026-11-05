@@ -304,5 +304,7 @@ describe("time series that cannot be read consistently", () => {
     });
     expect(full.status === "complete" && full.manifest.kind).toBeUndefined();
     expect(full.status === "complete" && full.fullBackupReason).toContain("snapshot");
+    // It repeats on every run, so it is a warning (for the run report), not only a reason.
+    expect(full.status === "complete" && full.warnings?.[0]).toContain("MS_SNAPSHOT_TOO_OLD");
   });
 });

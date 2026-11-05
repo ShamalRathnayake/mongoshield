@@ -13,6 +13,7 @@ import {
   maskConnectionString,
   separatePassword,
   throughContainerHost,
+  withDirectConnection,
   withPassword,
 } from "./connection-string.ts";
 
@@ -81,18 +82,38 @@ describe("analyzeConnectionString", () => {
     expect(info.production.reason).toMatch(/Atlas/);
   });
 
-  it("treats local and Docker hosts as test databases", () => {
+  it("treats only this computer as a test database: loopback and the container's host", () => {
     for (const uri of [
       "mongodb://localhost:27017",
       "mongodb://127.0.0.1:27017/?directConnection=true",
       "mongodb://[::1]:27017",
-      "mongodb://mongo:27017/?replicaSet=rs0",
+      "mongodb://db.localhost:27017",
       "mongodb://host.docker.internal:27017",
-      "mongodb://db.local:27017",
+      "mongodb://host.containers.internal:27017",
     ]) {
       const info = analyzeConnectionString(uri);
       expect(info.local, uri).toBe(true);
       expect(info.production.suggested, uri).toBe(false);
+    }
+  });
+
+  it("treats Kubernetes, cloud-internal and single-label names as production", () => {
+    for (const uri of [
+      // Kubernetes Services: the full name, and the short name in the same namespace.
+      "mongodb://mongo-0.mongo.prod.svc.cluster.local:27017/?replicaSet=rs0",
+      "mongodb://mongo:27017/?replicaSet=rs0",
+      // AWS and GCP internal DNS names.
+      "mongodb://ip-10-0-1-5.ec2.internal:27017",
+      "mongodb://db-1.c.my-project.internal:27017",
+      // mDNS names and test TLDs are ordinary servers too.
+      "mongodb://db.local:27017",
+      "mongodb://db.test:27017",
+      // One local host in a list is not enough.
+      "mongodb://localhost:27017,db2.example.com:27017",
+    ]) {
+      const info = analyzeConnectionString(uri);
+      expect(info.local, uri).toBe(false);
+      expect(info.production.suggested, uri).toBe(true);
     }
   });
 
@@ -244,21 +265,39 @@ describe("separatePassword", () => {
 describe("throughContainerHost", () => {
   it("points every loopback host at host.docker.internal, keeping the rest", () => {
     expect(throughContainerHost("mongodb://localhost:27017")).toBe(
-      "mongodb://host.docker.internal:27017",
+      "mongodb://host.docker.internal:27017/?directConnection=true",
     );
     expect(throughContainerHost("mongodb://u:p%40ss@127.0.0.1:27018/app?authSource=admin")).toBe(
-      "mongodb://u:p%40ss@host.docker.internal:27018/app?authSource=admin",
+      "mongodb://u:p%40ss@host.docker.internal:27018/app?authSource=admin&directConnection=true",
     );
     expect(throughContainerHost("mongodb://[::1]:27017/")).toBe(
-      "mongodb://host.docker.internal:27017/",
+      "mongodb://host.docker.internal:27017/?directConnection=true",
     );
     // Two loopback names for the same port become one host.
     expect(throughContainerHost("mongodb://localhost:27017,127.0.0.1:27017")).toBe(
-      "mongodb://host.docker.internal:27017",
+      "mongodb://host.docker.internal:27017/?directConnection=true",
     );
     // A placeholder password stays a placeholder.
     expect(throughContainerHost("mongodb://app:<password>@localhost")).toBe(
-      "mongodb://app:<password>@host.docker.internal",
+      "mongodb://app:<password>@host.docker.internal/?directConnection=true",
+    );
+    // Podman's name for the host machine.
+    expect(throughContainerHost("mongodb://localhost:27017", "host.containers.internal")).toBe(
+      "mongodb://host.containers.internal:27017/?directConnection=true",
+    );
+  });
+
+  it("adds directConnection only for one host, and never twice", () => {
+    // Already there (any value, any case): left as the user wrote it.
+    expect(throughContainerHost("mongodb://localhost:27017/?directConnection=true")).toBe(
+      "mongodb://host.docker.internal:27017/?directConnection=true",
+    );
+    expect(throughContainerHost("mongodb://localhost:27017/?directconnection=false")).toBe(
+      "mongodb://host.docker.internal:27017/?directconnection=false",
+    );
+    // Two ports are two hosts: directConnection would be refused by the driver.
+    expect(throughContainerHost("mongodb://localhost:27017,localhost:27018/?replicaSet=rs0")).toBe(
+      "mongodb://host.docker.internal:27017,host.docker.internal:27018/?replicaSet=rs0",
     );
   });
 
@@ -267,5 +306,37 @@ describe("throughContainerHost", () => {
     expect(throughContainerHost("mongodb://localhost:27017,db2:27017")).toBeUndefined();
     expect(throughContainerHost("mongodb://mongo:27017")).toBeUndefined();
     expect(throughContainerHost("postgres://localhost")).toBeUndefined();
+  });
+});
+
+describe("withDirectConnection", () => {
+  it("adds the option wherever the string's options go", () => {
+    expect(withDirectConnection("mongodb://h:27017")).toBe(
+      "mongodb://h:27017/?directConnection=true",
+    );
+    expect(withDirectConnection("mongodb://h:27017/")).toBe(
+      "mongodb://h:27017/?directConnection=true",
+    );
+    expect(withDirectConnection("mongodb://h:27017/app")).toBe(
+      "mongodb://h:27017/app?directConnection=true",
+    );
+    expect(withDirectConnection("mongodb://h:27017/?appName=x")).toBe(
+      "mongodb://h:27017/?appName=x&directConnection=true",
+    );
+    expect(withDirectConnection("mongodb://h:27017/?")).toBe(
+      "mongodb://h:27017/?directConnection=true",
+    );
+  });
+
+  it("leaves SRV, several hosts, an explicit choice and load balancers alone", () => {
+    for (const uri of [
+      "mongodb+srv://u:p@cluster0.x.mongodb.net/",
+      "mongodb://a:27017,b:27017/?replicaSet=rs0",
+      "mongodb://h:27017/?directConnection=false",
+      "mongodb://h:27017/?loadBalanced=true",
+      "not a connection string",
+    ]) {
+      expect(withDirectConnection(uri), uri).toBe(uri);
+    }
   });
 });

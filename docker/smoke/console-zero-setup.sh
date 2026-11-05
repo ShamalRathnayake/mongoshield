@@ -43,6 +43,9 @@ BASE="http://127.0.0.1:${PORT}"
 RUN_ID="smoke$$"
 NETWORK="ms-${RUN_ID}"
 MONGO="ms-${RUN_ID}-mongo"
+# A fixed server version, the same 8.0.13 the rest of CI uses: the floating mongo:8.0 tag
+# moved on 26 Oct 2026, and a new image must not change what CI tests overnight.
+MONGO_IMAGE="${MONGO_IMAGE:-mongo:8.0.13}"
 CONSOLE="ms-${RUN_ID}-console"
 VOLUME="ms-${RUN_ID}-data"
 VOLUME_EXPLICIT="ms-${RUN_ID}-explicit"
@@ -61,6 +64,12 @@ fail() {
 }
 
 cleanup() {
+  local status=$?
+  # On failure, MongoDB's own log says why it stopped (the error otherwise only says
+  # "container is not running").
+  if [[ "${status}" -ne 0 ]]; then
+    docker logs --tail 40 "${MONGO}" 2>&1 | sed 's/^/  mongo| /' >&2 || true
+  fi
   docker rm -f "${CONSOLE}" "${CONSOLE}-explicit" "${MONGO}" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUME}" "${VOLUME_EXPLICIT}" >/dev/null 2>&1 || true
   docker network rm "${NETWORK}" >/dev/null 2>&1 || true
@@ -149,7 +158,7 @@ secret_key_fingerprint() {
 log "Starting MongoDB 8 (single-node replica set) on network ${NETWORK}"
 docker network create "${NETWORK}" >/dev/null
 docker run -d --name "${MONGO}" --network "${NETWORK}" --network-alias mongo \
-  mongo:8.0 --replSet rs0 --bind_ip_all >/dev/null
+  "${MONGO_IMAGE}" --replSet rs0 --bind_ip_all >/dev/null
 for _ in $(seq 1 60); do
   docker exec "${MONGO}" mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1 && break
   sleep 1
@@ -198,8 +207,11 @@ remember_session
 log "Checking and saving the connection"
 URI="mongodb://mongo:27017/?replicaSet=rs0"
 CHECK="$(api POST /api/connections/check "$(jq -n --arg uri "${URI}" '{uri: $uri}')")"
-expect_json "${CHECK}" '.ok == true and .topology == "replicaSet" and .production.suggested == false' \
-  "the connection check should succeed and call a Docker host a test database"
+# A container name such as "mongo" can be any server, so the console suggests treating it
+# as production (only loopback names count as test databases); the smoke test then saves
+# it as a test database itself, the way a user who knows better would.
+expect_json "${CHECK}" '.ok == true and .topology == "replicaSet" and .production.suggested == true' \
+  "the connection check should succeed and suggest production for a container name"
 NAME="$(jq -r .suggestedName <<<"${CHECK}")"
 CONNECTION="$(api POST /api/connections "$(jq -n --arg n "${NAME}" --arg uri "${URI}" '{name: $n, uri: $uri, production: false}')")"
 CONNECTION_ID="$(jq -r .id <<<"${CONNECTION}")"
@@ -255,7 +267,11 @@ BEFORE="$(secret_key_fingerprint)"
 docker restart "${CONSOLE}" >/dev/null
 wait_healthz
 [[ "$(secret_key_fingerprint)" == "${BEFORE}" ]] || fail "secret.key changed across a restart"
-docker logs "${CONSOLE}" 2>&1 | grep -q "Using the generated secret key" || fail "the restarted console did not reuse the key"
+# The logs are read into a variable first: with pipefail, `docker logs … | grep -q`
+# fails at random, because grep exits on the first match and docker logs then dies
+# writing into the closed pipe.
+CONSOLE_LOGS="$(docker logs "${CONSOLE}" 2>&1)"
+grep -q "Using the generated secret key" <<<"${CONSOLE_LOGS}" || fail "the restarted console did not reuse the key"
 COOKIE="" CSRF=""
 api POST /api/session "$(jq -n --arg u "${ADMIN_USER}" --arg p "${ADMIN_PASSWORD}" '{username: $u, password: $p}')" >/dev/null
 remember_session
@@ -317,7 +333,8 @@ log "An explicit MONGOSHIELD_SECRET still works; a short one is refused"
 docker run -d --name "${CONSOLE}-explicit" -p "127.0.0.1:${PORT}:8080" -v "${VOLUME_EXPLICIT}:/data" \
   -e MONGOSHIELD_SECRET="$(openssl rand -hex 32)" "${IMAGE}" >/dev/null
 wait_healthz
-if docker logs "${CONSOLE}-explicit" 2>&1 | grep -q "generated a new secret key"; then
+EXPLICIT_LOGS="$(docker logs "${CONSOLE}-explicit" 2>&1)"
+if grep -q "generated a new secret key" <<<"${EXPLICIT_LOGS}"; then
   fail "a key was generated although MONGOSHIELD_SECRET was set"
 fi
 docker rm -f "${CONSOLE}-explicit" >/dev/null

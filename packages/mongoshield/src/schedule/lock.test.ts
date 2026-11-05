@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isMongoShieldError, MongoShieldError } from "../errors.ts";
+import { conditionalWritesUnsupportedError } from "../storage/conditional-writes.ts";
 import { memoryStorage } from "../storage/memory.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import { createLockOwner, keepLeaseAlive, type Lease, noLock } from "./lock.ts";
@@ -142,6 +143,44 @@ describe("storageLock", () => {
       caught = error;
     }
     expect(isMongoShieldError(caught, "MS_CONFIG_INVALID")).toBe(true);
+  });
+
+  it("holds the lock when a retried create reports 'already exists' for its own write", async () => {
+    const base = memoryStorage();
+    // Like a lost reply: the first attempt landed, the retry finds the object taken.
+    const storage: StorageAdapter = {
+      ...base,
+      put: async (key, body, options) => {
+        const info = await base.put(key, body, options);
+        if (options?.ifNoneMatch) {
+          throw new MongoShieldError("MS_STORAGE_PRECONDITION_FAILED", `${key} already exists.`);
+        }
+        return info;
+      },
+    };
+    const result = await lockOn(storage).tryAcquire();
+    expect(result.acquired).toBe(true);
+    // Someone else still cannot take it.
+    expect((await lockOn(base).tryAcquire()).acquired).toBe(false);
+  });
+
+  it("refuses, with the mongo-lock hint, when the store turns out not to honour conditional writes", async () => {
+    const base = memoryStorage();
+    // Like an S3-compatible store that failed the adapter's If-None-Match probe.
+    const storage: StorageAdapter = {
+      ...base,
+      put: (key, body, options) => {
+        if (options?.ifNoneMatch) throw conditionalWritesUnsupportedError(key);
+        return base.put(key, body, options);
+      },
+    };
+    const caught = await lockOn(storage)
+      .tryAcquire()
+      .catch((error: unknown) => error);
+    expect(isMongoShieldError(caught, "MS_CONFIG_INVALID")).toBe(true);
+    expect(isMongoShieldError(caught) && caught.hint).toContain('schedule.lock to "mongo"');
+    // Nothing was written without the condition.
+    expect(base.keys()).toEqual([]);
   });
 
   it("never touches the backups prefix", async () => {

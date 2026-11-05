@@ -157,6 +157,43 @@ describe("chooseConsistency", () => {
   });
 });
 
+describe("chooseConsistency on servers that do not support the change stream", () => {
+  it("falls back to none, with a warning, when the server refuses the probe as unsupported", async () => {
+    for (const code of [40415, 40324, 115, 59]) {
+      const refused = fakeClient(() => {
+        throw new MongoServerError({ message: "unknown field showExpandedEvents", code });
+      });
+      const choice = await chooseConsistency(refused.client, "auto", replicaSet);
+      expect(choice.mode).toBe("none");
+      expect(choice.warning).toContain('Consistency "auto" used "none"');
+      expect(choice.warning).toContain("unknown field showExpandedEvents");
+      expect(refused.sessionsEnded()).toBe(1);
+    }
+  });
+
+  it("falls back to none on any probe error from a MongoDB-compatible database", async () => {
+    const ferret: DeploymentInfo = { ...replicaSet, engine: "ferretdb" };
+    for (const error of [
+      new MongoServerError({ message: "interrupted", code: 11600 }),
+      new Error("something odd"),
+    ]) {
+      const failing = fakeClient(() => {
+        throw error;
+      });
+      const choice = await chooseConsistency(failing.client, "auto", ferret);
+      expect(choice.mode).toBe("none");
+      expect(choice.warning).toContain("FerretDB");
+    }
+  });
+
+  it("still fails loudly for explicit modes, which are not probed", async () => {
+    const ferret: DeploymentInfo = { ...replicaSet, engine: "documentdb", serverVersion: "5.0.0" };
+    expect(codeOf(() => resolveConsistencyMode("converge", ferret))).toBe(
+      "MS_UNSUPPORTED_TOPOLOGY",
+    );
+  });
+});
+
 describe("chooseConsistency on Atlas Free and Flex", () => {
   const atlasFree: DeploymentInfo = {
     ...replicaSet,
@@ -230,6 +267,26 @@ describe("openReadConsistency", () => {
     expect(reads.clusterTime).toBeUndefined();
     expect(fake.commands).toEqual([]);
     await reads.close();
+  });
+
+  it("refuses clearly, before any collection is read, when Atlas refuses snapshot reads", async () => {
+    const fake = fakeClient(() => {
+      throw new MongoServerError({
+        errmsg: "readConcern snapshot is not allowed in this atlas tier",
+        code: 8000,
+        codeName: "AtlasError",
+      });
+    });
+    const error: unknown = await openReadConsistency(
+      fake.client,
+      "snapshot",
+      [spec("orders", "collection")],
+      silentLogger,
+    ).catch((caught: unknown) => caught);
+    expect(isMongoShieldError(error, "MS_UNSUPPORTED_TOPOLOGY")).toBe(true);
+    expect(isMongoShieldError(error) && error.message).toContain('readConcern "snapshot"');
+    expect(isMongoShieldError(error) && error.hint).toContain('consistency "auto"');
+    expect(fake.sessionsEnded()).toBe(1);
   });
 
   it("fails, closing the session, when the server reports no snapshot time", async () => {

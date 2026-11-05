@@ -216,9 +216,12 @@ async function resolveScope(context: CommandContext, cli: CliShield): Promise<Pr
   const labels = custom ?? {
     [GUARD_SHAPE_LABEL]: backupShapeLabel(cli.config.backup ?? {}),
   };
-  const clusterId = cli.config.source?.uri
-    ? await cli.shield.sourceClusterId({ signal: context.signal })
-    : await inferClusterId(context, cli, labels);
+  if (cli.config.source?.uri) {
+    // clusterId and, where known, instanceId: same-named replica sets stay apart.
+    const identity = await cli.shield.sourceIdentity({ signal: context.signal });
+    return { ...identity, labels };
+  }
+  const clusterId = await inferClusterId(context, cli, labels);
   return clusterId === undefined ? { labels } : { clusterId, labels };
 }
 
@@ -332,6 +335,9 @@ function retentionPolicy(context: CommandContext, config: MongoShieldConfig): Re
   const policy = Object.keys(fromFlags).length > 0 ? fromFlags : configCounts(config);
   const minVerified = flags.integer("min-verified", { min: 0 }) ?? config.retention?.minVerified;
   if (minVerified !== undefined) policy.minVerified = minVerified;
+  // Count periods in the schedule's zone, as scheduled runs do (retention.ts `timeZone`).
+  const timeZone = config.schedule?.timezone;
+  if (timeZone !== undefined) policy.timeZone = timeZone;
 
   if (!hasAnyCount(policy)) {
     throw new MongoShieldError("MS_CONFIG_INVALID", "No retention policy is configured.", {

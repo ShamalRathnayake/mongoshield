@@ -83,3 +83,26 @@ describe("mongoshield find --restore", () => {
     expect(await users().findOne({ _id: 2 })).toMatchObject({ name: "Bob" });
   });
 });
+
+describe("mongoshield find --restore and the erasure ledger", () => {
+  // Last in the file: the recorded erasure would change what later tests restore.
+  it("deletes the documents the ledger lists afterwards, like every other restore", async () => {
+    const env = { MONGOSHIELD_ERASURE_SECRET: "a secret for the erasure ledger" };
+    const erase = await runTestCli(
+      ["erase", `${database}.users`, '{"name":"Ada"}', "--reason", "GDPR #7", "--to", storageDir],
+      { cwd: workDir, env },
+    );
+    expect(erase.code, erase.stderr).toBe(0);
+
+    const target = `${database}.users_after_erasure`;
+    const run = await runTestCli([...find("--to-namespace", target, "--create"), "{}"], {
+      cwd: workDir,
+      env,
+    });
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.stderr).toContain("Then deleted 1 document the erasure ledger lists.");
+    const restored = client().db(database).collection("users_after_erasure");
+    expect(await restored.findOne({ name: "Ada" })).toBeNull();
+    expect(await restored.countDocuments()).toBe(1);
+  });
+});

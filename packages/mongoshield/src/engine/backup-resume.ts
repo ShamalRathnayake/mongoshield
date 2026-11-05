@@ -19,7 +19,7 @@ import { identityToRecipient } from "../crypto/index.ts";
 import { isMongoShieldError, MongoShieldError } from "../errors.ts";
 import { manifestKey } from "../format/layout.ts";
 import type { Logger } from "../logger.ts";
-import type { DeploymentInfo } from "../mongo/index.ts";
+import { type DeploymentInfo, sameDeployment } from "../mongo/index.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import { version } from "../version.ts";
 import {
@@ -116,7 +116,7 @@ async function findMatchingCheckpoint(request: ResumeRequest): Promise<Checkpoin
     if (checkpoint === undefined) continue;
     const sameOptions =
       fingerprintDifferences(checkpoint.fingerprint, request.fingerprint).length === 0;
-    if (!sameOptions || !sameDeployment(checkpoint, request.deployment)) continue;
+    if (!sameOptions || !sameCheckpointDeployment(checkpoint, request.deployment)) continue;
     if (!sameLabels(checkpoint.labels, request.labels)) continue;
     if (await hasManifest(request.storage, id, request.signal)) continue;
     await assertFilesIntact(checkpoint, request);
@@ -146,7 +146,7 @@ async function assertResumable(checkpoint: Checkpoint, request: ResumeRequest): 
     );
   }
 
-  if (!sameDeployment(checkpoint, request.deployment)) {
+  if (!sameCheckpointDeployment(checkpoint, request.deployment)) {
     throw new MongoShieldError(
       "MS_CONFIG_INVALID",
       `Backup ${id} was started on a different MongoDB deployment.`,
@@ -183,10 +183,13 @@ function sameLabels(
   return storedKeys.every((key) => Object.hasOwn(wanted, key) && wanted[key] === stored[key]);
 }
 
-/** Same `clusterId` (checkpoints of old writers may not record one). */
-function sameDeployment(checkpoint: Checkpoint, deployment: DeploymentInfo): boolean {
-  const before = checkpoint.source.clusterId;
-  return before === undefined || before === deployment.clusterId;
+/**
+ * Same deployment: the same `clusterId` (checkpoints of old writers may not record one)
+ * and, when both know it, the same `instanceId` (two replica sets with one name).
+ */
+function sameCheckpointDeployment(checkpoint: Checkpoint, deployment: DeploymentInfo): boolean {
+  if (checkpoint.source.clusterId === undefined) return true;
+  return sameDeployment(checkpoint.source, deployment);
 }
 
 async function hasManifest(
@@ -282,6 +285,7 @@ export function buildCheckpoint(state: CheckpointState): Checkpoint {
       topology: deployment.topology,
       serverVersion: deployment.serverVersion,
       clusterId: deployment.clusterId,
+      ...(deployment.instanceId === undefined ? {} : { instanceId: deployment.instanceId }),
     },
     encryption:
       encryption === undefined

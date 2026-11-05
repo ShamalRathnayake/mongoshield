@@ -20,6 +20,7 @@ export {
   type BaseBackup,
   baseTimeOf,
   listBaseBackups,
+  type PlanPointInTimeOptions,
   type PointInTimePlan,
   planPointInTimeRestore,
   type RecoverableRange,

@@ -90,7 +90,7 @@ export const importCommand: CommandSpec = {
     compression: {
       type: "string",
       choices: ["zstd", "gzip", "none"],
-      defaultText: "zstd",
+      defaultText: "zstd (gzip on Node.js without zstd)",
       description: "Compression of the new backup",
     },
     recipient: {

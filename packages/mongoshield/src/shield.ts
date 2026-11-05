@@ -84,6 +84,7 @@ import {
   replayJournal,
 } from "./journal/index.ts";
 import { describeTime } from "./journal/plan.ts";
+import { type JournalPreflight, preflightJournal } from "./journal/replay.ts";
 import { toJournalTime } from "./journal/time.ts";
 import { type Logger, silentLogger } from "./logger.ts";
 import { type MongoConnection, openConnection } from "./mongo/connection.ts";
@@ -250,7 +251,12 @@ export class MongoShield {
   /**
    * Point-in-time recovery: restore the newest base backup taken before `at`, then
    * replay the change journal from that backup's cluster time up to `at`.
-   * Planning comes first, so a gap in the journal fails before anything is written.
+   * Planning and the journal's pre-flight come first, so a gap in the journal, a
+   * broken segment or a base that does not cover what the journal changes fails
+   * before anything is written (dry runs included).
+   *
+   * The base comes from the source's deployment: `options.sourceIdentity`, else the
+   * configured source's (never the target's, which may be a fresh cluster).
    *
    * Incremental chains reach points in time too: with an incremental backup's id, its
    * chain is restored up to `at`; with `"latest"`, a chain that covers `at` is used when
@@ -265,11 +271,42 @@ export class MongoShield {
       return this.#restoreChainToPointInTime(connection, options, at);
     }
 
+    const identity =
+      options.sourceIdentity ?? (await this.#pointInTimeIdentity(connection, options));
     let plan: Awaited<ReturnType<typeof planPointInTimeRestore>>;
+    let preflight: JournalPreflight;
     try {
-      plan = await planPointInTimeRestore(this.storage, at, { signal: options.signal });
+      // The base must suit this restore: cover what it selects, without a query filter,
+      // and come from the source's deployment.
+      plan = await planPointInTimeRestore(this.storage, at, {
+        signal: options.signal,
+        include: options.include,
+        exclude: options.exclude,
+        ...(identity === undefined
+          ? {}
+          : { clusterId: identity.clusterId, instanceId: identity.instanceId }),
+      });
+      for (const warning of plan.warnings) this.#logger.warn(warning);
+      // Reads the whole range once and checks everything the replay could refuse,
+      // BEFORE the base restore: a refusal after it would leave the target at the base
+      // backup's time (in drop mode with the live data already replaced).
+      preflight = await preflightJournal({
+        client: connection.client,
+        storage: this.storage,
+        from: plan.baseTime,
+        to: plan.at,
+        baseNamespaces: plan.baseNamespaces,
+        baseSelection: plan.baseSelection,
+        include: options.include,
+        exclude: options.exclude,
+        rename: options.rename,
+        mode: options.mode,
+        decryption: options.decryption,
+        signal: options.signal,
+      });
     } catch (error) {
-      // No journal reaches `at`: an incremental chain may.
+      // No journal (or no base that covers what it changes) reaches `at`: an
+      // incremental chain may.
       if (!isMongoShieldError(error, "MS_CHANGE_HISTORY_LOST")) throw error;
       const entries = await listBackups(this.storage, { logger: this.#logger });
       const covering = findChainCovering(entries, toJournalTime(at));
@@ -286,8 +323,8 @@ export class MongoShield {
         pointInTime: {
           baseBackupId: plan.baseBackupId,
           restoredTo: plan.at,
-          events: 0,
-          warnings: [],
+          events: preflight.summary.events,
+          warnings: [...plan.warnings],
         },
       };
     }
@@ -299,10 +336,12 @@ export class MongoShield {
       async (span) => {
         const replayed = await replayJournal({
           client: connection.client,
+          preflight,
           storage: this.storage,
           from: plan.baseTime,
           to: plan.at,
           baseNamespaces: plan.baseNamespaces,
+          baseSelection: plan.baseSelection,
           include: options.include,
           exclude: options.exclude,
           rename: options.rename,
@@ -325,9 +364,41 @@ export class MongoShield {
         baseBackupId: plan.baseBackupId,
         restoredTo: replay.restoredTo,
         events: replay.events,
-        warnings: replay.warnings,
+        warnings: [...plan.warnings, ...replay.warnings],
       },
     };
+  }
+
+  /**
+   * The deployment a point-in-time restore takes its base from when the caller did
+   * not say: the configured source's. Restoring into the source itself, the open
+   * connection is the source. Into another target, the source is asked separately;
+   * when it cannot be reached (the usual case in a disaster), the planner picks the
+   * newest suitable base and warns. `undefined` without a configured source.
+   */
+  async #pointInTimeIdentity(
+    connection: MongoConnection,
+    options: RestoreOptions,
+  ): Promise<{ readonly clusterId: string; readonly instanceId?: string } | undefined> {
+    if (this.#source === undefined) return undefined;
+    if (options.target === undefined) {
+      const deployment = await describeDeployment(connection.client);
+      return deployment.instanceId === undefined
+        ? { clusterId: deployment.clusterId }
+        : { clusterId: deployment.clusterId, instanceId: deployment.instanceId };
+    }
+    try {
+      return await this.sourceIdentity(
+        options.signal === undefined ? {} : { signal: options.signal },
+      );
+    } catch (error) {
+      if (isMongoShieldError(error, "MS_ABORTED")) throw error;
+      this.#logger.warn(
+        "Could not reach the configured source to tell which deployment's base backups to use; using the newest suitable base",
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -559,6 +630,27 @@ export class MongoShield {
     );
   }
 
+  /**
+   * The configured source deployment's full identity: `clusterId` plus, for replica
+   * sets that expose it, `instanceId` (see `DeploymentInfo.instanceId`). Pass both in
+   * a prune `scope` so two replica sets that share a set name are never pruned as one.
+   */
+  async sourceIdentity(
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<{ readonly clusterId: string; readonly instanceId?: string }> {
+    const source = this.#requireSource("identify the source deployment");
+    return this.#withConnection(
+      source,
+      async (connection) => {
+        const deployment = await describeDeployment(connection.client);
+        return deployment.instanceId === undefined
+          ? { clusterId: deployment.clusterId }
+          : { clusterId: deployment.clusterId, instanceId: deployment.instanceId };
+      },
+      options.signal,
+    );
+  }
+
   /** Releases the storage adapter's resources (connections, file handles). */
   async close(): Promise<void> {
     await this.storage.close?.();
@@ -639,12 +731,25 @@ export class MongoShield {
    * `options.to` (default: the source) and `targetNamespace` (default: the same
    * namespace). `mode: "insert"` (default) skips documents whose `_id` exists;
    * `"upsert"` replaces them. `dryRun` only counts.
+   *
+   * Like every other restore path, the erasure ledger is applied to the target namespace
+   * afterwards, so an erased person's documents never come back this way either.
    */
   async restoreDocuments(options: ShieldRestoreDocumentsOptions): Promise<RestoreDocumentsResult> {
     const target = options.to ?? this.#requireSource("restore documents");
     return this.#withConnection(
       target,
-      (connection) => restoreDocuments(this.#restoreContext(connection), options),
+      async (connection) => {
+        // The erasure helper reads which namespace was written from a `plan`; this
+        // restore writes exactly one, so it is mapped into that shape and dropped again.
+        const result = await this.#withErasures(connection, options, async () => {
+          const restored = await restoreDocuments(this.#restoreContext(connection), options);
+          const entries = [{ from: restored.namespace, to: restored.targetNamespace }];
+          return { ...restored, plan: { entries } };
+        });
+        const { plan: _plan, ...documentsResult } = result;
+        return documentsResult;
+      },
       options.signal,
     );
   }

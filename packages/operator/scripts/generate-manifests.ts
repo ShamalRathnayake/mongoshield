@@ -20,6 +20,12 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
 const output = resolve(repositoryRoot, "deploy/operator/operator.yaml");
 const NAMESPACE = "mongoshield-system";
+/**
+ * The Secret with the /metrics token. `helm template` cannot keep a generated token
+ * stable (it would change on every render), so the plain manifests reference a Secret
+ * the user creates, as optional: the operator starts without it, with /metrics open.
+ */
+const METRICS_SECRET = "mongoshield-operator-metrics";
 
 const HEADER = `# MongoShield operator: plain Kubernetes manifests (namespace ${NAMESPACE}).
 #
@@ -30,8 +36,13 @@ const HEADER = `# MongoShield operator: plain Kubernetes manifests (namespace ${
 # values: do not edit by hand. Regenerate with:
 #   pnpm --filter @mongoshield/operator manifests
 #
-# Before applying, pin the images: replace the operator image tag "next" and the
-# MONGOSHIELD_IMAGE tag "latest" with released versions.
+# Both images are pinned to the release these manifests come from (the chart's
+# appVersion); change the two tags together when you upgrade.
+#
+# /metrics requires a bearer token once this Secret exists (until then it is open):
+#   kubectl -n ${NAMESPACE} create secret generic ${METRICS_SECRET} \\
+#     --from-literal=token="$(openssl rand -hex 32)"
+#   kubectl -n ${NAMESPACE} rollout restart deployment/mongoshield-operator
 ---
 apiVersion: v1
 kind: Namespace
@@ -53,7 +64,18 @@ function render(): string {
   const chart = resolve(repositoryRoot, "deploy/helm/mongoshield-operator");
   const rendered = execFileSync(
     helmBinary(),
-    ["template", "mongoshield-operator", chart, "--namespace", NAMESPACE, "--skip-crds"],
+    [
+      "template",
+      "mongoshield-operator",
+      chart,
+      "--namespace",
+      NAMESPACE,
+      "--skip-crds",
+      "--set",
+      `metrics.auth.existingSecret=${METRICS_SECRET}`,
+      "--set",
+      "metrics.auth.optional=true",
+    ],
     { encoding: "utf8" },
   );
   // Helm labels resources with its own name; these were not installed by Helm.

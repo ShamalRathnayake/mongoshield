@@ -1,0 +1,41 @@
+# Rescans the published images every week. docker.yml scans an image once, when it is
+# built; vulnerabilities disclosed later in its OS packages or node_modules would
+# otherwise go unnoticed until the next release. A failed run here (GitHub emails the
+# maintainers) means: release a patch with the fixed dependency, or add a .trivyignore
+# entry with a reason and an expiry date.
+name: Image rescan
+
+on:
+  schedule:
+    - cron: "17 5 * * 1" # Mondays, 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rescan:
+    name: Rescan ${{ matrix.image }}:latest
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [mongoshield, mongoshield-console, mongoshield-operator]
+    steps:
+      # For .trivyignore only.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      # Same policy as the build-time scan in docker.yml: fixable HIGH/CRITICAL fail.
+      # Pinned by SHA (v0.35.0+ is required, see docker.yml), and the Trivy binary by version.
+      - name: Vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: ghcr.io/shamalrathnayake/${{ matrix.image }}:latest
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table

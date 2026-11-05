@@ -8,6 +8,9 @@
  *   server either signs it in or redirects to `#/?sso_error=<code>`, which this page
  *   explains.
  * - With trusted-proxy SSO the proxy signs people in, so the page only explains that.
+ * - Opened over plain HTTP from another machine while the session cookie is `Secure`
+ *   (the default), the browser would drop the cookie and every sign-in would bounce
+ *   back here without a word; the page warns up front, like the setup page.
  */
 
 import { type FormEvent, useState } from "react";
@@ -24,6 +27,7 @@ import { TextField } from "../components/field.tsx";
 import { Notice } from "../components/layout.tsx";
 import { useApi } from "../context.tsx";
 import { parseLocation } from "../router.ts";
+import { insecureRemoteHttp } from "./setup.tsx";
 
 /** What each single sign-on failure means for the person who just tried. */
 const SSO_ERROR_MESSAGES: Readonly<Record<OidcErrorCode, string>> = {
@@ -53,6 +57,18 @@ export function ssoErrorMessage(hash: string): string | undefined {
   return known === undefined
     ? "Single sign-on did not complete. Try again, or ask an admin to check the console log."
     : SSO_ERROR_MESSAGES[known];
+}
+
+/**
+ * True when signing in here cannot work: the session cookie is `Secure` (older servers
+ * do not say, and Secure is the default) and the page was opened over plain HTTP from
+ * another machine, where browsers drop Secure cookies.
+ */
+export function cookieLostOverHttp(
+  session: Pick<SessionInfo, "cookieSecure">,
+  location: Pick<Location, "protocol" | "hostname">,
+): boolean {
+  return session.cookieSecure !== false && insecureRemoteHttp(location);
 }
 
 /** Props for `LoginPage`. */
@@ -116,6 +132,14 @@ export function LoginPage(props: LoginPageProps) {
             <code>operator</code>, <code>sam</code> / <code>viewer</code>).
           </Notice>
         ) : null}
+        {cookieLostOverHttp(props.session, window.location) ? (
+          <Notice tone="warning" title="Sign-in needs HTTPS here">
+            Browsers keep the console's sign-in cookie only over HTTPS or on this computer
+            (localhost), so signing in here would bring you straight back to this page. Open the
+            console through its HTTPS address, or for a quick evaluation start it with{" "}
+            <code>MONGOSHIELD_COOKIE_SECURE=false</code>.
+          </Notice>
+        ) : null}
         {passwordAllowed ? (
           <>
             <TextField
@@ -148,7 +172,11 @@ export function LoginPage(props: LoginPageProps) {
           </Notice>
         )}
         {oidcAllowed ? (
-          <LinkButton href={OIDC_LOGIN_PATH} variant={passwordAllowed ? "secondary" : "primary"}>
+          // Relative to the page, so it also works when the console is served under a sub-path.
+          <LinkButton
+            href={`.${OIDC_LOGIN_PATH}`}
+            variant={passwordAllowed ? "secondary" : "primary"}
+          >
             Sign in with single sign-on
           </LinkButton>
         ) : null}

@@ -40,9 +40,11 @@ jobs:
       - run: echo "Created ${{ steps.backup.outputs.backup-id }}"
 ```
 
-The action runs `npx mongoshield@<version>` and installs the SDK the storage URL needs.
-Inputs: `command` (`backup`, `run`, `verify`, `restore`), `uri`, `storage`, `recipients`,
-`identity`, `config`, `args`, `packages`, `version` (default `latest`), `node-version`
+The action installs a pinned `mongoshield` (with `npm install --ignore-scripts`) plus the
+SDK the storage URL needs, whether that URL is in the `storage` input, `MONGOSHIELD_STORAGE`
+or the config file. Inputs: `command` (`backup`, `run`, `verify`, `restore`), `uri`, `storage`, `recipients`,
+`identity`, `config`, `args`, `packages`, `version` (default: the release of the Action ref
+you use; `latest` for the newest), `node-version`
 (default `24`), `working-directory`. Outputs: `backup-id` and `json`. Details in
 [`action/README.md`](../../action/README.md).
 
@@ -99,8 +101,15 @@ whose leak is harmless.
   secret key offline.
 - **OIDC for cloud credentials** instead of stored access keys. Scope the IAM role's trust
   policy to this repository (and branch).
-- **Least-privilege MongoDB user**: read-only (`backup` or `readAnyDatabase` role).
-- **Pin the action and the version** (`version: 2.0.0`) for reproducible runs.
+- **Least-privilege MongoDB user**: read-only, with the `readAnyDatabase` role (Atlas:
+  "Only read any database"). Avoid the built-in `backup` role on its own: it cannot open
+  the change stream the default consistency (`converge`) needs, so every backup silently
+  becomes `consistency: "none"` (collections from different moments, no base for
+  incrementals or point-in-time recovery). The run report's `backup.consistency` and
+  `backup.warnings` show what a run actually got. The least-privilege custom role is in
+  [CONSISTENCY.md](../specs/CONSISTENCY.md#converge).
+- **Pin the action** to a full commit SHA (`.../action@<sha> # v2.0.1`) for reproducible
+  runs: the CLI version follows the Action ref unless you set `version`.
 - **Scheduled workflows are disabled** after 60 days without repository activity on public
   repos; GitHub emails you first. Use a `heartbeat` URL to notice.
 - **Atlas**: GitHub-hosted runners have no fixed IP addresses. See the

@@ -20,18 +20,21 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import type { MongoClient } from "mongodb";
-import type { ConnectionProblem, ConnectionTestResult } from "../shared/api.ts";
+import type {
+  ConnectionProblem,
+  ConnectionTestResult,
+  ContainerEnvironment,
+} from "../shared/api.ts";
 import {
   analyzeConnectionString,
-  CONTAINER_HOST,
   ConnectionStringError,
   type ConnectionStringInfo,
   cleanPastedConnectionString,
   encodeCredentials,
   throughContainerHost,
 } from "../shared/connection-string.ts";
+import { localhostIsContainer } from "../shared/container.ts";
 import { scrubText } from "../state/redact.ts";
 import type { DeploymentRecord } from "../state/types.ts";
 import {
@@ -40,32 +43,26 @@ import {
   explainConnectionError,
   privilegesMessage,
 } from "./connection-problems.ts";
+import { consoleEnvironment } from "./container-environment.ts";
 import { invalid } from "./errors.ts";
 import { isSharedTier } from "./live/atlas-tier.ts";
 import { describeConnected, withClient } from "./mongo-inspect.ts";
+import { UNSAFE_TARGET_HINT, unsafeConnectionUriReason } from "./network-targets.ts";
 
 /** MongoDB's own databases: never offered for backup, never listed as "readable". */
 const INTERNAL_DATABASES = new Set(["admin", "config", "local"]);
 
-/**
- * True when the console runs in a container, where `localhost` is the container itself.
- * Docker creates `/.dockerenv`, Podman `/run/.containerenv`; Kubernetes sets
- * KUBERNETES_SERVICE_HOST in every pod.
- */
-export function runsInContainer(): boolean {
-  return (
-    existsSync("/.dockerenv") ||
-    existsSync("/run/.containerenv") ||
-    process.env.KUBERNETES_SERVICE_HOST !== undefined
-  );
-}
-
-/** Options for {@link inspectConnection}; tests replace the container check. */
+/** Options for {@link inspectConnection}; tests replace the environment detection. */
 export interface InspectOptions {
-  readonly inContainer?: boolean;
+  /**
+   * Where the console runs (Docker, Podman, Kubernetes, …). Defaults to the real
+   * detection (container-environment.ts), including a fresh DNS lookup of the host alias.
+   */
+  readonly container?: ContainerEnvironment;
   /**
    * The address to try when a loopback address is refused in a container. Defaults to
-   * {@link throughContainerHost}; tests point it at their own database.
+   * {@link throughContainerHost} with the environment's host alias; tests point it at
+   * their own database.
    */
   readonly containerAddress?: (uri: string) => string | undefined;
 }
@@ -74,20 +71,23 @@ export interface InspectOptions {
  * Connects with `uri` and reports everything the onboarding page shows. Never throws:
  * failures come back as `ok: false` with `problem` (and the scrubbed `error`).
  *
- * In a container, `localhost` is the container itself. When a loopback address is
- * refused there, the console tries the machine it runs on (`host.docker.internal`)
- * by itself; if that connects, the result says so in `reachedThrough`, and the caller
- * uses {@link throughContainerHost} to get the address that worked.
+ * In Docker or Podman, `localhost` is the container itself. When a loopback address is
+ * refused there, and the name for the machine the container runs on resolves
+ * (`host.docker.internal`, Podman's `host.containers.internal`), the console tries that
+ * machine by itself; if that connects, the result says so in `reachedThrough`, and the
+ * caller uses {@link reachedAddress} to get the address that worked. In Kubernetes and
+ * with host networking `localhost` means what it says, so nothing is retried there.
  */
 export async function inspectConnection(
   uri: string,
   options: InspectOptions = {},
 ): Promise<ConnectionTestResult> {
   const info = safeAnalyze(uri);
+  const container = options.container ?? (await consoleEnvironment.fresh());
   const attempt: ConnectionAttempt = {
     atlas: info?.atlas ?? false,
     hosts: info?.hosts ?? [],
-    inContainer: options.inContainer ?? runsInContainer(),
+    container,
   };
   try {
     return await withClient(uri, (client) => describeWithExtras(client, attempt));
@@ -96,15 +96,19 @@ export async function inspectConnection(
     const detail = scrubText(error instanceof Error ? error.message : String(error), [uri]);
     const problem = explainConnectionError(error, detail, attempt);
     // "localhost" refused inside a container: the database is most likely on the host.
-    const onHost = attempt.inContainer
-      ? (options.containerAddress ?? throughContainerHost)(uri)
-      : undefined;
-    if (problem.kind === "connection-refused" && onHost !== undefined) {
+    const hostAlias = retryableHostAlias(container);
+    const onHost =
+      hostAlias === undefined
+        ? undefined
+        : (options.containerAddress ?? ((original) => throughContainerHost(original, hostAlias)))(
+            uri,
+          );
+    if (problem.kind === "connection-refused" && hostAlias !== undefined && onHost !== undefined) {
       try {
         const viaHost = await withClient(onHost, (client) => describeWithExtras(client, attempt));
         return {
           ...viaHost,
-          reachedThrough: { from: attempt.hosts.join(", "), to: CONTAINER_HOST },
+          reachedThrough: { from: attempt.hosts.join(", "), to: hostAlias },
         };
       } catch {
         // Not there either: report the original problem, which explains both options.
@@ -118,6 +122,34 @@ export async function inspectConnection(
       problem,
     };
   }
+}
+
+/**
+ * The host alias worth retrying a refused localhost on: only where `localhost` is the
+ * container (Docker, Podman), and not when the alias is known not to resolve (Linux
+ * Docker Engine without `--add-host`; the problem's fix explains that instead).
+ */
+function retryableHostAlias(container: ContainerEnvironment): string | undefined {
+  if (!localhostIsContainer(container.kind) || container.hostAliasResolves === false) {
+    return undefined;
+  }
+  return container.hostAlias;
+}
+
+/**
+ * The connection string that worked, for a result that got through on the machine the
+ * container runs on (`reachedThrough`): `uri` rewritten to that host (with
+ * `directConnection=true` for a single host). Undefined when the console connected
+ * with `uri` itself. `containerAddress` is the same override {@link InspectOptions} has.
+ */
+export function reachedAddress(
+  uri: string,
+  result: ConnectionTestResult,
+  containerAddress?: (uri: string) => string | undefined,
+): string | undefined {
+  const reached = result.reachedThrough;
+  if (reached === undefined) return undefined;
+  return (containerAddress ?? ((original) => throughContainerHost(original, reached.to)))(uri);
 }
 
 /** The plain description plus the Atlas tier, readable databases and privilege advice. */
@@ -204,10 +236,12 @@ function safeAnalyze(uri: string): ConnectionStringInfo | undefined {
  * wrapper, wrapped lines), raw special characters in the user name and password
  * percent-encoded, and refused while it still holds a placeholder such as
  * `<db_password>` (Atlas copy-paste) or is not a MongoDB connection string at all.
+ * Options that would authenticate with the console's own workload identity are refused
+ * unless `allowUnsafeTargets` (MONGOSHIELD_ALLOW_UNSAFE_TARGETS, see network-targets.ts).
  *
  * @throws ConsoleError 400 with a message that never quotes the password.
  */
-export function normalizeConnectionUri(text: string): string {
+export function normalizeConnectionUri(text: string, allowUnsafeTargets = false): string {
   const cleaned = cleanPastedConnectionString(text);
   let info: ConnectionStringInfo;
   try {
@@ -229,6 +263,10 @@ export function normalizeConnectionUri(text: string): string {
       `Replace ${info.passwordPlaceholder} in the connection string with the password.`,
       "The console's form asks for it separately and encodes special characters for you.",
     );
+  }
+  const unsafe = unsafeConnectionUriReason(cleaned, allowUnsafeTargets);
+  if (unsafe !== undefined) {
+    throw invalid(`The connection string is refused: ${unsafe}.`, UNSAFE_TARGET_HINT);
   }
   return encodeCredentials(cleaned).uri;
 }

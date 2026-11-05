@@ -12,7 +12,7 @@
  */
 
 import process from "node:process";
-import { createInterruptHandler } from "./interrupt.ts";
+import { cliHandlesTermination, createInterruptHandler } from "./interrupt.ts";
 import type { CliIo } from "./io.ts";
 import { runCli } from "./run.ts";
 
@@ -47,9 +47,9 @@ process.on("SIGINT", onInterrupt);
 // Containers and process managers stop programs with SIGTERM. One-off commands treat
 // it like Ctrl-C (cancel cleanly). `run` and `schedule` install their own SIGTERM
 // handling, because a scheduler should finish its current job within a grace period
-// instead of aborting it.
-const COMMANDS_WITH_OWN_TERMINATION = new Set(["run", "schedule"]);
-const handlesTermination = !COMMANDS_WITH_OWN_TERMINATION.has(process.argv[2] ?? "");
+// instead of aborting it. The command is found as the parser finds it, so global
+// flags before it (`mongoshield --config f schedule`) count too.
+const handlesTermination = cliHandlesTermination(process.argv.slice(2));
 if (handlesTermination) process.on("SIGTERM", onInterrupt);
 process.stdout.on("error", ignoreBrokenPipe);
 

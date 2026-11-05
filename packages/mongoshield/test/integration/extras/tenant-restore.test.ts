@@ -11,8 +11,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { restoreTenant } from "../../../src/extras/tenant-restore.ts";
 import { silentLogger } from "../../../src/logger.ts";
 import { fileStorage } from "../../../src/storage/file.ts";
+import { memoryStorage } from "../../../src/storage/memory.ts";
 import type { StorageAdapter } from "../../../src/storage/types.ts";
-import { backupDatabaseForTest } from "../../helpers/backup-fixtures.ts";
+import {
+  backupDatabaseForTest,
+  flipByte,
+  replaceStoredFile,
+  writeTestBackup,
+} from "../../helpers/backup-fixtures.ts";
 import { mongoUri, uniqueDb, useMongoClient } from "../../helpers/mongo.ts";
 import { runTestCli } from "./cli-utils.ts";
 
@@ -184,6 +190,30 @@ describe("restoreTenant", () => {
     // Created with the backed-up indexes.
     const indexes = await client().db(sandbox).collection("projects").indexes();
     expect(indexes.map((index) => index.name)).toContain("tenantId_1");
+    await client().db(sandbox).dropDatabase();
+  });
+
+  it("replace-tenant checks the backup's parts before deleting the live tenant", async () => {
+    const damaged = memoryStorage();
+    const sandbox = uniqueDb("tenant_damaged");
+    const manifest = await writeTestBackup(damaged, {
+      namespaces: [{ ns: `${sandbox}.projects`, documents: seedDocuments("projects") }],
+    });
+    const part = manifest.namespaces[0]?.files[0];
+    if (part === undefined) throw new Error("no data part");
+    await replaceStoredFile(damaged, manifest, part.key, (bytes) =>
+      flipByte(bytes, Math.floor(bytes.length / 2)),
+    );
+    const live = client().db(sandbox).collection<TenantDocument>("projects");
+    await live.insertOne({ _id: 0, tenantId: "acme", title: "live" });
+
+    await expect(
+      restoreTenant(
+        { client: client(), storage: damaged, logger: silentLogger },
+        { backup: "latest", tenantFilter: { tenantId: "acme" }, mode: "replace-tenant" },
+      ),
+    ).rejects.toMatchObject({ code: "MS_INTEGRITY_FAILED" });
+    expect(await live.find().toArray()).toEqual([{ _id: 0, tenantId: "acme", title: "live" }]);
     await client().db(sandbox).dropDatabase();
   });
 

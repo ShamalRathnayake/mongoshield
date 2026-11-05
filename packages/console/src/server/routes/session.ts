@@ -19,6 +19,7 @@
  */
 
 import type { Context, Hono } from "hono";
+import { isZstdAvailable } from "mongoshield";
 import type { SessionInfo } from "../../shared/api.ts";
 import { randomId } from "../../state/crypto.ts";
 import {
@@ -43,7 +44,7 @@ import {
   setSessionCookie,
   USERNAME_PATTERN,
 } from "../auth.ts";
-import { runsInContainer } from "../connection-check.ts";
+import { consoleEnvironment } from "../container-environment.ts";
 import type { AppEnv, ConsoleServices, Principal } from "../context.ts";
 import { ConsoleError, invalid } from "../errors.ts";
 import { readJson } from "../security.ts";
@@ -58,17 +59,28 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
     const body = asObject(await readJson(c));
     const username = requiredString(body, "username", 64);
     const password = passwordField(body.password, { checkStrength: false });
-    const limiterKeys = [`address:${clientAddress(c)}`, `user:${username.toLowerCase()}`];
+    // Per client address (behind trusted proxies, the address they forwarded) and per
+    // username, so neither many usernames from one address nor many addresses against
+    // one username get more than the limit (rate-limit.ts).
+    const addressKey = `address:${clientAddress(c)}`;
+    const limiterKeys = [addressKey, `user:${username.toLowerCase()}`];
 
-    const waitMs = services.loginLimiter.retryAfterMs(limiterKeys);
-    if (waitMs > 0) {
-      c.header("Retry-After", String(Math.ceil(waitMs / 1000)));
-      await recordAudit(services, {
-        actor: "anonymous",
-        action: "session.login_throttled",
-        target: username,
-        outcome: "failure",
-      });
+    // The attempt counts from here, before the slow password check: parallel guesses
+    // see each other's attempts. A correct password gives it back below.
+    const reserved = services.loginLimiter.tryReserve(limiterKeys);
+    if (!reserved.ok) {
+      c.header("Retry-After", String(Math.ceil(reserved.retryAfterMs / 1000)));
+      // One audit entry per address and minute at most, so a flood cannot rotate the log.
+      const suppressed = services.loginLimiter.throttleAudit(addressKey);
+      if (suppressed !== undefined) {
+        await recordAudit(services, {
+          actor: "anonymous",
+          action: "session.login_throttled",
+          target: username,
+          outcome: "failure",
+          details: { address: clientAddress(c), ...(suppressed > 0 ? { suppressed } : {}) },
+        });
+      }
       throw new ConsoleError(
         429,
         "CONSOLE_RATE_LIMITED",
@@ -85,17 +97,19 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
         ? (await verifyAgainstDummy(password, services.passwordCost)) && false
         : await verifyPassword(password, user.passwordHash);
     if (!ok || user === undefined) {
-      services.loginLimiter.recordFailure(limiterKeys);
+      // Already counted as a failure by tryReserve above.
       await recordAudit(services, {
         actor: "anonymous",
         action: "session.login_failed",
         target: username,
         outcome: "failure",
+        details: { address: clientAddress(c) },
       });
       // The same message for unknown users and wrong passwords: no username enumeration.
       throw new ConsoleError(401, "CONSOLE_LOGIN_FAILED", "Wrong username or password.");
     }
 
+    services.loginLimiter.release(reserved.attempt);
     services.loginLimiter.reset(`user:${username.toLowerCase()}`);
     const principal = await startSession(c, services, user);
     await recordAudit(services, {
@@ -129,7 +143,10 @@ export function sessionRoutes(app: Hono<AppEnv>, services: ConsoleServices): voi
     const body = asObject(await readJson(c));
     // The token is optional only while the setup window is open (see the file header).
     const token = optionalString(body, "token", 128)?.trim() || undefined;
-    const limiterKeys = [`address:${clientAddress(c)}`, "setup"];
+    // Per client address only: one shared "setup" key would let anyone lock the real
+    // operator out of setup with ten wrong tokens. Guessing a 256-bit token from many
+    // addresses is hopeless anyway.
+    const limiterKeys = [`setup-address:${clientAddress(c)}`];
     if (services.loginLimiter.retryAfterMs(limiterKeys) > 0) {
       throw new ConsoleError(429, "CONSOLE_RATE_LIMITED", "Too many failed setup attempts.");
     }
@@ -211,6 +228,10 @@ function sessionInfo(services: ConsoleServices, principal: Principal | undefined
   return {
     setupComplete,
     authMethods,
+    // Lets the sign-in and setup pages warn that plain HTTP loses the Secure cookie.
+    cookieSecure: services.settings.cookieSecure,
+    // Lets the plan editor default to gzip on a Node.js without zstd (before 22.15).
+    zstdAvailable: isZstdAvailable(),
     ...(setupComplete
       ? {}
       : {
@@ -226,8 +247,9 @@ function sessionInfo(services: ConsoleServices, principal: Principal | undefined
       : {
           user: userView(principal.user),
           csrfToken: principal.csrfToken,
-          // Lets pages suggest host.docker.internal instead of localhost.
-          inContainer: services.inContainer ?? runsInContainer(),
+          // Lets pages suggest host.docker.internal instead of localhost, or explain
+          // how to create it (Linux Docker Engine needs --add-host).
+          container: services.container ?? consoleEnvironment.current(),
         }),
   };
 }

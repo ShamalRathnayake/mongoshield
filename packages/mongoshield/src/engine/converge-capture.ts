@@ -37,7 +37,12 @@ import { changesFileKey, resolveBackupKey } from "../format/layout.ts";
 import type { ChangesFile, ClusterTime, Compression } from "../format/manifest.ts";
 import { laterOf, predecessor } from "../journal/time.ts";
 import type { Logger } from "../logger.ts";
-import { type CollectionSpec, compileNamespaceFilter, splitNamespace } from "../mongo/index.ts";
+import {
+  type CollectionSpec,
+  compileNamespaceFilter,
+  isAtlasRefusal,
+  splitNamespace,
+} from "../mongo/index.ts";
 import { compileNamespaceRules } from "../mongo/namespace-filter.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import type { BackupOptions } from "../types.ts";
@@ -728,6 +733,8 @@ class CaptureRun implements ChangeCapture {
         if (attempt > 1) this.#extendEnd(at);
         return reply;
       } catch (error) {
+        // Atlas Free/Flex may refuse reads at a cluster time: say so clearly.
+        if (isAtlasRefusal(error)) throw destinationRefusedByAtlas(ns, error);
         if (!isCatalogChangedUnderSnapshot(error)) throw error;
         if (attempt >= DESTINATION_READ_ATTEMPTS) {
           throw destinationUnreadable(ns, renamedAt, attempt, error);
@@ -859,6 +866,26 @@ function destinationUnreadable(
       cause,
       hint: 'The collection was renamed or replaced (e.g. by $out) again and again during the backup. Run the backup again; on sharded clusters avoid $out and renameCollection into backed-up collections during converge backups, or use consistency "none".',
       details: { serverCode: cause.code, renamedAt, attempts },
+    },
+  );
+}
+
+/**
+ * An Atlas tier refused the snapshot read of a rename's destination. Converge needs it
+ * only for a rename (or `$out`) into a backed-up collection during the backup, so the
+ * backup fails with what to do instead of the generic Atlas refusal.
+ */
+function destinationRefusedByAtlas(
+  ns: { readonly db: string; readonly coll: string },
+  cause: MongoServerError,
+): MongoShieldError {
+  return new MongoShieldError(
+    "MS_UNSUPPORTED_TOPOLOGY",
+    `This Atlas cluster tier refused the snapshot read of ${ns.db}.${ns.coll} at the time of its rename, which consistency "converge" needs to record a rename (or $out) into a backed-up collection: ${cause.message}`,
+    {
+      cause,
+      hint: 'Run the backup again when no $out or renameCollection targets the backed-up collections, or use consistency "none" for this job.',
+      details: { serverCode: cause.code },
     },
   );
 }

@@ -27,6 +27,23 @@ const BACKUP: NonNullable<RunReport["backup"]> = {
 };
 
 describe("summarizeReport", () => {
+  it("ends with the first warning when the backup has some", () => {
+    const warned = summarizeReport({
+      ...BASE,
+      backup: {
+        ...BACKUP,
+        consistency: "none",
+        warnings: ['Consistency "auto" used "none": no change stream.', "Another one."],
+      },
+    });
+    expect(warned).toBe(
+      'Backup 2026-10-20T03-00-00Z_aaaaaa succeeded: 3 namespaces, 12,345 documents. Warning: Consistency "auto" used "none": no change stream. (+1 more)',
+    );
+    expect(summarizeReport({ ...BASE, backup: { ...BACKUP, warnings: [] } })).not.toContain(
+      "Warning",
+    );
+  });
+
   it("names the parent and the changes of an incremental backup", () => {
     expect(
       summarizeReport({

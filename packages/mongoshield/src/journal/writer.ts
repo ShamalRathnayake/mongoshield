@@ -27,7 +27,12 @@
  * reaches the last commit) is a GAP: it is recorded in `journal/gaps/`, alerted, and
  * either a new base backup is taken while the journal continues from "now"
  * (`onGap: "backup"`) or the writer stops (`onGap: "fail"`). Missing privileges, bad
- * settings or a lost lease stop the writer.
+ * settings, a server that cannot open the stream or a lost lease stop the writer.
+ *
+ * The deployment. Before taking the lease the writer describes the deployment once: a
+ * standalone server or MongoDB before 6.0 (no `showExpandedEvents`, so no DDL events)
+ * is refused with `MS_UNSUPPORTED_TOPOLOGY`, and on Atlas Free/Flex the stream's
+ * database filter is written with regexes only, the one form those tiers accept.
  */
 
 import { randomBytes } from "node:crypto";
@@ -37,6 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { MongoClient } from "mongodb";
 import { createCompressor, defaultCompression } from "../compression/index.ts";
 import { createCoalescer } from "../engine/backup-coalesce.ts";
+import { toBackupError } from "../engine/backup-errors.ts";
 import { writeStoredFile } from "../engine/backup-write.ts";
 import {
   compareClusterTimes,
@@ -46,6 +52,7 @@ import {
 import { type ErrorCode, isMongoShieldError, MongoShieldError } from "../errors.ts";
 import type { ClusterTime, Compression } from "../format/manifest.ts";
 import { type Logger, silentLogger } from "../logger.ts";
+import { type DeploymentInfo, describeDeployment, isAtlasSharedTier } from "../mongo/index.ts";
 import { type NotifyRunOptions, notifyRun, pingHeartbeat } from "../notify/index.ts";
 import { createLockOwner, type Lease } from "../schedule/lock.ts";
 import { storageLock } from "../schedule/lock-storage.ts";
@@ -207,7 +214,7 @@ export interface JournalHandle {
  *   lease (unless `waitForLease`), storage errors while reading the journal state.
  */
 export async function startJournal(options: JournalOptions): Promise<JournalHandle> {
-  const settings = resolveSettings(options);
+  const settings = await adaptToDeployment(resolveSettings(options), options);
   const lease = await acquireLease(settings);
   try {
     const writer = new JournalWriter(settings, lease);
@@ -281,6 +288,58 @@ function resolveSettings(options: JournalOptions): WriterSettings {
     retryDelayMs,
     onSegment: options.onSegment,
   };
+}
+
+/** `showExpandedEvents` (DDL events: create, createIndexes, …) arrived in MongoDB 6.0. */
+const JOURNAL_MIN_MAJOR = 6;
+
+/**
+ * Describes the deployment and adapts the settings to it (see the file header).
+ *
+ * @throws MongoShieldError `MS_UNSUPPORTED_TOPOLOGY` for a standalone server or MongoDB
+ *   before 6.0, connection errors while describing the deployment.
+ */
+async function adaptToDeployment(
+  settings: WriterSettings,
+  options: JournalOptions,
+): Promise<WriterSettings> {
+  const deployment = await describeDeployment(settings.client).catch((error: unknown) => {
+    throw toBackupError(error);
+  });
+  assertJournalSupported(deployment);
+  if (!isAtlasSharedTier(deployment)) return settings;
+  settings.logger.info(
+    "Atlas Free/Flex tier detected: the journal's change stream filters databases with regular expressions, the only form the tier accepts.",
+  );
+  return {
+    ...settings,
+    scope: createJournalScope({
+      include: options.include,
+      exclude: options.exclude,
+      regexDatabaseFilter: true,
+    }),
+  };
+}
+
+/** Refuses deployments whose change streams cannot carry what the journal records. */
+function assertJournalSupported(deployment: DeploymentInfo): void {
+  if (!deployment.supportsChangeStreams) {
+    throw new MongoShieldError(
+      "MS_UNSUPPORTED_TOPOLOGY",
+      `The change journal needs a change stream, which a ${deployment.topology} deployment does not have.`,
+      { hint: "Run the journal against a replica set or sharded cluster (MongoDB 6.0+)." },
+    );
+  }
+  const major = Number.parseInt(deployment.serverVersion.split(".")[0] ?? "", 10);
+  if (Number.isNaN(major) || major < JOURNAL_MIN_MAJOR) {
+    throw new MongoShieldError(
+      "MS_UNSUPPORTED_TOPOLOGY",
+      `The change journal needs MongoDB 6.0 or later, but the deployment runs ${deployment.serverVersion}: before 6.0 change streams do not report collection and index changes (showExpandedEvents), so point-in-time restores would miss them.`,
+      {
+        hint: "Upgrade the deployment to MongoDB 6.0+, or take scheduled (or incremental) backups without the journal.",
+      },
+    );
+  }
 }
 
 function assertPositive(name: string, value: number): void {

@@ -95,14 +95,16 @@ export function uriToSend(understood: Understood, password: string): string | un
 /**
  * The connection string to save after a successful check: the one checked, or, when the
  * console had to reach a `localhost` database through the host machine (it runs in
- * Docker), the same string pointing at host.docker.internal.
+ * Docker or Podman), the same string pointing at the host name that worked
+ * (host.docker.internal, or host.containers.internal under Podman).
  */
 export function savedUri(result: {
   readonly uri: string;
   readonly check: ConnectionCheckResult;
 }): string {
-  if (result.check.reachedThrough === undefined) return result.uri;
-  return throughContainerHost(result.uri) ?? result.uri;
+  const reached = result.check.reachedThrough;
+  if (reached === undefined) return result.uri;
+  return throughContainerHost(result.uri, reached.to) ?? result.uri;
 }
 
 /** The steps of the welcome flow, in order (see the file header). */
@@ -129,7 +131,7 @@ export function connectionNameSuggestions(
 export function WelcomePage() {
   const client = useApi();
   // In Docker, quick fill offers host.docker.internal rather than localhost.
-  const inContainer = useSession().session.inContainer === true;
+  const { container } = useSession().session;
   const [text, setText] = useState("");
   const [password, setPassword] = useState("");
   const [checking, setChecking] = useState(false);
@@ -271,7 +273,7 @@ export function WelcomePage() {
           <FillSuggestions
             field="Connection string"
             lead="Quick fill"
-            items={connectionStringSuggestions(inContainer)}
+            items={connectionStringSuggestions(container)}
             current={text}
             onPick={(value) => {
               setText(value);
@@ -282,7 +284,7 @@ export function WelcomePage() {
       />
       <LocalhostHint
         uri={text}
-        inContainer={inContainer}
+        container={container}
         onUse={(value) => {
           setText(value);
           setResult(undefined);

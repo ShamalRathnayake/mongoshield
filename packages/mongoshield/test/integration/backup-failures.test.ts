@@ -6,7 +6,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runBackup } from "../../src/engine/backup.ts";
 import { isMongoShieldError, MongoShieldError } from "../../src/errors.ts";
 import type { Logger } from "../../src/logger.ts";
@@ -221,6 +221,48 @@ describe("runBackup failing mid-run", () => {
     expect(inner.keys()).toEqual([]);
     expect(warnings).toEqual([]);
     expect(await openCursors(`${database}.c_big`)).toBe(0);
+  });
+
+  it("ends the snapshot session when marking the backup as in use fails", async () => {
+    const inner = memoryStorage();
+    const storage: StorageAdapter = {
+      ...inner,
+      async put(key, body, options) {
+        // The use lease (annotations/<id>/leases/…), failing with an error that is not
+        // a storage refusal (those only cost the lease, with a warning).
+        if (key.includes("/leases/")) {
+          throw new MongoShieldError("MS_TIMEOUT", "Lease outage: the request timed out.");
+        }
+        return inner.put(key, body, options);
+      },
+    };
+    // Watch every snapshot session the run starts, to see that each one is ended.
+    const mongo = client();
+    const realStartSession = mongo.startSession.bind(mongo);
+    const ended: boolean[] = [];
+    const startSession = vi.spyOn(mongo, "startSession").mockImplementation((options) => {
+      const session = realStartSession(options);
+      if (options?.snapshot === true) {
+        const index = ended.push(false) - 1;
+        const realEnd = session.endSession.bind(session);
+        session.endSession = async (endOptions) => {
+          ended[index] = true;
+          await realEnd(endOptions);
+        };
+      }
+      return session;
+    });
+    try {
+      const error = await failure(
+        runBackup(backupContext(mongo, storage), { ...own, consistency: "snapshot" }),
+      );
+      expect(error.code).toBe("MS_TIMEOUT");
+      expect(error.message).toContain("Lease outage");
+    } finally {
+      startSession.mockRestore();
+    }
+    expect(ended).toEqual([true]);
+    expect(inner.keys()).toEqual([]);
   });
 
   it("leaves no files or temp files behind in file storage when aborted", async () => {

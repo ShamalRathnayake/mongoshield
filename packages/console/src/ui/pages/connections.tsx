@@ -326,7 +326,7 @@ export function ConnectionDialog(props: {
 }) {
   const client = useApi();
   const { session } = useSession();
-  const inContainer = session.inContainer === true;
+  const { container } = session;
   const existing = props.connection;
   const [name, setName] = useState(existing?.name ?? "");
   // The connection string as shown: without its password (that is in `password`).
@@ -460,13 +460,13 @@ export function ConnectionDialog(props: {
             <FillSuggestions
               field="Connection string"
               lead="Quick fill"
-              items={connectionStringSuggestions(inContainer)}
+              items={connectionStringSuggestions(container)}
               current={uri}
               onPick={takeIn}
             />
           }
         />
-        <LocalhostHint uri={uri} inContainer={inContainer} onUse={takeIn} />
+        <LocalhostHint uri={uri} container={container} onUse={takeIn} />
         {needsPassword ? (
           <TextField
             label={`Password for ${info?.username ?? "the database user"}`}

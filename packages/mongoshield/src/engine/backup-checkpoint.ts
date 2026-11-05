@@ -115,6 +115,8 @@ export const CheckpointSchema = z.object({
     topology: z.enum(["standalone", "replicaSet", "sharded", "unknown"]),
     serverVersion: z.string(),
     clusterId: z.string().optional(),
+    /** See the manifest's `source.instanceId`; absent in checkpoints of older writers. */
+    instanceId: z.string().optional(),
   }),
   encryption: z
     .object({

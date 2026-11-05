@@ -9,8 +9,9 @@
 #       recipients: ${{ vars.BACKUP_PUBLIC_KEY }}
 #   - run: echo "Backed up ${{ steps.backup.outputs.backup-id }}"
 #
-# It is a composite action: a few shell steps that run `npx mongoshield@<version>`.
-# The logic lives in run.sh next to this file; see README.md for every input.
+# It is a composite action: a few shell steps that install a pinned mongoshield (with
+# `npm install --ignore-scripts`, exact versions) and run it. The logic lives in run.sh
+# next to this file; see README.md for every input.
 
 name: MongoShield
 description: Back up, verify and restore MongoDB with MongoShield. No mongodump required.
@@ -49,13 +50,13 @@ inputs:
     required: false
     default: ""
   packages:
-    description: Extra npm packages to install next to mongoshield, space-separated. Cloud SDKs for s3://, gs://, az:// and sftp:// storage are added automatically.
+    description: Extra npm packages to install next to mongoshield, space-separated (e.g. `@aws-sdk/client-kms@3` for AWS KMS). Cloud SDKs for s3://, gs://, az:// and sftp:// storage, set in the `storage` input, MONGOSHIELD_STORAGE or the config file, are added automatically.
     required: false
     default: ""
   version:
-    description: The mongoshield npm version or dist-tag to run.
+    description: "The mongoshield npm version or dist-tag to run. Empty (default): the release this Action ref belongs to, so pinning the Action to a release tag or commit SHA pins the CLI too. `latest` runs the newest stable release."
     required: false
-    default: latest
+    default: ""
   node-version:
     description: Node.js version to set up (MongoShield needs 22.12 or newer). Set to "" to use the runner's Node.js.
     required: false
@@ -78,9 +79,16 @@ runs:
   steps:
     - name: Set up Node.js
       if: inputs.node-version != ''
-      uses: actions/setup-node@v5 # v5: current major
+      # Pinned to a full commit SHA: a moved tag cannot change what runs next to your
+      # database credentials.
+      uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
       with:
         node-version: ${{ inputs.node-version }}
+        # setup-node v5 caches the caller's package manager when their package.json has a
+        # "packageManager" field, and fails if that tool (pnpm, yarn) isn't installed yet.
+        # The Action installs mongoshield with npm into its own temp folder, so it needs
+        # no cache from the caller's project: off, or any pnpm/yarn repo would break.
+        package-manager-cache: false
 
     # Inputs are passed as environment variables, never pasted into the script text:
     # `${{ inputs.x }}` inside `run:` would let a crafted value inject shell commands.

@@ -23,6 +23,7 @@
 
 import type {
   ConnectionProblem,
+  ContainerEnvironment,
   JobSummary,
   PlanView,
   QuickBackupResult,
@@ -31,12 +32,12 @@ import type {
 } from "../../shared/api.ts";
 import {
   analyzeConnectionString,
-  CONTAINER_HOST,
   ConnectionStringError,
   cleanPastedConnectionString,
   encodeCredentials,
   throughContainerHost,
 } from "../../shared/connection-string.ts";
+import { localhostIsContainer, usableHostAlias } from "../../shared/container.ts";
 import type { RequestOf, ResponseOf, RouteKey } from "../api.ts";
 import type { MockConnection, MockData } from "./fixtures.ts";
 
@@ -85,10 +86,11 @@ export interface OnboardingMockContext {
   /** Runs a plan like `POST /api/plans/:id/run`. */
   readonly runPlan: (planId: string) => JobSummary;
   /**
-   * Behave like a console in a container: a `localhost` string is "refused" and then
-   * reached through host.docker.internal (`reachedThrough`), as the real server does.
+   * Where the mock console "runs": in Docker or Podman with a resolving host alias, a
+   * `localhost` string is "refused" and then reached through that alias
+   * (`reachedThrough`), as the real server does.
    */
-  readonly inContainer: boolean;
+  readonly container: ContainerEnvironment;
 }
 
 /** A recognisable fake age key pair for mock plans (the real server generates one). */
@@ -129,9 +131,12 @@ export function createOnboardingMock(context: OnboardingMockContext): {
       }
       const limited = /\/\/reader[:@]/.test(uri);
       // In a container, localhost is "refused" and the host machine answers instead.
+      const hostAlias = localhostIsContainer(context.container.kind)
+        ? usableHostAlias(context.container)
+        : undefined;
       const reachedThrough =
-        context.inContainer && throughContainerHost(uri) !== undefined
-          ? { from: info.hosts.join(", "), to: CONTAINER_HOST }
+        hostAlias !== undefined && throughContainerHost(uri, hostAlias) !== undefined
+          ? { from: info.hosts.join(", "), to: hostAlias }
           : undefined;
       return {
         ok: true,

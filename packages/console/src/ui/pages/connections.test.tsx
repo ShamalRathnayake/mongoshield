@@ -22,7 +22,13 @@ describe("connections", () => {
       within(dialog).getByLabelText("Connection string"),
       "mongodb://reader:t0p-secret@analytics:27017",
     );
-    await user.click(within(dialog).getByLabelText("This is a production deployment"));
+    // Leaving the field takes the string in. A single-label name (a Compose or
+    // Kubernetes service) counts as production by default.
+    await user.tab();
+    expect(
+      (within(dialog).getByLabelText("This is a production deployment") as HTMLInputElement)
+        .checked,
+    ).toBe(true);
     await user.click(within(dialog).getByRole("button", { name: "Add and test" }));
 
     const report = await screen.findByRole("dialog", {

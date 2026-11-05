@@ -2,7 +2,9 @@ The MongoShield operator is installed in namespace {{ .Release.Namespace }}.
 {{- if .Values.watchNamespaces }}
 It manages these namespaces: {{ join ", " .Values.watchNamespaces }}.
 {{- else }}
-It manages every namespace.
+It manages every namespace. Its ClusterRole then lets it list the Pods of every
+namespace (kube-system included), read their logs, and create Jobs that mount any
+Secret anywhere. To confine it, set watchNamespaces (e.g. --set 'watchNamespaces={prod,staging}').
 {{- end }}
 
 1. Put the connection string in a Secret next to where the plan will live:
@@ -30,3 +32,6 @@ It manages every namespace.
    kubectl describe msplan nightly
 
 Jobs run {{ include "mongoshield-operator.jobImage" . }}.
+{{- if .Values.metrics.auth.enabled }}
+/metrics requires the bearer token in Secret {{ include "mongoshield-operator.metricsSecretName" . }} (key {{ .Values.metrics.auth.secretKey }}).
+{{- end }}

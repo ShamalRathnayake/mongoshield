@@ -25,6 +25,7 @@
 
 import { createHash } from "node:crypto";
 import { MongoShieldError } from "../errors.ts";
+import { escapeWindowsReservedName } from "../format/layout.ts";
 
 /** Longest stem mongodump writes; longer escaped names are shortened (see the file header). */
 export const MAX_STEM_BYTES = 238;
@@ -84,9 +85,16 @@ export function queryUnescape(escaped: string): string | undefined {
   }
 }
 
-/** The file-name stem mongodump uses for a collection (escaped, shortened if needed). */
+/**
+ * The file-name stem mongodump uses for a collection (escaped, shortened if needed).
+ *
+ * One deliberate difference: a Windows device name (`con`, `nul`, `aux`, `com1`,
+ * …, also as `con.x`) gets its last character escaped (`co%6E`), because
+ * `con.bson` cannot be created on Windows. mongorestore unescapes stems, so the
+ * collection is still restored as `con`.
+ */
 export function collectionFileStem(collection: string): string {
-  const escaped = queryEscape(collection);
+  const escaped = escapeWindowsReservedName(queryEscape(collection));
   if (escaped.length <= MAX_STEM_BYTES) return escaped;
   // SHA-1 is not used for security here, only to keep shortened names distinct;
   // it must be SHA-1 to produce the same names as mongodump.

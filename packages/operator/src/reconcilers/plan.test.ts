@@ -190,6 +190,40 @@ describe("reconcilePlan", () => {
     expect(result).toBeUndefined();
   });
 
+  it("refuses an image outside the allowed repositories as InvalidSpec, without creating a CronJob", async () => {
+    const { context, client } = testContext();
+    await apply(
+      client,
+      RESOURCES.plans,
+      makePlan("nightly", { job: { image: "attacker.example/steal-secrets:1" } }),
+    );
+
+    await reconcilePlan(context, ref);
+
+    const ready = findCondition(storedPlan(client).status?.conditions, "Ready");
+    expect(ready).toMatchObject({ status: "False", reason: "InvalidSpec" });
+    expect(ready?.message).toContain("spec.job.image");
+    expect(client.object(RESOURCES.cronJobs, NAMESPACE, "nightly")).toBeUndefined();
+  });
+
+  it("accepts another tag of the default image's repository", async () => {
+    const { context, client } = testContext();
+    await apply(
+      client,
+      RESOURCES.plans,
+      makePlan("nightly", { job: { image: "ghcr.io/shamalrathnayake/mongoshield:2.0.1" } }),
+    );
+
+    await reconcilePlan(context, ref);
+
+    const ready = findCondition(storedPlan(client).status?.conditions, "Ready");
+    expect(ready).toMatchObject({ status: "True" });
+    const cronJob = client.object<CronJob>(RESOURCES.cronJobs, NAMESPACE, "nightly");
+    expect(cronJob?.spec?.jobTemplate.spec?.template.spec?.containers[0]?.image).toBe(
+      "ghcr.io/shamalrathnayake/mongoshield:2.0.1",
+    );
+  });
+
   it("reports a bad cron expression or time zone as InvalidSpec", async () => {
     const { context, client } = testContext();
     await apply(

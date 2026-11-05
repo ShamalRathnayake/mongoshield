@@ -13,6 +13,8 @@
 
 import { z } from "zod";
 import { isMongoShieldError, MongoShieldError } from "../errors.ts";
+import { type Logger, silentLogger } from "../logger.ts";
+import { isConditionalWritesUnsupported } from "../storage/conditional-writes.ts";
 import type { StorageAdapter } from "../storage/types.ts";
 import { readStreamToBuffer } from "../util/streams.ts";
 import { manifestKey } from "./layout.ts";
@@ -115,18 +117,42 @@ export async function readManifest(
  *
  * `retainUntil` locks the manifest like the backup's data files (immutable
  * backups); pass the same date that is recorded as `manifest.immutableUntil`.
+ *
+ * If the store claims conditional writes but turns out not to support them (an
+ * S3-compatible service answering 501, see src/storage/conditional-writes.ts), the
+ * write is retried once without the condition, with a warning on `logger`. Failing
+ * here would throw away a backup whose data is already uploaded, and the condition
+ * only guards against a second backup with the same (random) id.
  */
 export async function writeManifest(
   storage: StorageAdapter,
   manifest: Manifest,
-  options: { readonly signal?: AbortSignal; readonly retainUntil?: Date } = {},
+  options: {
+    readonly signal?: AbortSignal;
+    readonly retainUntil?: Date;
+    readonly logger?: Logger;
+  } = {},
 ): Promise<void> {
   const body = Buffer.from(serializeManifest(manifest), "utf8");
-  await storage.put(manifestKey(manifest.id), body, {
+  const key = manifestKey(manifest.id);
+  const putOptions = {
     contentType: "application/json",
     sizeHint: body.length,
-    ...(storage.capabilities.conditionalWrites ? { ifNoneMatch: "*" as const } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.retainUntil ? { retainUntil: options.retainUntil } : {}),
-  });
+  };
+  if (!storage.capabilities.conditionalWrites) {
+    await storage.put(key, body, putOptions);
+    return;
+  }
+  try {
+    await storage.put(key, body, { ...putOptions, ifNoneMatch: "*" });
+  } catch (error) {
+    if (!isConditionalWritesUnsupported(error)) throw error;
+    (options.logger ?? silentLogger).warn(
+      "The storage service does not support conditional writes; writing the manifest without one",
+      { location: `${storage.location}${key}` },
+    );
+    await storage.put(key, body, putOptions);
+  }
 }

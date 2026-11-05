@@ -17,6 +17,7 @@ import {
   seed,
   setupAdmin,
   startConsole,
+  TEST_COMPRESSION,
   type TestClient,
   type TestConsole,
   uniqueDb,
@@ -205,7 +206,8 @@ describe("Back up now", () => {
       name: "Back up local test",
       origin: "quick",
       include: [`${db}.*`],
-      compression: "zstd",
+      // The library's default: zstd, or gzip on a Node.js without zstd (22.12 to 22.14).
+      compression: TEST_COMPRESSION,
       consistency: "auto",
       verify: "fast",
       encryption: { kind: "managed", recoveryKeySaved: false },
@@ -426,10 +428,16 @@ describe("localhost from a console in a container", () => {
         : undefined;
 
   beforeAll(async () => {
+    // Docker Desktop, where host.docker.internal resolves.
+    const container = {
+      kind: "docker-desktop",
+      hostAlias: "host.docker.internal",
+      hostAliasResolves: true,
+    } as const;
     docker = await startConsole({
       app: {
-        onboarding: { inContainer: true, containerAddress: toHost },
-        connections: { inspect: { inContainer: true, containerAddress: toHost } },
+        onboarding: { container, containerAddress: toHost },
+        connections: { inspect: { container, containerAddress: toHost } },
       },
     });
     dockerAdmin = await setupAdmin(docker);
@@ -479,5 +487,47 @@ describe("localhost from a console in a container", () => {
     expect(check.body.ok).toBe(false);
     expect(check.body.problem.kind).toBe("connection-refused");
     expect(check.body.reachedThrough).toBeUndefined();
+  });
+});
+
+describe("localhost from a console on Linux Docker Engine without --add-host", () => {
+  /** host.docker.internal does not resolve there, so the console must not try it. */
+  let engine: TestConsole;
+  let engineAdmin: TestClient;
+  const tried: string[] = [];
+
+  beforeAll(async () => {
+    const container = {
+      kind: "docker-engine",
+      hostAlias: "host.docker.internal",
+      hostAliasResolves: false,
+    } as const;
+    const record = (uri: string) => {
+      tried.push(uri);
+      return mongoUri();
+    };
+    engine = await startConsole({
+      app: {
+        onboarding: { container, containerAddress: record },
+        connections: { inspect: { container, containerAddress: record } },
+      },
+    });
+    engineAdmin = await setupAdmin(engine);
+  });
+
+  afterAll(async () => {
+    await engine.close();
+    await removeDataDir(engine.dataDir);
+  });
+
+  it("does not retry on host.docker.internal and explains --add-host instead", async () => {
+    const check = await engineAdmin.request("POST", "/api/connections/check", {
+      uri: "mongodb://localhost:1/?serverSelectionTimeoutMS=2000",
+    });
+    expect(check.body.ok).toBe(false);
+    expect(check.body.reachedThrough).toBeUndefined();
+    expect(tried).toEqual([]);
+    expect(check.body.problem.kind).toBe("connection-refused");
+    expect(check.body.problem.fix).toContain("--add-host=host.docker.internal:host-gateway");
   });
 });

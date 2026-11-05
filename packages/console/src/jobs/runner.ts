@@ -18,12 +18,19 @@
  *   is not saved: it is only interesting while you watch.
  * - On startup, jobs that were queued or running when the process stopped are
  *   marked failed (`CONSOLE_INTERRUPTED`): their work was not finished.
+ * - Restores also save which target namespaces they have started but not finished
+ *   (`unfinishedNamespaces`), so after a crash the interrupted job still says which
+ *   collections may be dropped or half-loaded. Saves are coalesced (one at a time), so a
+ *   restore of thousands of small collections does not rewrite console.json for each one.
+ * - Error messages and log lines are scrubbed of the job's own secrets and of every
+ *   other secret the console knows (`knownSecrets`).
  */
 
 import { isMongoShieldError, MongoShieldError, type ProgressEvent } from "mongoshield";
 import { describeError } from "../server/errors.ts";
 import type { ApiError, JobEvent, JobKind, JobSummary } from "../shared/api.ts";
 import { randomId } from "../state/crypto.ts";
+import { scrubText } from "../state/redact.ts";
 import type { StateStore } from "../state/store.ts";
 import { MAX_JOB_HISTORY } from "../state/types.ts";
 
@@ -68,6 +75,8 @@ export interface JobRunnerOptions {
   readonly progressIntervalMs?: number;
   /** Called after a job reached a final status (audit logging, metrics). */
   readonly onFinished?: (job: JobSummary) => void;
+  /** Every secret the console knows, scrubbed from job errors and log lines too. */
+  readonly knownSecrets?: () => readonly string[];
 }
 
 /** Log lines kept per job for subscribers that connect late. */
@@ -81,6 +90,35 @@ const KEPT_NAMESPACE_EVENTS = 1000;
  */
 const KEPT_FINISHED_REPLAYS = 50;
 const DEFAULT_PROGRESS_INTERVAL_MS = 250;
+
+/** Namespaces named at most in an interruption message; the job keeps the full list. */
+const MAX_NAMED_NAMESPACES = 20;
+
+/**
+ * Why a job left queued or running by a previous process failed. For a restore that
+ * saved unfinished namespaces, the message names them: they may be dropped or
+ * half-loaded, and restoring them again with "drop" replaces whatever is left.
+ */
+function interruptedError(job: JobSummary): ApiError["error"] {
+  const unfinished = job.unfinishedNamespaces ?? [];
+  if (unfinished.length === 0) {
+    return {
+      code: "CONSOLE_INTERRUPTED",
+      message: "The console stopped before this job finished.",
+      hint: "Start the job again.",
+    };
+  }
+  const named = unfinished.slice(0, MAX_NAMED_NAMESPACES).join(", ");
+  const more =
+    unfinished.length > MAX_NAMED_NAMESPACES
+      ? ` and ${unfinished.length - MAX_NAMED_NAMESPACES} more`
+      : "";
+  return {
+    code: "CONSOLE_INTERRUPTED",
+    message: `The console stopped before this restore finished. These namespaces may be dropped or only partly restored: ${named}${more}.`,
+    hint: 'Restore them again with the "drop" mode to replace what is left of them.',
+  };
+}
 
 /** In-memory state of a job that has not finished yet. */
 interface ActiveJob {
@@ -102,6 +140,13 @@ interface ActiveJob {
   cancelRequested: boolean;
   readonly done: Promise<JobSummary>;
   resolveDone: (job: JobSummary) => void;
+  /** Restores: target namespaces started but not finished (saved as `unfinishedNamespaces`). */
+  readonly unfinished: Set<string>;
+  /** The save of `unfinished` in flight, if any, and whether another one is due after it. */
+  saving: Promise<void> | undefined;
+  saveAgain: boolean;
+  /** The job's secrets plus every known secret, gathered when the job starts. */
+  secrets: readonly string[];
 }
 
 /** Runs jobs; see the file header. */
@@ -110,6 +155,7 @@ export class JobRunner {
   readonly #now: () => Date;
   readonly #progressIntervalMs: number;
   readonly #onFinished: ((job: JobSummary) => void) | undefined;
+  readonly #knownSecrets: () => readonly string[];
   readonly #active = new Map<string, ActiveJob>();
   /** Lanes with their queued job ids, first one running. */
   readonly #lanes = new Map<string, string[]>();
@@ -129,6 +175,7 @@ export class JobRunner {
     this.#now = options.now ?? (() => new Date());
     this.#progressIntervalMs = options.progressIntervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS;
     this.#onFinished = options.onFinished;
+    this.#knownSecrets = options.knownSecrets ?? (() => []);
   }
 
   /** Marks jobs left queued or running by a previous process as failed. */
@@ -141,16 +188,7 @@ export class JobRunner {
     await this.#store.update((state) => {
       state.jobs = state.jobs.map((job) =>
         job.status === "queued" || job.status === "running"
-          ? {
-              ...job,
-              status: "failed",
-              finishedAt: at,
-              error: {
-                code: "CONSOLE_INTERRUPTED",
-                message: "The console stopped before this job finished.",
-                hint: "Start the job again.",
-              },
-            }
+          ? { ...job, status: "failed", finishedAt: at, error: interruptedError(job) }
           : job,
       );
     });
@@ -190,6 +228,10 @@ export class JobRunner {
       cancelRequested: false,
       done,
       resolveDone,
+      unfinished: new Set(),
+      saving: undefined,
+      saveAgain: false,
+      secrets: spec.secrets ?? [],
     };
     this.#active.set(summary.id, job);
     await this.#save(summary);
@@ -308,12 +350,13 @@ export class JobRunner {
     job.summary = { ...job.summary, status: "running", startedAt: this.#now().toISOString() };
     this.#emit(job, { type: "status", job: job.summary });
     await this.#save(job.summary).catch(() => undefined);
+    job.secrets = [...(job.spec.secrets ?? []), ...this.#gatherKnownSecrets()];
 
     const context: JobContext = {
       signal: job.controller.signal,
       progress: (event) => this.#onProgress(job, event),
       log: (level, message) => {
-        const line: JobEvent = { type: "log", level, message };
+        const line: JobEvent = { type: "log", level, message: scrubText(message, job.secrets) };
         job.logs.push(line);
         if (job.logs.length > KEPT_LOG_LINES) job.logs.shift();
         this.#emit(job, line);
@@ -341,7 +384,7 @@ export class JobRunner {
       } else {
         await this.#finish(job, {
           status: "failed",
-          error: describeError(error, job.spec.secrets ?? []),
+          error: describeError(error, job.secrets),
         });
       }
     }
@@ -358,11 +401,17 @@ export class JobRunner {
     },
   ): Promise<void> {
     this.#flushProgress(job);
+    // A finished restore has no unfinished namespaces; a failed or cancelled one keeps
+    // the list, because those namespaces may be dropped or half-loaded.
+    const { unfinishedNamespaces: _unfinished, ...withoutUnfinished } = job.summary;
     job.summary = {
-      ...job.summary,
+      ...(result.status === "succeeded" ? withoutUnfinished : job.summary),
       ...result,
       finishedAt: this.#now().toISOString(),
     };
+    // Let a coalesced save in flight land first, so it cannot overwrite the final status.
+    await job.saving;
+    job.saveAgain = false;
     // Save before leaving #active: until the history holds the final status,
     // get() and list() must answer from memory, or they would briefly report
     // the saved "running" entry of a job that has already finished.
@@ -396,6 +445,9 @@ export class JobRunner {
 
   /** Turns library progress into throttled `progress` events. */
   #onProgress(job: ActiveJob, event: ProgressEvent): void {
+    if (event.type === "namespace:start" || event.type === "namespace:done") {
+      this.#trackUnfinished(job, event.ns, event.type === "namespace:start");
+    }
     if (event.type === "namespace:start") {
       job.namespace = event.ns;
       job.namespaceDocuments = 0;
@@ -432,6 +484,44 @@ export class JobRunner {
       this.#flushProgress(job);
     } else if (job.progressTimer === undefined) {
       job.progressTimer = setTimeout(() => this.#flushProgress(job), wait);
+    }
+  }
+
+  /**
+   * Restores: remembers a target namespace as started (or no longer, once done) and
+   * saves the list with the job, so it survives a crash (see the file header).
+   */
+  #trackUnfinished(job: ActiveJob, ns: string, started: boolean): void {
+    if (job.spec.kind !== "restore" || !this.#active.has(job.summary.id)) return;
+    if (started) job.unfinished.add(ns);
+    else job.unfinished.delete(ns);
+    const { unfinishedNamespaces: _previous, ...rest } = job.summary;
+    job.summary =
+      job.unfinished.size === 0 ? rest : { ...rest, unfinishedNamespaces: [...job.unfinished] };
+    this.#saveCoalesced(job);
+  }
+
+  /** Saves the job's summary, at most one save at a time; changes meanwhile are saved after. */
+  #saveCoalesced(job: ActiveJob): void {
+    if (job.saving !== undefined) {
+      job.saveAgain = true;
+      return;
+    }
+    job.saving = (async () => {
+      do {
+        job.saveAgain = false;
+        await this.#save(job.summary).catch(() => undefined);
+      } while (job.saveAgain && this.#active.has(job.summary.id));
+      job.saving = undefined;
+    })();
+  }
+
+  /** {@link JobRunnerOptions.knownSecrets}, or none when reading them fails. */
+  #gatherKnownSecrets(): readonly string[] {
+    try {
+      return this.#knownSecrets();
+    } catch {
+      return [];
     }
   }
 

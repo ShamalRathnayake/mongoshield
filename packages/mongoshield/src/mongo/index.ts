@@ -22,10 +22,17 @@ export {
 } from "./connection.ts";
 export {
   type DeploymentInfo,
+  deploymentIdentityWarning,
   describeDeployment,
+  sameDeployment,
   type Topology,
   topologyFromHello,
 } from "./deployment.ts";
+export {
+  COMPATIBLE_ENGINE_NAMES,
+  type CompatibleEngine,
+  detectCompatibleEngine,
+} from "./engine.ts";
 export {
   type CollectionSpec,
   type CollectionType,

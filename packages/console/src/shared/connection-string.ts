@@ -46,7 +46,11 @@ export interface ConnectionStringInfo {
   readonly replicaSet?: string;
   /** Any host is an Atlas host (`*.mongodb.net`, `*.mongodbgov.net`). */
   readonly atlas: boolean;
-  /** Every host is this machine or a development host (localhost, docker names, …). */
+  /**
+   * Every host is clearly this machine: a loopback address (`localhost`, `*.localhost`,
+   * `127.x.x.x`, `::1`) or the container runtime's name for the machine the console's
+   * container runs on (`host.docker.internal`, `host.containers.internal`).
+   */
   readonly local: boolean;
   /** A short, readable name for the connection (Atlas cluster, replica set or host). */
   readonly suggestedName: string;
@@ -177,8 +181,17 @@ export function withPassword(uri: string, password: string): string {
   return joinConnectionString({ ...parts, password: encodeURIComponent(password) });
 }
 
-/** The host name a container uses to reach the machine it runs on (Docker, OrbStack, Podman). */
+/** The host name a Docker container uses to reach the machine it runs on (Docker, OrbStack). */
 export const CONTAINER_HOST = "host.docker.internal";
+
+/** Podman's name for the machine a container runs on (Podman adds it to /etc/hosts). */
+export const PODMAN_CONTAINER_HOST = "host.containers.internal";
+
+/** True for the container runtimes' names for "the machine this container runs on". */
+export function isContainerHostAlias(host: string): boolean {
+  const name = host.toLowerCase();
+  return name === CONTAINER_HOST || name === PODMAN_CONTAINER_HOST;
+}
 
 /** Loopback names: this machine — but inside a container, the container itself. */
 function isLoopbackHost(host: string): boolean {
@@ -188,13 +201,23 @@ function isLoopbackHost(host: string): boolean {
 
 /**
  * The same connection string, reaching the machine the container runs on: every
- * loopback host (`localhost`, `127.x.x.x`, `::1`) becomes {@link CONTAINER_HOST}, ports
+ * loopback host (`localhost`, `127.x.x.x`, `::1`) becomes `hostAlias`
+ * ({@link CONTAINER_HOST} by default; {@link PODMAN_CONTAINER_HOST} under Podman), ports
  * and everything else kept. Undefined when there is nothing to rewrite: an SRV string,
  * a string that does not parse, or a host list with any host that is not loopback.
  *
- *   mongodb://u:p@localhost:27017/?tls=false → mongodb://u:p@host.docker.internal:27017/?tls=false
+ * When one host is left, `directConnection=true` is added (see
+ * {@link withDirectConnection}). Without it, a single-node replica set on the host
+ * answers with its member names, usually `localhost:27017`, and the driver then tries
+ * to reach those from inside the container and times out.
+ *
+ *   mongodb://u:p@localhost:27017/?tls=false
+ *     → mongodb://u:p@host.docker.internal:27017/?tls=false&directConnection=true
  */
-export function throughContainerHost(uri: string): string | undefined {
+export function throughContainerHost(
+  uri: string,
+  hostAlias: string = CONTAINER_HOST,
+): string | undefined {
   let parts: ConnectionStringParts;
   try {
     parts = splitConnectionString(uri);
@@ -207,10 +230,49 @@ export function throughContainerHost(uri: string): string | undefined {
     // `host`, `host:port`, or an IPv6 address in brackets with an optional port.
     const match = /^(\[[^\]]+\]|[^:]+)(:\d+)?$/.exec(entry.trim());
     if (match === null || !isLoopbackHost(match[1] ?? "")) return undefined;
-    rewritten.push(`${CONTAINER_HOST}${match[2] ?? ""}`);
+    rewritten.push(`${hostAlias}${match[2] ?? ""}`);
   }
   // `localhost:27017,127.0.0.1:27017` would become the same host twice: keep it once.
-  return joinConnectionString({ ...parts, hostList: [...new Set(rewritten)].join(",") });
+  const hosts = [...new Set(rewritten)];
+  const joined = joinConnectionString({ ...parts, hostList: hosts.join(",") });
+  return hosts.length === 1 ? withDirectConnection(joined) : joined;
+}
+
+/**
+ * Adds `directConnection=true` to a connection string with exactly one host, so the
+ * driver talks to that server only instead of discovering the replica set's members
+ * under names that may not work from here (a container, a tunnel). Left unchanged: SRV
+ * strings, several hosts, strings that already set `directConnection` (to anything:
+ * the user decided), and `loadBalanced` ones (the driver refuses the two together).
+ *
+ *   mongodb://host.docker.internal:27017      → mongodb://host.docker.internal:27017/?directConnection=true
+ *   mongodb://host.docker.internal:27017/app  → mongodb://host.docker.internal:27017/app?directConnection=true
+ *   mongodb://h:27017/?appName=x              → mongodb://h:27017/?appName=x&directConnection=true
+ */
+export function withDirectConnection(uri: string): string {
+  let parts: ConnectionStringParts;
+  try {
+    parts = splitConnectionString(uri);
+  } catch {
+    return uri;
+  }
+  if (parts.scheme !== "mongodb" || parts.hostList.includes(",")) return uri;
+  if (hasOption(parts.query, "directConnection") || hasOption(parts.query, "loadBalanced")) {
+    return uri;
+  }
+  const option = "directConnection=true";
+  let rest: string;
+  if (parts.rest === "") {
+    // `mongodb://host:port`: options need the `/` before the `?`.
+    rest = `/?${option}`;
+  } else if (!parts.rest.includes("?")) {
+    rest = `${parts.rest}?${option}`;
+  } else if (parts.rest.endsWith("?") || parts.rest.endsWith("&")) {
+    rest = `${parts.rest}${option}`;
+  } else {
+    rest = `${parts.rest}&${option}`;
+  }
+  return joinConnectionString({ ...parts, rest });
 }
 
 /** The placeholder {@link separatePassword} leaves where the password was. */
@@ -403,15 +465,20 @@ function hostWithoutPort(host: string): string {
 }
 
 /**
- * Hosts that are almost certainly not production: this machine, Docker's name for the
- * host machine, `.local` / `.localhost` names, and single-label names such as `mongo`
- * (a Compose service or a hosts-file entry on a developer's machine).
+ * Hosts that are clearly this machine, the only ones not treated as production by
+ * default: loopback (`localhost`, `*.localhost`, `127.x.x.x`, `::1`) and the container
+ * runtime's name for the machine the console's container runs on.
+ *
+ * Deliberately NOT on this list, because they are ordinary server names in production:
+ * `*.local` and `*.svc.cluster.local` (Kubernetes Services), `*.internal` (AWS
+ * `*.ec2.internal`, GCP `*.c.<project>.internal`), and single-label names such as
+ * `mongo` (a Compose service, but just as often a Kubernetes Service in the same
+ * namespace). Guessing "not production" there would drop the restore safety checks.
  */
 function isDevelopmentHost(host: string): boolean {
-  if (host === "localhost" || host === "::1" || host === "host.docker.internal") return true;
+  if (host === "localhost" || host === "::1" || isContainerHostAlias(host)) return true;
   if (/^127\.\d+\.\d+\.\d+$/.test(host)) return true;
-  if (/\.(?:local|localhost|internal|test)$/.test(host)) return true;
-  return !host.includes(".") && !host.includes(":");
+  return /\.localhost$/.test(host);
 }
 
 /** A short name: the Atlas cluster or first host label, or the replica set for host lists. */
@@ -425,7 +492,7 @@ function suggestName(
   if (/^\d+\.\d+\.\d+\.\d+$/.test(first) || first.includes(":")) {
     return replicaSet ?? first;
   }
-  if (first === "host.docker.internal") return "MongoDB on this computer";
+  if (isContainerHostAlias(first)) return "MongoDB on this computer";
   return first.split(".")[0] ?? first;
 }
 
@@ -440,12 +507,13 @@ function productionGuess(atlas: boolean, local: boolean): ConnectionStringInfo["
   if (local) {
     return {
       suggested: false,
-      reason: "This database runs on this computer or in Docker, so it looks like a test database.",
+      reason: "This database runs on this computer, so it looks like a test database.",
     };
   }
   return {
     suggested: true,
-    reason: "This database is on another server, so it is treated as production to be safe.",
+    reason:
+      "This database is on another server or container, so it is treated as production to be safe.",
   };
 }
 
@@ -464,6 +532,17 @@ function optionValue(query: string, name: string): string | undefined {
     }
   }
   return undefined;
+}
+
+/** True when the `?name=value` options contain `name` at all (case-insensitive, any value). */
+function hasOption(query: string, name: string): boolean {
+  const wanted = name.toLowerCase();
+  for (const pair of query.split("&")) {
+    const equals = pair.indexOf("=");
+    const key = equals === -1 ? pair : pair.slice(0, equals);
+    if (key.toLowerCase() === wanted) return true;
+  }
+  return false;
 }
 
 /** decodeURIComponent that leaves malformed escapes as they are. */

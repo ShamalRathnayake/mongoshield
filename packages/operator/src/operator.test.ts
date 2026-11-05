@@ -30,6 +30,12 @@ const settings: OperatorSettings = {
   identity: "op-1",
   image: "ghcr.io/shamalrathnayake/mongoshield:2.0.0",
   imagePullPolicy: undefined,
+  jobPolicy: {
+    allowedImages: ["ghcr.io/shamalrathnayake/mongoshield"],
+    allowedServiceAccounts: ["*"],
+    allowEnvFrom: false,
+  },
+  metricsToken: undefined,
   leaderElection: false,
   leaseName: "mongoshield-operator",
   httpPort: 0,
@@ -136,7 +142,7 @@ describe("Operator", () => {
       "restore Job",
     );
     const restoreJob = client.object<Job>(RESOURCES.jobs, NAMESPACE, "restore-1-restore");
-    expect(restoreJob?.spec?.template.spec?.containers[0]?.args?.[1]).toBe("manual-id");
+    expect(restoreJob?.spec?.template.spec?.containers[0]?.args?.at(-1)).toBe("manual-id");
     finishJob(client, NAMESPACE, "restore-1-restore", {
       succeeded: true,
       log: cliLog({
