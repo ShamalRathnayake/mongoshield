@@ -214,6 +214,18 @@ function driveDestination(provider: OAuthProviderId, freeSpace: string): InitDes
   };
 }
 
+// One constant per drive, each owned by that drive's release: spread the shared one
+// and override what the provider needs (`extraConfig`, other questions, more steps).
+
+/** Google Drive (15 GB free, shared with Gmail and Photos). */
+const gdrive: InitDestination = driveDestination("gdrive", "15 GB");
+
+/** OneDrive (5 GB free). */
+const onedrive: InitDestination = driveDestination("onedrive", "5 GB");
+
+/** Dropbox (2 GB free). */
+const dropbox: InitDestination = driveDestination("dropbox", "2 GB");
+
 /** GitHub artifacts: a local directory the workflow uploads with actions/upload-artifact. */
 const githubArtifacts: InitDestination = {
   id: "github-artifacts",
@@ -418,9 +430,9 @@ const otherUrl: InitDestination = {
 
 /** The menu, in order (see the file header). */
 export const INIT_DESTINATIONS: readonly InitDestination[] = [
-  driveDestination("gdrive", "15 GB"),
-  driveDestination("onedrive", "5 GB"),
-  driveDestination("dropbox", "2 GB"),
+  gdrive,
+  onedrive,
+  dropbox,
   githubArtifacts,
   b2,
   r2,

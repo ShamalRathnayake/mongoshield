@@ -303,6 +303,11 @@ async function createAdapter(
       return azureAdapter(url, credentials);
     case "sftp":
       return sftpAdapter(url, credentials);
+    default:
+      // Schemes without stored-credential support (the drives read their token from the
+      // console host's environment) go through the library's resolver unchanged.
+      // checkStorageInput refuses stored credentials for them before this point.
+      return resolveStorage(url);
   }
 }
 

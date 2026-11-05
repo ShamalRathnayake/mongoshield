@@ -18,12 +18,18 @@
  * resolve.ts documents every parameter and credential. Each factory receives the
  * parsed URL and the environment to read credentials from (StorageSchemeContext).
  *
- * Adding a first-party scheme (Google Drive, OneDrive, Dropbox): write its factory,
- * add it to SUPPORTED_STORAGE_SCHEMES and to FIRST_PARTY_STORAGE_SCHEMES below. The
- * `satisfies` check makes the list and the factories impossible to get out of step.
+ *   gdrive, onedrive, dropbox   reserved for the drive adapters: until their releases
+ *                               replace the placeholders below, they fail with
+ *                               MS_NOT_IMPLEMENTED
+ *
+ * Adding a first-party scheme: write its factory, add it to SUPPORTED_STORAGE_SCHEMES
+ * and to FIRST_PARTY_STORAGE_SCHEMES below. The `satisfies` check makes the list and
+ * the factories impossible to get out of step. The drive releases only replace their
+ * own placeholder line.
  */
 
 import { fileURLToPath } from "node:url";
+import { MongoShieldError } from "../errors.ts";
 import { azureStorage } from "./azure.ts";
 import { fileStorage } from "./file.ts";
 import { gcsStorage } from "./gcs.ts";
@@ -60,6 +66,9 @@ export const SUPPORTED_STORAGE_SCHEMES = [
   "memory",
   "b2",
   "r2",
+  "gdrive",
+  "onedrive",
+  "dropbox",
 ] as const;
 
 /** One of {@link SUPPORTED_STORAGE_SCHEMES}. */
@@ -481,6 +490,21 @@ function isAzureStorageHost(hostname: string): boolean {
 }
 
 /**
+ * The factory of a drive scheme whose adapter ships in a later release: the scheme is
+ * reserved (no package can claim it by accident, and `init` can already write it), and
+ * using it fails with a clear MS_NOT_IMPLEMENTED instead of "unsupported scheme".
+ */
+function notYetAvailable(service: string, scheme: string): StorageSchemeFactory {
+  return () => {
+    throw new MongoShieldError(
+      "MS_NOT_IMPLEMENTED",
+      `${service} storage (${scheme}://) is not available in this release of MongoShield yet.`,
+      { hint: "Upgrade MongoShield, or choose another storage location for now." },
+    );
+  };
+}
+
+/**
  * The factory of every first-party scheme. Keys are exactly SUPPORTED_STORAGE_SCHEMES
  * (checked by `satisfies`); the registry looks schemes up here.
  *
@@ -503,4 +527,13 @@ export const FIRST_PARTY_STORAGE_SCHEMES = {
   b2: b2StorageOf,
 
   r2: r2StorageOf,
+
+  // gdrive://<folder>: the Google Drive release replaces this placeholder with its factory.
+  gdrive: notYetAvailable("Google Drive", "gdrive"),
+
+  // onedrive://<folder>: the OneDrive release replaces this placeholder with its factory.
+  onedrive: notYetAvailable("OneDrive", "onedrive"),
+
+  // dropbox://<folder>: the Dropbox release replaces this placeholder with its factory.
+  dropbox: notYetAvailable("Dropbox", "dropbox"),
 } as const satisfies Record<FirstPartyStorageScheme, StorageSchemeFactory>;

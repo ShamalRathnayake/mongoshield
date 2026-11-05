@@ -81,7 +81,7 @@ describe("registerStorageScheme", () => {
     register("pcloud", () => memoryStorage());
     const error = await resolveStorage("webdav://host/x").catch((reason: unknown) => reason);
     expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
-    expect(isMongoShieldError(error) && error.hint).toContain("b2://, r2://, pcloud://");
+    expect(isMongoShieldError(error) && error.hint).toContain("dropbox://, pcloud://");
     expect(isMongoShieldError(error) && error.hint).toContain("registerStorageScheme");
   });
 
@@ -138,6 +138,17 @@ describe("registerStorageScheme", () => {
     ];
     expect(shared).toBeInstanceOf(Map);
     expect((shared as Map<string, unknown>).has("pcloud")).toBe(true);
+  });
+
+  it.each([
+    ["gdrive://mongoshield-backups", "Google Drive"],
+    ["onedrive://backups", "OneDrive"],
+    ["dropbox://backups", "Dropbox"],
+  ])("reserves the drive scheme of %s until its release, failing clearly", async (url, service) => {
+    const error = await resolveStorage(url).catch((reason: unknown) => reason);
+    expect(isMongoShieldError(error, "MS_NOT_IMPLEMENTED")).toBe(true);
+    expect(String(error)).toContain(service);
+    configError(() => registerStorageScheme(url.split(":")[0] ?? "", () => memoryStorage()));
   });
 
   it.each(["", "pcloud://", "1drive", "p cloud", "p_cloud"])(
