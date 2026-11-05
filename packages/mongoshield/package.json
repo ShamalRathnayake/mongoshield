@@ -126,9 +126,9 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
-    "@aws-sdk/client-kms": "^3.1155.0",
-    "@aws-sdk/client-s3": "^3.1155.0",
-    "@aws-sdk/lib-storage": "^3.1155.0",
+    "@aws-sdk/client-kms": "^3.1160.0",
+    "@aws-sdk/client-s3": "^3.1160.0",
+    "@aws-sdk/lib-storage": "^3.1160.0",
     "@testcontainers/minio": "^11.14.0",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^5.0.5",
@@ -138,7 +138,7 @@
     "mongodb-memory-server": "^11.3.0",
     "publint": "^0.3.25",
     "testcontainers": "^12.2.1",
-    "tsdown": "^0.23.1",
+    "tsdown": "^0.23.4",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }
