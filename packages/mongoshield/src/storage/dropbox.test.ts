@@ -75,6 +75,36 @@ function endpointsSince(server: FakeDropboxServer, from: number): string[] {
   return server.requests.slice(from).map((request) => request.endpoint);
 }
 
+/** Answers one endpoint's requests itself (it may still forward them with the real fetch). */
+type FetchOverride = (input: string, init: RequestInit | undefined) => Promise<Response>;
+
+/**
+ * A fetch that sends every request on to the fake, except those for an endpoint in
+ * `overrides` (`files/upload`, `/oauth2/token`, …): those go through the override,
+ * which can change the request or the answer, or fail like a broken network.
+ */
+function fetchWith(overrides: Readonly<Record<string, FetchOverride>>): typeof fetch {
+  return async (input, init) => {
+    const url = String(input);
+    const endpoint = new URL(url).pathname.replace(/^\/2\//, "");
+    const override = overrides[endpoint];
+    return override ? override(url, init) : fetch(url, init);
+  };
+}
+
+/** `response` with its `Dropbox-API-Result` header replaced (`null` removes it). */
+function withResultHeader(response: Response, value: string | null): Response {
+  const headers = new Headers(response.headers);
+  if (value === null) headers.delete("dropbox-api-result");
+  else headers.set("dropbox-api-result", value);
+  return new Response(response.body, { status: response.status, headers });
+}
+
+/** Counts the requests to `endpoint` since `from`. */
+function countSince(server: FakeDropboxServer, from: number, endpoint: string): number {
+  return endpointsSince(server, from).filter((name) => name === endpoint).length;
+}
+
 describe("dropbox storage", () => {
   let server: FakeDropboxServer;
   let quirky: FakeDropboxServer;
@@ -551,6 +581,586 @@ describe("dropbox storage", () => {
     });
   });
 
+  describe("upload edge cases", () => {
+    it("assembles chunks from stream pieces that straddle chunk boundaries", async () => {
+      const storage = adapterOn(server, { chunkSize: 4 * MiB });
+      const pieces = [1, 2, 3].map((fill) => Buffer.alloc(3 * MiB, fill));
+      const start = server.requests.length;
+      await storage.put("straddle.bin", Readable.from(pieces));
+      const sizes = server.requests
+        .slice(start)
+        .filter((request) => request.endpoint.startsWith("files/upload"))
+        .map((request) => request.bodyBytes);
+      expect(sizes).toEqual([4 * MiB, 4 * MiB, MiB]);
+      const stored = await readAll(await storage.get("straddle.bin"));
+      expect(stored.equals(Buffer.concat(pieces))).toBe(true);
+    });
+
+    it("fails with MS_STORAGE_IO when Dropbox starts no upload session", async () => {
+      const storage = adapterOn(server, { chunkSize: 4 * MiB });
+      server.fail("files/upload_session/start", { status: 200, body: {} });
+      const error = await rejectionOf(storage.put("no-session.bin", Buffer.alloc(5 * MiB)));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/started no upload session/);
+    });
+
+    it("fails an append that Dropbox places at another offset, and destroys the source stream", async () => {
+      const storage = adapterOn(server, { chunkSize: 4 * MiB });
+      server.fail("files/upload_session/append_v2", {
+        status: 409,
+        body: {
+          error_summary: "incorrect_offset/..",
+          error: { ".tag": "incorrect_offset", correct_offset: 1 },
+        },
+      });
+      // One 10 MiB piece: the adapter has to split it and keep the rest for later chunks.
+      const source = Readable.from([Buffer.alloc(10 * MiB, 4)]);
+      const error = await rejectionOf(storage.put("misplaced.bin", source));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(source.destroyed).toBe(true);
+      expect(await storage.head("misplaced.bin")).toBeUndefined();
+    });
+
+    it("maps an upload corrupted in transit (content_hash_mismatch) to MS_INTEGRITY_FAILED", async () => {
+      const corrupting = fetchWith({
+        "files/upload": (url, init) => {
+          const body = Buffer.from(init?.body as Uint8Array);
+          body[0] = (body[0] ?? 0) ^ 0xff;
+          return fetch(url, { ...init, body });
+        },
+      });
+      const storage = adapterOn(server, { fetch: corrupting });
+      const error = await rejectionOf(storage.put("garbled.bin", Buffer.from("payload")));
+      expect(codeOf(error)).toBe("MS_INTEGRITY_FAILED");
+      expect(await storage.head("garbled.bin")).toBeUndefined();
+    });
+
+    it("maps a session finish that finds no session on its first attempt to MS_STORAGE_IO, not NOT_FOUND", async () => {
+      const storage = adapterOn(server, { chunkSize: 4 * MiB });
+      server.fail("files/upload_session/finish", {
+        status: 409,
+        body: {
+          error_summary: "lookup_failed/not_found/..",
+          error: { ".tag": "lookup_failed", lookup_failed: { ".tag": "not_found" } },
+        },
+      });
+      const error = await rejectionOf(storage.put("expired.bin", Buffer.alloc(5 * MiB)));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+    });
+
+    it("maps a write without permission to MS_STORAGE_FORBIDDEN", async () => {
+      const storage = adapterOn(server);
+      server.fail("files/upload", {
+        status: 409,
+        body: {
+          error_summary: "path/no_write_permission/..",
+          error: { ".tag": "path", reason: { ".tag": "no_write_permission" } },
+        },
+      });
+      const error = await rejectionOf(storage.put("read-only", Buffer.from("x")));
+      expect(codeOf(error)).toBe("MS_STORAGE_FORBIDDEN");
+    });
+  });
+
+  describe("read edge cases", () => {
+    it("cuts a range out of a full answer that arrives in many pieces", async () => {
+      const ignoring = await startFakeDropboxServer({ ignoreRange: true });
+      try {
+        const storage = adapterOn(ignoring);
+        const data = Buffer.from(Array.from({ length: 1_000_000 }, (_, index) => index % 251));
+        await storage.put("big-range.bin", data);
+        const read = await readAll(
+          await storage.get("big-range.bin", { range: { start: 700_000, end: 700_009 } }),
+        );
+        expect(read.equals(data.subarray(700_000, 700_010))).toBe(true);
+      } finally {
+        await ignoring.close();
+      }
+    });
+
+    it("reads a download without a usable Dropbox-API-Result header, unchecked", async () => {
+      for (const header of [null, "{not json"]) {
+        const storage = adapterOn(server, {
+          fetch: fetchWith({
+            "files/download": async (url, init) => withResultHeader(await fetch(url, init), header),
+          }),
+        });
+        await storage.put("no-result.txt", Buffer.from("still here"));
+        expect((await readAll(await storage.get("no-result.txt"))).toString()).toBe("still here");
+      }
+    });
+
+    it("reads an empty file when the download answer has no body at all", async () => {
+      const storage = adapterOn(server, {
+        fetch: fetchWith({
+          "files/download": async (url, init) => {
+            const response = await fetch(url, init);
+            return new Response(null, { status: response.status, headers: response.headers });
+          },
+        }),
+      });
+      await storage.put("empty.bin", Buffer.alloc(0));
+      expect(await readAll(await storage.get("empty.bin"))).toHaveLength(0);
+    });
+
+    it("maps reading a folder (not_file) to MS_STORAGE_NOT_FOUND", async () => {
+      const storage = adapterOn(server);
+      await storage.put("folder/inner", Buffer.from("x"));
+      expect(codeOf(await rejectionOf(storage.get("folder")))).toBe("MS_STORAGE_NOT_FOUND");
+    });
+  });
+
+  describe("listing edge cases", () => {
+    it("lists only well-formed files from a list_folder answer, with defaults for missing fields", async () => {
+      const storage = adapterOn(server);
+      const folder = storage.location.slice("dropbox://".length, -1);
+      const base = `/${folder}`;
+      server.fail("files/list_folder", {
+        status: 200,
+        body: {
+          entries: [
+            // No size, rev or server_modified.
+            { ".tag": "file", name: "plain.bin", path_lower: `${base}/plain.bin` },
+            {
+              ".tag": "folder",
+              name: "Sub",
+              path_lower: `${base}/sub`,
+              path_display: `${base}/sub`,
+            },
+            {
+              ".tag": "file",
+              name: "Deep.bin",
+              path_lower: `${base}/sub/deep.bin`,
+              path_display: `${base}/sub/Deep.bin`,
+              size: 5,
+              rev: "015f",
+              server_modified: "2026-01-02T03:04:05Z",
+            },
+            // Unusable: no path, no name, not a valid key, deleted, outside the folder.
+            { ".tag": "file", name: "no-path.bin" },
+            { ".tag": "file", path_lower: `${base}/nameless.bin` },
+            { ".tag": "file", name: "back\\slash", path_lower: `${base}/back\\slash` },
+            { ".tag": "deleted", name: "gone", path_lower: `${base}/gone` },
+            { ".tag": "file", name: "outside", path_lower: "/outside" },
+          ],
+          cursor: "cursor-1",
+          has_more: false,
+        },
+      });
+      const listed = await collect(storage.list(""));
+      expect(listed.map((info) => info.key)).toEqual(["Sub/Deep.bin", "plain.bin"]);
+      const [deep, plain] = listed;
+      expect(deep).toMatchObject({ size: 5, etag: "015f" });
+      expect(deep?.lastModified.toISOString()).toBe("2026-01-02T03:04:05.000Z");
+      expect(plain?.size).toBe(0);
+      expect(plain?.etag).toBeUndefined();
+      expect(plain?.lastModified).toBeInstanceOf(Date);
+    });
+
+    it("treats a list_folder answer without an entries array as an empty folder", async () => {
+      const storage = adapterOn(server);
+      server.fail("files/list_folder", { status: 200, body: { entries: "none", has_more: false } });
+      expect(await collect(storage.list(""))).toEqual([]);
+    });
+
+    it("refuses a listPrefixes prefix that does not end in a slash", async () => {
+      const storage = adapterOn(server);
+      const error = await rejectionOf(collect(storage.listPrefixes("backups")));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/ending in "\/"/);
+    });
+  });
+
+  describe("delete edge cases", () => {
+    it("sends the whole batch again when the delete job failed on Dropbox's write lock", async () => {
+      const storage = adapterOn(server);
+      await storage.put("job-locked/a", Buffer.from("a"));
+      server.fail("files/delete_batch", {
+        status: 200,
+        body: { ".tag": "failed", failed: { ".tag": "too_many_write_operations" } },
+      });
+      const start = server.requests.length;
+      await storage.delete(["job-locked/a"]);
+      expect(countSince(server, start, "files/delete_batch")).toBe(2);
+      expect(await storage.head("job-locked/a")).toBeUndefined();
+    });
+
+    it("fails when a whole delete job fails for another reason", async () => {
+      const storage = adapterOn(server);
+      server.fail("files/delete_batch", {
+        status: 200,
+        body: { ".tag": "failed", failed: { ".tag": "too_many_files" } },
+      });
+      const error = await rejectionOf(storage.delete(["a"]));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/could not delete 1 files/);
+    });
+
+    it("maps a delete refused for permission to MS_STORAGE_FORBIDDEN and other refusals to MS_STORAGE_IO", async () => {
+      const storage = adapterOn(server);
+      const refusal = (failure: unknown) => ({
+        status: 200,
+        body: { ".tag": "complete", entries: [{ ".tag": "failure", failure }] },
+      });
+      server.fail(
+        "files/delete_batch",
+        refusal({ ".tag": "path_write", path_write: { ".tag": "no_write_permission" } }),
+      );
+      const forbidden = await rejectionOf(storage.delete(["protected"]));
+      expect(codeOf(forbidden)).toBe("MS_STORAGE_FORBIDDEN");
+      expect(String(forbidden)).toMatch(/refused to delete ".*\/protected" \(path_write\/no_write/);
+
+      server.fail(
+        "files/delete_batch",
+        refusal({ ".tag": "path_lookup", path_lookup: { ".tag": "restricted_content" } }),
+      );
+      const refused = await rejectionOf(storage.delete(["restricted"]));
+      expect(codeOf(refused)).toBe("MS_STORAGE_IO");
+      expect(String(refused)).toMatch(/could not delete ".*\/restricted"/);
+    });
+
+    it("gives up after maxRetries when Dropbox keeps write-locking a path", async () => {
+      const storage = adapterOn(server, { maxRetries: 1 });
+      await storage.put("stuck", Buffer.from("x"));
+      const folder = storage.location.slice("dropbox://".length, -1);
+      server.lockPathForDeletes(`/${folder}/stuck`, 5);
+      const error = await rejectionOf(storage.delete(["stuck"]));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/kept refusing to delete 1 files/);
+    });
+
+    it("gives up on a delete job that is still running after 10 minutes", async () => {
+      const slow = await startFakeDropboxServer({ asyncDeletePolls: 1_000 });
+      // The clock jumps 11 minutes at every status check, so no test waits that long.
+      const realNow = Date.now.bind(Date);
+      let skipped = 0;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + skipped);
+      try {
+        const storage = adapterOn(slow, {
+          fetch: fetchWith({
+            "files/delete_batch/check": (url, init) => {
+              skipped += 11 * 60_000;
+              return fetch(url, init);
+            },
+          }),
+        });
+        await storage.put("slow-delete", Buffer.from("x"));
+        const error = await rejectionOf(storage.delete(["slow-delete"]));
+        expect(codeOf(error)).toBe("MS_STORAGE_IO");
+        expect(String(error)).toMatch(/did not finish in 10 minutes/);
+      } finally {
+        clock.mockRestore();
+        await slow.close();
+      }
+    });
+  });
+
+  describe("error answers", () => {
+    it("maps HTTP 403 to MS_STORAGE_FORBIDDEN without retrying", async () => {
+      const storage = adapterOn(server);
+      server.fail("files/get_metadata", { status: 403, body: { error_summary: "no_access/.." } });
+      const start = server.requests.length;
+      expect(codeOf(await rejectionOf(storage.head("x")))).toBe("MS_STORAGE_FORBIDDEN");
+      expect(countSince(server, start, "files/get_metadata")).toBe(1);
+    });
+
+    it("gives up on a rate limit after maxRetries with a try-again-later hint", async () => {
+      const storage = adapterOn(server, { maxRetries: 0 });
+      server.fail("files/get_metadata", {
+        status: 429,
+        body: { error_summary: "too_many_requests/.." },
+      });
+      const error = await rejectionOf(storage.head("x"));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(isMongoShieldError(error) && error.hint).toMatch(/rate-limiting/);
+    });
+
+    it("retries at once when Retry-After is a past date or unreadable, or retry_after is 0", async () => {
+      const storage = adapterOn(server);
+      const pastDate = new Date(Date.now() - 60_000).toUTCString();
+      server.fail("files/get_metadata", { status: 429, headers: { "retry-after": pastDate } });
+      server.fail("files/get_metadata", { status: 429, headers: { "retry-after": "soon" } });
+      server.fail("files/get_metadata", {
+        status: 429,
+        body: {
+          error_summary: "too_many_requests/..",
+          error: { ".tag": "too_many_requests", retry_after: 0 },
+        },
+      });
+      const start = server.requests.length;
+      const began = Date.now();
+      expect(await storage.head("x")).toBeUndefined();
+      expect(countSince(server, start, "files/get_metadata")).toBe(4);
+      expect(Date.now() - began).toBeLessThan(1000);
+    });
+
+    it("names the operation when listing, deleting or reading the free space fails", async () => {
+      const storage = adapterOn(server, { maxRetries: 0 });
+      server.fail("files/list_folder", { status: 500 });
+      const listError = await rejectionOf(collect(storage.list("")));
+      expect(codeOf(listError)).toBe("MS_STORAGE_IO");
+      expect(String(listError)).toMatch(/Cannot list dropbox:\/\//);
+
+      server.fail("files/delete_batch", { status: 500 });
+      expect(String(await rejectionOf(storage.delete(["a"])))).toMatch(
+        /Cannot delete objects from dropbox:\/\//,
+      );
+
+      server.fail("users/get_space_usage", { status: 500 });
+      expect(String(await rejectionOf(storage.space()))).toMatch(
+        /Cannot read the free space of dropbox:\/\//,
+      );
+    });
+
+    it("describes an error answer whose body cannot be read by its HTTP status", async () => {
+      const storage = adapterOn(server, {
+        maxRetries: 0,
+        fetch: fetchWith({
+          "files/get_metadata": async () =>
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.error(new Error("connection reset"));
+                },
+              }),
+              { status: 502 },
+            ),
+        }),
+      });
+      const error = await rejectionOf(storage.head("x"));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/Dropbox said HTTP 502/);
+    });
+
+    it("fails with MS_STORAGE_IO when a successful answer is not JSON", async () => {
+      const storage = adapterOn(server, {
+        fetch: fetchWith({
+          "users/get_space_usage": async () => new Response("<html>oops</html>", { status: 200 }),
+        }),
+      });
+      const error = await rejectionOf(storage.space());
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/not JSON/);
+    });
+  });
+
+  describe("network failures and cancellation", () => {
+    it("retries network errors and reports the last one without any token in it", async () => {
+      let attempts = 0;
+      const storage = dropboxStorage({
+        folder: uniqueFolder(),
+        accessToken: "sl.fixed-secret-token",
+        endpoints: server.endpoints,
+        retryBaseDelayMs: 1,
+        maxRetries: 1,
+        fetch: async () => {
+          attempts++;
+          throw new TypeError("fetch failed (Bearer sl.fixed-secret-token)");
+        },
+      });
+      const error = await rejectionOf(storage.head("x"));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(attempts).toBe(2);
+      expect(String(error)).toContain("***");
+      expect(String(error)).not.toContain("sl.fixed-secret-token");
+    });
+
+    it("fails a put whose append keeps failing on the network", async () => {
+      const storage = adapterOn(server, {
+        chunkSize: 4 * MiB,
+        maxRetries: 0,
+        fetch: fetchWith({
+          "files/upload_session/append_v2": async () => {
+            throw new TypeError("socket hang up");
+          },
+        }),
+      });
+      const error = await rejectionOf(storage.put("offline.bin", Buffer.alloc(9 * MiB)));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/socket hang up/);
+    });
+
+    it("rejects with MS_ABORTED when the signal fires while a request waits for its answer", async () => {
+      const controller = new AbortController();
+      const storage = adapterOn(server, {
+        fetch: fetchWith({
+          "files/get_metadata": (url, init) => {
+            const answer = fetch(url, init);
+            controller.abort();
+            return answer;
+          },
+        }),
+      });
+      const error = await rejectionOf(storage.head("x", { signal: controller.signal }));
+      expect(codeOf(error)).toBe("MS_ABORTED");
+    });
+
+    it("rejects with MS_ABORTED when the signal fires during a retry backoff", async () => {
+      const controller = new AbortController();
+      const storage = adapterOn(server, {
+        // A backoff far longer than the test may take.
+        retryBaseDelayMs: 60_000,
+        fetch: fetchWith({
+          "files/get_metadata": async (url, init) => {
+            const answer = await fetch(url, init);
+            controller.abort();
+            return answer;
+          },
+        }),
+      });
+      server.fail("files/get_metadata", { status: 500 });
+      const error = await rejectionOf(storage.head("x", { signal: controller.signal }));
+      expect(codeOf(error)).toBe("MS_ABORTED");
+    });
+
+    it("stops one caller waiting for a token refresh on abort, while others still get the token", async () => {
+      let releaseToken = () => {};
+      const tokenHeld = new Promise<void>((resolve) => {
+        releaseToken = resolve;
+      });
+      let refreshStarted = () => {};
+      const started = new Promise<void>((resolve) => {
+        refreshStarted = resolve;
+      });
+      const storage = adapterOn(server, {
+        fetch: fetchWith({
+          "/oauth2/token": async (url, init) => {
+            refreshStarted();
+            await tokenHeld;
+            return fetch(url, init);
+          },
+        }),
+      });
+      const controller = new AbortController();
+      const abandoned = storage.head("x", { signal: controller.signal });
+      const patient = storage.head("y");
+      await started;
+      controller.abort();
+      expect(codeOf(await rejectionOf(abandoned))).toBe("MS_ABORTED");
+      releaseToken();
+      expect(await patient).toBeUndefined();
+    });
+  });
+
+  describe("token edge cases", () => {
+    it("retries the token refresh after a network error, up to maxRetries", async () => {
+      let tokenCalls = 0;
+      const flaky = fetchWith({
+        "/oauth2/token": async (url, init) => {
+          tokenCalls++;
+          if (tokenCalls === 1) throw new TypeError("socket hang up");
+          return fetch(url, init);
+        },
+      });
+      expect(await adapterOn(server, { fetch: flaky }).head("x")).toBeUndefined();
+      expect(tokenCalls).toBe(2);
+
+      let downCalls = 0;
+      const down = fetchWith({
+        "/oauth2/token": async () => {
+          downCalls++;
+          throw new TypeError("connect ECONNREFUSED");
+        },
+      });
+      const error = await rejectionOf(adapterOn(server, { fetch: down, maxRetries: 1 }).head("x"));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(downCalls).toBe(2);
+    });
+
+    it("passes a refused token refresh through to a caller with a signal", async () => {
+      const refreshToken = server.issueRefreshToken();
+      server.revokeRefreshToken(refreshToken);
+      const storage = adapterOn(server, { refreshToken });
+      const error = await rejectionOf(storage.head("x", { signal: new AbortController().signal }));
+      expect(codeOf(error)).toBe("MS_STORAGE_FORBIDDEN");
+    });
+
+    it("renews an expired token once when several requests find it expired together", async () => {
+      const storage = adapterOn(server);
+      await storage.head("warm-up");
+      server.expireAccessTokens();
+      const start = server.requests.length;
+      await Promise.all([storage.head("a"), storage.head("b"), storage.head("c")]);
+      expect(countSince(server, start, "/oauth2/token")).toBe(1);
+    });
+
+    it("takes the app key from MONGOSHIELD_DROPBOX_CLIENT_ID when no clientId is given", async () => {
+      vi.stubEnv("MONGOSHIELD_DROPBOX_CLIENT_ID", server.clientId);
+      try {
+        const storage = dropboxStorage({
+          folder: uniqueFolder(),
+          refreshToken: server.issueRefreshToken(),
+          endpoints: server.endpoints,
+        });
+        const start = server.requests.length;
+        expect(await storage.head("x")).toBeUndefined();
+        const refresh = server.requests
+          .slice(start)
+          .find((request) => request.endpoint === "/oauth2/token");
+        expect(refresh?.arg).toMatchObject({ client_id: server.clientId });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+
+  describe("space edge cases", () => {
+    it("reports the team pool when a team member has no limit of their own", async () => {
+      const team = await startFakeDropboxServer({
+        spaceAllocation: {
+          ".tag": "team",
+          allocated: 10_000,
+          used: 4_000,
+          user_within_team_space_allocated: 0,
+        },
+      });
+      try {
+        expect(await adapterOn(team).space()).toEqual({
+          totalBytes: 10_000,
+          usedBytes: 4_000,
+          freeBytes: 6_000,
+        });
+      } finally {
+        await team.close();
+      }
+    });
+
+    it("reports only the usage for an unknown allocation kind, and nothing without figures", async () => {
+      const other = await startFakeDropboxServer({ spaceAllocation: { ".tag": "other" } });
+      try {
+        const storage = adapterOn(other);
+        await storage.put("a", Buffer.alloc(100));
+        expect(await storage.space()).toEqual({ usedBytes: 100 });
+        other.fail("users/get_space_usage", { status: 200, body: null });
+        expect(await storage.space()).toBeUndefined();
+        const silent = adapterOn(other, {
+          fetch: fetchWith({
+            "users/get_space_usage": async () => new Response("", { status: 200 }),
+          }),
+        });
+        expect(await silent.space()).toBeUndefined();
+      } finally {
+        await other.close();
+      }
+    });
+  });
+
+  describe("options", () => {
+    it("rejects negative or fractional retry and timeout settings", () => {
+      const invalid: [Partial<DropboxStorageOptions>, string][] = [
+        [{ maxRetries: -1 }, "maxRetries"],
+        [{ retryBaseDelayMs: 1.5 }, "retryBaseDelayMs"],
+        [{ requestTimeoutMs: Number.NaN }, "requestTimeoutMs"],
+      ];
+      for (const [options, name] of invalid) {
+        expect(() => adapterOn(server, options)).toThrow(new RegExp(`Invalid Dropbox ${name}`));
+      }
+      expect(() =>
+        adapterOn(server, { maxRetries: 0, retryBaseDelayMs: 0, requestTimeoutMs: 0 }),
+      ).not.toThrow();
+    });
+  });
+
   describe("dropboxStorageFromUrl", () => {
     const env = (extra: Record<string, string> = {}) => ({
       MONGOSHIELD_DROPBOX_TOKEN: "refresh-token",
@@ -624,6 +1234,12 @@ describe("dropbox storage", () => {
           MONGOSHIELD_DROPBOX_TOKEN: "t",
         }),
       ).toThrow(/No Dropbox app key/);
+    });
+
+    it("refuses a URL of another scheme", () => {
+      expect(() => dropboxStorageFromUrl(new URL("gdrive://backups"), env())).toThrow(
+        /Not a dropbox:\/\/ URL/,
+      );
     });
 
     it("rejects credentials, unknown parameters and an empty folder", () => {

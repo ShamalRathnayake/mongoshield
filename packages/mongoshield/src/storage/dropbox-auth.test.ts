@@ -314,9 +314,127 @@ describe("loginDropbox", () => {
     const error = await rejectionOf(loginDropbox(loginOptions({ clientId: "" })));
     expect(codeOf(error)).toBe("MS_CONFIG_INVALID");
   });
+
+  it("sends the user to Dropbox's own authorize page by default", async () => {
+    const controller = new AbortController();
+    let verificationUrl = "";
+    const { authorizeUrl: _fake, env: _env, ...defaults } = loginOptions();
+    const error = await rejectionOf(
+      loginDropbox({
+        ...defaults,
+        signal: controller.signal,
+        // Never asked: the prompt cancels the login before anyone could paste a code.
+        readCode: () => new Promise<string>(() => {}),
+        onPrompt: (prompt) => {
+          verificationUrl = prompt.verificationUrl;
+          controller.abort();
+        },
+      }),
+    );
+    expect(codeOf(error)).toBe("MS_ABORTED");
+    expect(verificationUrl.startsWith("https://www.dropbox.com/oauth2/authorize?")).toBe(true);
+  });
+
+  it("stops with MS_ABORTED when the prompt itself cancels the login and then fails", async () => {
+    const controller = new AbortController();
+    const error = await rejectionOf(
+      loginDropbox(
+        loginOptions({
+          signal: controller.signal,
+          onPrompt: () => {
+            controller.abort();
+            throw new Error("the terminal went away");
+          },
+        }),
+      ),
+    );
+    expect(codeOf(error)).toBe("MS_ABORTED");
+  });
+
+  it("keeps waiting for the browser when the optional pasted-code prompt fails", async () => {
+    const result = await loginDropbox(
+      loginOptions({
+        readCode: async () => {
+          throw new Error("stdin was closed");
+        },
+      }),
+    );
+    expect(result.refreshToken).toMatch(/^refresh-/);
+  });
+
+  it("refuses an empty or multi-word pasted code", async () => {
+    for (const pasted of ["   ", "two words"]) {
+      const error = await rejectionOf(
+        loginDropbox(
+          loginOptions({ mode: "paste", onPrompt: () => {}, readCode: async () => pasted }),
+        ),
+      );
+      expect(codeOf(error)).toBe("MS_CONFIG_INVALID");
+      expect(String(error)).toMatch(/empty or invalid/);
+    }
+  });
+
+  it("fails with MS_STORAGE_FORBIDDEN when the redirect carries neither a code nor an error", async () => {
+    const error = await rejectionOf(
+      loginDropbox(
+        loginOptions({
+          onPrompt: (prompt) => {
+            const query = new URL(prompt.verificationUrl).searchParams;
+            const callback = new URL(query.get("redirect_uri") ?? "");
+            callback.searchParams.set("state", query.get("state") ?? "");
+            void fetch(callback);
+          },
+        }),
+      ),
+    );
+    expect(codeOf(error)).toBe("MS_STORAGE_FORBIDDEN");
+    expect(isMongoShieldError(error) && error.details).toMatchObject({ error: "missing_code" });
+  });
+
+  it("fails with MS_STORAGE_IO and an offline-access hint when the exchange returns no refresh token", async () => {
+    const error = await rejectionOf(
+      loginDropbox(
+        loginOptions({
+          fetch: async () => Response.json({ access_token: "sl.short-lived", expires_in: 14_400 }),
+        }),
+      ),
+    );
+    expect(codeOf(error)).toBe("MS_STORAGE_IO");
+    expect(isMongoShieldError(error) && error.hint).toMatch(/offline access/);
+  });
+
+  it("stops with MS_ABORTED when cancelled during the code exchange", async () => {
+    const controller = new AbortController();
+    const error = await rejectionOf(
+      loginDropbox(
+        loginOptions({
+          signal: controller.signal,
+          fetch: async () => {
+            controller.abort();
+            throw new TypeError("The operation was aborted");
+          },
+        }),
+      ),
+    );
+    expect(codeOf(error)).toBe("MS_ABORTED");
+  });
 });
 
 describe("refreshDropboxAccessToken", () => {
+  it("sends the clientSecret with the refresh when given", async () => {
+    await refreshDropboxAccessToken({
+      clientId: server.clientId,
+      clientSecret: "app-secret",
+      refreshToken: server.issueRefreshToken(),
+      tokenUrl: server.tokenUrl,
+    });
+    const refresh = server.requests.filter((entry) => entry.endpoint === "/oauth2/token").at(-1);
+    expect(refresh?.arg).toMatchObject({
+      grant_type: "refresh_token",
+      client_secret: "app-secret",
+    });
+  });
+
   it("returns an access token and its expiry", async () => {
     const before = Date.now();
     const access = await refreshDropboxAccessToken({
@@ -357,6 +475,61 @@ describe("refreshDropboxAccessToken", () => {
       expect(codeOf(error)).toBe("MS_STORAGE_IO");
       expect(String(error)).not.toContain("refresh-secret-token");
     }
+  });
+
+  it("scrubs the refresh token from a network failure that is not an Error", async () => {
+    const error = await rejectionOf(
+      refreshDropboxAccessToken({
+        clientId: "x",
+        refreshToken: "refresh-secret-token",
+        fetch: async () => {
+          throw "socket closed while sending refresh-secret-token";
+        },
+      }),
+    );
+    expect(codeOf(error)).toBe("MS_STORAGE_IO");
+    expect(String(error)).toMatch(/socket closed/);
+    expect(String(error)).not.toContain("refresh-secret-token");
+  });
+
+  it("names the HTTP status when a rejection carries no OAuth error code", async () => {
+    const error = await rejectionOf(
+      refreshDropboxAccessToken({
+        clientId: "x",
+        refreshToken: "r",
+        fetch: async () => new Response("", { status: 401 }),
+      }),
+    );
+    expect(codeOf(error)).toBe("MS_STORAGE_FORBIDDEN");
+    expect(String(error)).toMatch(/HTTP 401/);
+    expect(isMongoShieldError(error) && error.details).toEqual({ status: 401 });
+  });
+
+  it("fails with MS_STORAGE_IO when a successful answer holds no access token", async () => {
+    for (const body of ["{}", '"just text"', "null", '{"access_token":""}']) {
+      const error = await rejectionOf(
+        refreshDropboxAccessToken({
+          clientId: "x",
+          refreshToken: "r",
+          fetch: async () => new Response(body, { status: 200 }),
+        }),
+      );
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+      expect(String(error)).toMatch(/no access token/);
+    }
+  });
+
+  it("assumes the documented four hours when the answer has no expires_in", async () => {
+    const before = Date.now();
+    const access = await refreshDropboxAccessToken({
+      clientId: "x",
+      refreshToken: "r",
+      fetch: async () => Response.json({ access_token: "sl.no-expiry" }),
+    });
+    expect(access.accessToken).toBe("sl.no-expiry");
+    const lifetime = access.expiresAt.getTime() - before;
+    expect(lifetime).toBeGreaterThanOrEqual(4 * 60 * 60 * 1000 - 1000);
+    expect(lifetime).toBeLessThanOrEqual(4 * 60 * 60 * 1000 + 1000);
   });
 });
 

@@ -1,14 +1,16 @@
 // `mongoshield init`: the non-interactive path (flags and defaults) and every branch of
 // the interactive wizard, answered through a fake terminal.
 
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { mockClient } from "aws-sdk-client-mock";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KEYS, plain, runTestCli } from "../../../test/helpers/cli.ts";
 import { generateIdentity } from "../../crypto/index.ts";
+import { RECOVERY_KIT_KEY } from "../../crypto/recovery-kit.ts";
+import { DROPBOX_SHIPPED_CLIENT_ID } from "../../storage/dropbox-auth.ts";
 import { resolveStorage } from "../../storage/resolve.ts";
 import { githubStorageChoice } from "./init.ts";
 import { INIT_DESTINATIONS, type InitDestinationId } from "./init-destinations.ts";
@@ -452,6 +454,32 @@ describe("the destination menu of mongoshield init", () => {
     expect(run.stderr).toContain("deleted after 90 days at most, so not a real backup on its own");
   });
 
+  it("takes --destination with a --storage of that destination without asking", async () => {
+    const storage = "b2://acme/prod?region=us-west-004";
+    const run = await runTestCli(["init", "--destination", "b2", "--storage", storage, "--json"], {
+      cwd,
+    });
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.json()).toMatchObject({ storage, destination: "b2" });
+  });
+
+  it("starts the menu on --destination and asks for everything it has no default for", async () => {
+    const run = await runTestCli(["init", "--destination", "b2"], {
+      cwd,
+      terminal: [
+        // The menu starts on B2: Enter picks it.
+        { when: MENU, keys: KEYS.enter },
+        { when: "B2 bucket name:", keys: `acme${KEYS.enter}` },
+        { when: "B2 region", keys: `eu-central-003${KEYS.enter}` },
+        { when: "Folder inside the bucket", keys: KEYS.enter },
+        { when: "Which environment variable", keys: KEYS.enter },
+        { when: "Encrypt backups?", keys: KEYS.down + KEYS.down + KEYS.enter },
+      ],
+    });
+    expect(run.code, plain(run.stderr)).toBe(0);
+    expect(await configText()).toContain('storage: "b2://acme/mongoshield?region=eu-central-003",');
+  });
+
   it.each([
     [
       ["--destination", "b2"],
@@ -634,17 +662,233 @@ describe("mongoshield init for Backblaze B2 (no card) and Cloudflare R2", () => 
   });
 });
 
+/**
+ * Fake `gh` and `git` for `init --github`, so no test can ever reach the real GitHub
+ * CLI. initGithub runs them by name through spawnRunner (init-github.ts), which spawns
+ * without a shell and without its own `env`, so the names are looked up on the
+ * process PATH: each test points PATH at a fresh directory holding only these two
+ * scripts. They log every call (and what a `gh secret set` read on stdin) to a file.
+ * In "logged-out" mode every command exits 1; in "logged-in" mode `gh auth status`
+ * and setting secrets and variables succeed, and everything else, including every
+ * git command, still exits 1.
+ */
+const FAKE_GH = `#!/bin/sh
+input=""
+while IFS= read -r line || [ -n "$line" ]; do input="$input$line"; done
+printf '%s\\n' "gh $*" >> "$FAKE_GH_LOG"
+if [ "$FAKE_GH_MODE" != "logged-in" ]; then exit 1; fi
+case "$1 $2" in
+  "auth status"|"variable set") exit 0 ;;
+  "secret set") printf '%s\\n' "stdin of secret set $3: $input" >> "$FAKE_GH_LOG"; exit 0 ;;
+esac
+exit 1
+`;
+const FAKE_GIT = `#!/bin/sh
+printf '%s\\n' "git $*" >> "$FAKE_GH_LOG"
+exit 1
+`;
+
 describe("init --github", () => {
+  /** The directory with the fake commands, while a test uses them. */
+  let fakeBin: string | undefined;
+
+  /** Puts the fake gh and git first and alone on PATH, in `mode`. */
+  async function useFakeGithubCli(mode: "logged-in" | "logged-out"): Promise<void> {
+    const bin = await mkdtemp(join(tmpdir(), "mongoshield-fake-gh-"));
+    fakeBin = bin;
+    for (const [name, script] of [
+      ["gh", FAKE_GH],
+      ["git", FAKE_GIT],
+    ] as const) {
+      await writeFile(join(bin, name), script);
+      await chmod(join(bin, name), 0o755);
+    }
+    vi.stubEnv("PATH", bin);
+    vi.stubEnv("FAKE_GH_MODE", mode);
+    vi.stubEnv("FAKE_GH_LOG", join(bin, "calls.log"));
+    // The guard that matters: nothing but the fakes can be found on this PATH.
+    expect(process.env.PATH).toBe(bin);
+  }
+
+  /** The commands the fakes were called with, in order. */
+  async function fakeCalls(): Promise<string[]> {
+    if (fakeBin === undefined) return [];
+    const text = await readFile(join(fakeBin, "calls.log"), "utf8").catch(() => "");
+    return text.split("\n").filter((line) => line !== "");
+  }
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    if (fakeBin !== undefined) await rm(fakeBin, { recursive: true, force: true });
+    fakeBin = undefined;
+  });
+
   it.each([
     [["init", "--github", "--keygen"], "--keygen does not apply with --github"],
     [
       ["init", "--github", "--recipient", generateIdentity().recipient],
       "--recipient does not apply with --github",
     ],
+    [["init", "--github", "--preset", "atlas-free"], "--preset does not apply with --github"],
   ])("refuses %j: CI backups always get a new key pair", async (args, message) => {
     const run = await runTestCli(args);
     expect(run.code).toBe(2);
     expect(plain(run.stderr)).toContain(message);
+  });
+
+  it("needs --storage without a terminal when the destination has no default", async () => {
+    const run = await runTestCli(["init", "--github", "--destination", "b2"], { cwd });
+    expect(run.code).toBe(2);
+    expect(run.stderr).toContain("--destination b2 needs --storage");
+    expect(await exists(join(cwd, "mongoshield.key"))).toBe(false);
+  });
+
+  it("refuses an invalid --uri-env before writing anything", async () => {
+    const run = await runTestCli(
+      ["init", "--github", "--destination", "github-artifacts", "--uri-env", "not a name"],
+      { cwd },
+    );
+    expect(run.code).toBe(2);
+    expect(run.stderr).toContain("--uri-env must be an environment variable name");
+    expect(await exists(join(cwd, "mongoshield.key"))).toBe(false);
+  });
+
+  // Without a token in the environment the drive login runs; while MongoShield ships no
+  // Dropbox app key it stops at once (with a key it would wait for a browser instead).
+  it.skipIf(DROPBOX_SHIPPED_CLIENT_ID !== "")(
+    "signs in to the drive when its token is not set, and stops with the app key hint",
+    async () => {
+      const run = await runTestCli(["init", "--github", "--destination", "dropbox"], { cwd });
+      expect(run.code).toBe(2);
+      expect(run.stderr).toContain("No Dropbox app key is configured");
+      expect(run.stderr).toContain("MONGOSHIELD_DROPBOX_CLIENT_ID");
+      expect(await exists(join(cwd, "mongoshield.key"))).toBe(false);
+    },
+  );
+
+  it("takes the drive token and connection string from the environment, and needs a passphrase without a terminal", async () => {
+    // Fakes on PATH all the same, so a change of order could not reach the real gh.
+    await useFakeGithubCli("logged-out");
+    const token = "refresh-token-from-the-environment";
+    const uri = "mongodb://backup:s3cret-password@db.example.com/app";
+    const run = await runTestCli(["init", "--github", "--destination", "dropbox"], {
+      cwd,
+      env: { MONGOSHIELD_DROPBOX_TOKEN: token, MONGODB_URI: uri },
+    });
+    // No login was needed; the recovery kit passphrase is what is missing. This stops
+    // before the first gh or git command.
+    expect(run.code).not.toBe(0);
+    expect(run.stderr).toContain("recovery kit passphrase is needed");
+    expect(run.stderr).toContain("MONGOSHIELD_RECOVERY_PASSPHRASE");
+    expect(run.stderr).not.toContain("Dropbox app key");
+    expect(await fakeCalls()).toEqual([]);
+    expect(run.stdout + run.stderr).not.toContain(token);
+    expect(run.stdout + run.stderr).not.toContain("s3cret-password");
+    // The key pair comes first, so it exists (and is ignored by git) already.
+    expect(await exists(join(cwd, "mongoshield.key"))).toBe(true);
+    expect(await readFile(join(cwd, ".gitignore"), "utf8")).toContain("/mongoshield.key");
+  });
+
+  it("writes the workflow for GitHub artifacts and prints the gh commands when gh is not logged in", async () => {
+    await useFakeGithubCli("logged-out");
+    const run = await runTestCli(
+      ["init", "--github", "--destination", "github-artifacts", "--json"],
+      { cwd },
+    );
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.json()).toMatchObject({
+      destination: "github-artifacts",
+      storage: "./backups",
+      workflowFile: ".github/workflows/mongoshield-backup.yml",
+      configFile: "mongoshield.config.json",
+      keyFile: join(cwd, "mongoshield.key"),
+      recoveryKit: false,
+      github: "manual",
+      firstRun: { status: "not-started" },
+    });
+    expect(run.json<{ recipient: string }>().recipient).toMatch(/^age1/);
+    expect(await exists(join(cwd, ".github/workflows/mongoshield-backup.yml"))).toBe(true);
+    expect(JSON.parse(await readFile(join(cwd, "mongoshield.config.json"), "utf8"))).toMatchObject({
+      storage: "./backups",
+    });
+    // Only the fake gh ran: the Action lookup and the login check. git never did.
+    const calls = await fakeCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatch(
+      /^gh api repos\/ShamalRathnayake\/mongoshield\/commits\/v\S+ --jq \.sha$/,
+    );
+    expect(calls[1]).toBe("gh auth status");
+  });
+
+  it("writes the recovery kit to a directory destination with the passphrase from the environment", async () => {
+    await useFakeGithubCli("logged-out");
+    const storage = join(cwd, "backups");
+    const uri = "mongodb://backup:s3cret-password@db.example.com/app";
+    const run = await runTestCli(
+      ["init", "--github", "--destination", "directory", "--storage", storage],
+      {
+        cwd,
+        env: { MONGOSHIELD_RECOVERY_PASSPHRASE: "correct horse battery staple", MONGODB_URI: uri },
+      },
+    );
+    // The connection string went to a 0600 file for `gh secret set … < file`; clean it up.
+    const secretsDir = /^rm -r (.+)$/m.exec(run.stdout)?.[1];
+    if (secretsDir !== undefined) await rm(secretsDir, { recursive: true, force: true });
+
+    expect(run.code, run.stderr).toBe(0);
+    expect(await exists(join(storage, RECOVERY_KIT_KEY))).toBe(true);
+    expect(run.stderr).toContain("Wrote the recovery kit");
+    expect(run.stdout).toMatch(/^gh secret set MONGODB_URI < .+MONGODB_URI$/m);
+    expect(secretsDir).toBeDefined();
+    expect(run.stdout + run.stderr).not.toContain("s3cret-password");
+    expect(run.stdout + run.stderr).not.toContain("correct horse battery staple");
+    const config = JSON.parse(await readFile(join(cwd, "mongoshield.config.json"), "utf8"));
+    expect(config.storage).toBe(storage);
+  });
+
+  it("asks where backups go and for the connection string on a terminal, then says what is left", async () => {
+    await useFakeGithubCli("logged-out");
+    const run = await runTestCli(["init", "--github"], {
+      cwd,
+      terminal: [
+        { when: MENU, keys: choose("github-artifacts") },
+        { when: "Which directory should the workflow upload", keys: KEYS.enter },
+        // Enter skips: the secret is then listed for the user to set.
+        { when: "MongoDB connection string", keys: KEYS.enter },
+      ],
+    });
+    expect(run.code, plain(run.stderr)).toBe(0);
+    expect(run.stdout).toMatch(/^gh secret set MONGODB_URI$/m);
+    expect(plain(run.stderr)).toContain(
+      "Set up. Commit the workflow and run it once to check it works.",
+    );
+  });
+
+  it("sets the secrets with a logged-in gh, then asks before committing and pushing", async () => {
+    await useFakeGithubCli("logged-in");
+    const uri = "mongodb://backup:s3cret-password@db.example.com/app";
+    const run = await runTestCli(["init", "--github"], {
+      cwd,
+      terminal: [
+        { when: MENU, keys: choose("github-artifacts") },
+        { when: "Which directory should the workflow upload", keys: KEYS.enter },
+        { when: "MongoDB connection string", keys: `${uri}${KEYS.enter}` },
+        // "n" answers no at once: nothing is committed or pushed.
+        { when: "so GitHub can run the workflow?", keys: "n" },
+      ],
+    });
+    expect(run.code, plain(run.stderr)).toBe(0);
+    const calls = await fakeCalls();
+    expect(calls).toContain(`stdin of secret set MONGODB_URI: ${uri}`);
+    // The connection string went on stdin only, never on a command line or the screen.
+    expect(calls.filter((call) => call.startsWith("gh") && call.includes("s3cret"))).toEqual([]);
+    expect(calls.some((call) => call.startsWith("gh variable set MONGOSHIELD_RECIPIENTS"))).toBe(
+      true,
+    );
+    expect(calls.some((call) => call.startsWith("git"))).toBe(false);
+    expect(run.stdout + run.stderr).not.toContain("s3cret-password");
+    expect(plain(run.stderr)).toContain("Push the workflow, then start it");
+    expect(plain(run.stderr)).toContain("Set up. Commit the workflow");
   });
 
   it("maps each destination to the storage initGithub sets up", () => {

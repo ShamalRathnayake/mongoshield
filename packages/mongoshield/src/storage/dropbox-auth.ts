@@ -436,11 +436,14 @@ async function waitForCode(
     // A loopback login must not fail because the optional prompt was closed (no
     // terminal, Ctrl-D): the browser can still come back. A pasted value that is
     // not a valid code or redirect URL does fail, so the user is not left waiting.
-    const tolerant = read.catch((error: unknown) => {
-      if (error instanceof MongoShieldError && error.code === "MS_CONFIG_INVALID") throw error;
-      return new Promise<string>(() => {});
-    });
-    candidates.push(listener ? tolerant : read);
+    // The tolerant wrapper is only built when it races: unused, its rejection for a
+    // bad paste would go unhandled.
+    const tolerant = () =>
+      read.catch((error: unknown) => {
+        if (error instanceof MongoShieldError && error.code === "MS_CONFIG_INVALID") throw error;
+        return new Promise<string>(() => {});
+      });
+    candidates.push(listener ? tolerant() : read);
   }
   candidates.push(rejectOnAbort(signal));
   try {
