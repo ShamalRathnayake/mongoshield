@@ -1,6 +1,6 @@
 # Opt-in tests against REAL cloud services: AWS (S3, S3 Object Lock, KMS), Cloudflare
 # R2, Google Cloud (GCS, GCS object retention, Cloud KMS), Azure (Blob, Blob
-# immutability, Key Vault), a remote SFTP server, Google Drive and Dropbox. They run
+# immutability, Key Vault), a remote SFTP server, Google Drive, Dropbox and OneDrive. They run
 # the storage conformance suite, an encrypted backup/restore round trip and KMS round
 # trips (packages/mongoshield/test/cloud), which the normal CI only runs against
 # emulators and fakes.
@@ -15,7 +15,7 @@
 # Setup, IAM policies and the full list of names: docs/testing-real-clouds.md.
 #
 # Credentials: AWS, Google Cloud and Azure use GitHub OIDC (short-lived tokens, no
-# stored keys). R2, SFTP, Google Drive and Dropbox have no OIDC, so their keys are *secrets*.
+# stored keys). R2, SFTP, Google Drive, Dropbox and OneDrive have no OIDC, so their keys are *secrets*.
 # Secrets are only ever passed through `env:` to the test process and are never
 # echoed; GitHub also masks them in logs.
 name: Cloud
@@ -322,12 +322,68 @@ jobs:
           MONGOSHIELD_TEST_DROPBOX_CLIENT_ID: ${{ vars.MONGOSHIELD_TEST_DROPBOX_CLIENT_ID }}
           MONGOSHIELD_TEST_DROPBOX_TOKEN: ${{ secrets.MONGOSHIELD_TEST_DROPBOX_TOKEN }}
 
+  onedrive:
+    name: OneDrive (personal account)
+    # The sign-in is a secret, which a job-level `if` cannot read, so a variable says
+    # the account is configured (any non-empty value, e.g. "personal").
+    if: vars.MONGOSHIELD_TEST_ONEDRIVE != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: cloud-tests
+    permissions:
+      contents: read
+    env:
+      # The rotated sign-in, carried between weekly runs like the MongoShield Action
+      # does (encrypted with a key derived from the secret; the cache holds ciphertext).
+      # Outside the checkout (`runner.temp` is not available at job level).
+      TOKEN_STATE: /tmp/onedrive-token-state/state.json
+    steps:
+      - name: Check the OneDrive secret is set
+        env:
+          TOKEN: ${{ secrets.MONGOSHIELD_TEST_ONEDRIVE_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Set the secret MONGOSHIELD_TEST_ONEDRIVE_TOKEN (see docs/guides/onedrive.md)."
+            exit 1
+          fi
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Cache MongoDB binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-${{ runner.os }}-8.0.13
+      - name: Restore the OneDrive token state
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.TOKEN_STATE }}
+          key: onedrive-test-token-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: onedrive-test-token-
+      - name: Run the OneDrive cloud tests
+        run: pnpm --filter mongoshield test:cloud test/cloud/onedrive.test.ts
+        env:
+          MONGOSHIELD_TEST_ONEDRIVE_TOKEN: ${{ secrets.MONGOSHIELD_TEST_ONEDRIVE_TOKEN }}
+          MONGOSHIELD_TEST_ONEDRIVE_TOKEN_STATE: ${{ env.TOKEN_STATE }}
+          MONGOSHIELD_ONEDRIVE_CLIENT_ID: ${{ vars.MONGOSHIELD_ONEDRIVE_CLIENT_ID }}
+      - name: Save the OneDrive token state
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.TOKEN_STATE }}
+          key: onedrive-test-token-${{ github.run_id }}-${{ github.run_attempt }}
+
   # A one-glance table of which providers ran, on the run's summary page. Reads only
   # variables (never secrets), so it is safe to print.
   summary:
     name: Summary
     if: always()
-    needs: [aws, r2, gcp, azure, sftp, gdrive, dropbox]
+    needs: [aws, r2, gcp, azure, sftp, gdrive, dropbox, onedrive]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -340,6 +396,7 @@ jobs:
           SFTP: ${{ needs.sftp.result }}
           GDRIVE: ${{ needs.gdrive.result }}
           DROPBOX: ${{ needs.dropbox.result }}
+          ONEDRIVE: ${{ needs.onedrive.result }}
         run: |
           {
             echo "## Real-cloud tests"
@@ -353,10 +410,11 @@ jobs:
             echo "| SFTP | $SFTP |"
             echo "| Google Drive | $GDRIVE |"
             echo "| Dropbox | $DROPBOX |"
+            echo "| OneDrive (personal) | $ONEDRIVE |"
             echo ""
             echo "\`skipped\` means the provider is not configured; see docs/testing-real-clouds.md."
           } >> "$GITHUB_STEP_SUMMARY"
           # Fail the summary (and so the run) when any configured provider failed.
-          for result in "$AWS" "$R2" "$GCP" "$AZURE" "$SFTP" "$GDRIVE" "$DROPBOX"; do
+          for result in "$AWS" "$R2" "$GCP" "$AZURE" "$SFTP" "$GDRIVE" "$DROPBOX" "$ONEDRIVE"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then exit 1; fi
           done
