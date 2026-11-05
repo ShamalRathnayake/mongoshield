@@ -10,8 +10,10 @@ README; the matching guides are in [`docs/guides`](../docs/guides/).
 | [`console-compose`](./console-compose/) | the web console + MongoDB, zero setup: paste the URI, browse, back up, restore |
 | [`aws-lambda`](./aws-lambda/) | SAM template: Lambda on an EventBridge schedule, S3 bucket, error alarm |
 | [`vercel-cron`](./vercel-cron/) | Next.js route handler called by Vercel Cron |
+| [`netlify-scheduled-backup`](./netlify-scheduled-backup/) | Netlify scheduled function starting a background function, backing up to Google Drive (undocumented behaviour, small databases only) |
 | [`nestjs`](./nestjs/) | a NestJS module providing `MongoShield`, with a scheduled job |
 | [`express-admin`](./express-admin/) | a protected "back up now" endpoint, with a security checklist |
+| [`community-storage-adapter`](./community-storage-adapter/) | a third-party storage adapter (`flatdir://`) registered under its own scheme and passing the contract test kit |
 
 Kubernetes lives in [`deploy/`](../deploy/): a Helm chart and a plain CronJob manifest.
 

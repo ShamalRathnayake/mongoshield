@@ -548,6 +548,12 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
     list,
     listPrefixes,
     delete: deleteObjects,
+    async space(spaceOptions: SignalOptions = {}) {
+      throwIfAborted(spaceOptions.signal);
+      // The root may not exist before the first backup; its nearest parent is on the
+      // same volume (or will hold the mount point), so that is what gets measured.
+      return volumeSpace(root);
+    },
     async close() {
       // Every call opens and closes its own handles; nothing to release.
     },
@@ -560,12 +566,29 @@ export function fileStorage(options: FileStorageOptions): StorageAdapter {
  * backup, so that we fail early instead of halfway through with ENOSPC.
  */
 export async function availableBytes(path: string): Promise<number> {
+  return (await volumeSpace(path)).freeBytes;
+}
+
+/**
+ * The size of the volume holding `path` (or its nearest existing parent), from
+ * statfs(2): `totalBytes` is the whole filesystem, `usedBytes` the blocks in use,
+ * `freeBytes` what this process may still write. A disk has no trash of its own, so
+ * `trashBytes` is left out. Used by `fileStorage().space()` and {@link availableBytes}.
+ */
+async function volumeSpace(
+  path: string,
+): Promise<{ totalBytes: number; usedBytes: number; freeBytes: number }> {
   let current = resolve(path);
   for (;;) {
     try {
       const stats = await statfs(current);
-      // bavail (not bfree) excludes blocks reserved for the superuser.
-      return stats.bavail * stats.bsize;
+      return {
+        totalBytes: stats.blocks * stats.bsize,
+        // bfree counts the blocks reserved for the superuser as free; they are not in use.
+        usedBytes: (stats.blocks - stats.bfree) * stats.bsize,
+        // bavail (not bfree) excludes blocks reserved for the superuser.
+        freeBytes: stats.bavail * stats.bsize,
+      };
     } catch (error) {
       const parent = dirname(current);
       if (errnoCode(error) !== "ENOENT" || parent === current) {

@@ -39,8 +39,11 @@
     "./storage/gcs": "./dist/storage/gcs.mjs",
     "./storage/azure": "./dist/storage/azure.mjs",
     "./storage/sftp": "./dist/storage/sftp.mjs",
+    "./storage/gdrive": "./dist/storage/gdrive.mjs",
+    "./storage/dropbox": "./dist/storage/dropbox.mjs",
     "./kms": "./dist/kms.mjs",
     "./testing": "./dist/testing.mjs",
+    "./testing/storage": "./dist/testing/storage.mjs",
     "./package.json": "./package.json"
   },
   "files": [

@@ -3,7 +3,7 @@ import type { ApplyErasuresResult } from "./extras/erasure.ts";
 import type { ClusterTime, Compression, ConsistencyMode, Manifest } from "./format/manifest.ts";
 import type { Logger } from "./logger.ts";
 import type { MaskConfig, MaskReport } from "./mask/index.ts";
-import type { StorageAdapter } from "./storage/types.ts";
+import type { StorageAdapter, StorageSpace } from "./storage/types.ts";
 import type { SubsetConfig, SubsetSelection } from "./subset/index.ts";
 
 /**
@@ -214,7 +214,9 @@ export interface CompletedBackupResult {
    * consistency `auto` fell back to `none` (the manifest's `consistency.warning`), an
    * incremental fell back to a full backup for a reason that repeats on every run
    * (`MS_SNAPSHOT_TOO_OLD` on large time series), a Queryable Encryption collection
-   * backed up without its state collections. Absent when there is nothing to report.
+   * backed up without its state collections, the storage is more than 80% full (the
+   * free-space check), a storage sign-in about to expire.
+   * Absent when there is nothing to report.
    * Scheduled runs copy them into the run report (`backup.warnings`).
    */
   readonly warnings?: readonly string[];
@@ -513,6 +515,21 @@ export type ProgressEvent =
       readonly elapsedMs: number;
       /** `undefined` until there is enough data to estimate. */
       readonly etaMs: number | undefined;
+    }
+  | {
+      /**
+       * Backups only, once before the first write, when the storage reports its size
+       * (`StorageAdapter.space()`). A backup that clearly would not fit fails with
+       * MS_STORAGE_INSUFFICIENT_SPACE before this event; past 80% full, `warning` says so
+       * (and is also in the result's `warnings`).
+       */
+      readonly type: "storage:space";
+      readonly space: StorageSpace;
+      /** The fraction in use, 0–1, trash included; `undefined` when the total is not known. */
+      readonly usedFraction: number | undefined;
+      /** The previous full backup's stored size, used as the estimate; `undefined` for the first. */
+      readonly estimatedBytes: number | undefined;
+      readonly warning: string | undefined;
     };
 
 /** Settings for OpenTelemetry tracing and metrics. */

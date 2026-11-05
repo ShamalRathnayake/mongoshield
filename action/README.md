@@ -24,12 +24,12 @@ A complete nightly workflow (with AWS OIDC, no stored AWS keys) is in
 |---|---|---|
 | `command` | `backup` | `backup`, `run` (backup + verify + prune + notify, from the config file), `verify` or `restore` |
 | `uri` | | MongoDB connection string. Use a secret; it is masked, including the password on its own |
-| `storage` | | `s3://bucket/prefix?region=…`, or a directory path |
+| `storage` | | `s3://bucket/prefix?region=…`, `gdrive://folder`, or a directory path |
 | `recipients` | | Comma-separated age public keys (`age1…`) to encrypt for |
 | `identity` | | age secret key (`AGE-SECRET-KEY-1…`) for `restore` and `verify --deep`. Use a secret |
 | `config` | | Path to a `mongoshield.config.{ts,js,json}` |
 | `args` | | Extra arguments, split on whitespace (values cannot contain spaces). Globs like `*.sessions` are passed literally |
-| `packages` | | Extra npm packages to install (e.g. `@aws-sdk/client-kms@3` for AWS KMS). SDKs for `s3://`, `gs://`, `az://` and `sftp://` storage are added automatically when the URL is in `storage`, `MONGOSHIELD_STORAGE` or the config file |
+| `packages` | | Extra npm packages to install (e.g. `@aws-sdk/client-kms@3` for AWS KMS). SDKs for `s3://`, `b2://`, `r2://`, `gs://`, `az://` and `sftp://` storage are added automatically when the URL is in `storage`, `MONGOSHIELD_STORAGE` or the config file |
 | `version` | `""` | mongoshield npm version or dist-tag. Empty: the release this Action ref belongs to, so pinning the Action pins the CLI. `latest`: the newest stable release |
 | `node-version` | `24` | Node.js to set up (22.12+). `""` uses the runner's Node.js |
 | `working-directory` | `.` | Where the config file and relative paths are resolved |

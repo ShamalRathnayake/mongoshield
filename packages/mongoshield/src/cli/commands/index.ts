@@ -21,6 +21,7 @@ import { inspectCommand } from "./inspect.ts";
 import { journalCommand } from "./journal.ts";
 import { keygenCommand } from "./keygen.ts";
 import { listCommand } from "./list.ts";
+import { loginCommand } from "./login.ts";
 import { maskCommand } from "./mask.ts";
 import { pruneCommand } from "./prune.ts";
 import { pullCommand } from "./pull.ts";
@@ -70,6 +71,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   erasuresCommand,
   keygenCommand,
   initCommand,
+  loginCommand,
   versionCommand,
 ];
 

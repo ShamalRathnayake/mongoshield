@@ -131,6 +131,11 @@ export class ProgressTracker {
     this.#maybeEmitOverall(this.#now());
   }
 
+  /** Emits the `storage:space` event of the free-space check (never throttled). */
+  storageSpace(event: Omit<Extract<ProgressEvent, { type: "storage:space" }>, "type">): void {
+    this.#emit({ type: "storage:space", ...event });
+  }
+
   /** Emits a last `overall` event with the final totals, regardless of throttling. */
   finish(): void {
     this.#emitOverall(this.#now(), 0);

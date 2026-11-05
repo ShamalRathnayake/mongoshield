@@ -15,7 +15,8 @@ restore round trip, and KMS round trips against real services:
 | AWS S3 | conformance + encrypted round trip |
 | AWS S3 with Object Lock | conformance with retention + round trip with `retainDays: 1` |
 | AWS KMS | wrap/unwrap, tampered ciphertext refused, KMS backup restored via KMS and via recovery key |
-| Cloudflare R2 | conformance + round trip (S3 adapter with R2's endpoint) |
+| Cloudflare R2 | conformance + round trip (the `r2Storage` preset) |
+| Backblaze B2 | conformance + round trip (the `b2Storage` preset) |
 | Google Cloud Storage | conformance + round trip |
 | GCS with object retention | conformance with retention + round trip with `retainDays: 1` |
 | Google Cloud KMS | as AWS KMS |
@@ -23,6 +24,8 @@ restore round trip, and KMS round trips against real services:
 | Azure Blob with version-level immutability | conformance with retention + round trip with `retainDays: 1` |
 | Azure Key Vault | as AWS KMS |
 | SFTP (a remote server) | conformance + round trip |
+| Google Drive | conformance + round trip (`gdrive://`, a real Google account) |
+| Dropbox (an App folder app) | conformance + round trip |
 
 The tests live in `packages/mongoshield/test/cloud/` (one file per provider) and
 the workflow in `.github/workflows/cloud.yml`.
@@ -77,13 +80,13 @@ pnpm --filter mongoshield test:cloud test/cloud/aws.test.ts  # one provider
 
 Credentials are found by each SDK's normal chain, so locally you use your own login:
 `aws sso login` / a profile, `gcloud auth application-default login`, `az login`.
-R2 and SFTP take their keys from the variables below.
+R2, B2 and SFTP take their keys from the variables below.
 
 ## Names
 
 Variables are not secret (bucket names, key ids, URLs); in GitHub they are
 **repository variables** (Settings → Secrets and variables → Actions → *Variables*).
-Only R2 and SFTP need **secrets**. Locally, everything is an environment variable
+Only R2, B2, SFTP, Google Drive and Dropbox need **secrets**. Locally, everything is an environment variable
 with the same name.
 
 The jobs in `cloud.yml` decide whether to run with a job-level `if:` on a variable.
@@ -102,6 +105,10 @@ must be **repository** variables, not `cloud-tests` environment variables.
 | `MONGOSHIELD_TEST_R2_BUCKET` | variable | R2 | bucket name; enables the R2 job |
 | `MONGOSHIELD_TEST_R2_ACCESS_KEY_ID` | **secret** | R2 | R2 API token access key id |
 | `MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY` | **secret** | R2 | R2 API token secret |
+| `MONGOSHIELD_TEST_B2_BUCKET` | variable | B2 | bucket name; enables the B2 job |
+| `MONGOSHIELD_TEST_B2_REGION` | variable | B2 | the bucket's region, e.g. `us-west-004` |
+| `MONGOSHIELD_TEST_B2_KEY_ID` | **secret** | B2 | application key keyID |
+| `MONGOSHIELD_TEST_B2_APPLICATION_KEY` | **secret** | B2 | application key applicationKey |
 | `MONGOSHIELD_CLOUD_GCP_WORKLOAD_IDENTITY_PROVIDER` | variable (CI only) | GCP job | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github`; enables the GCP job |
 | `MONGOSHIELD_CLOUD_GCP_SERVICE_ACCOUNT` | variable (CI only) | GCP job | `mongoshield-cloud-tests@PROJECT.iam.gserviceaccount.com` |
 | `MONGOSHIELD_TEST_GCS_BUCKET` | variable | GCS | plain bucket |
@@ -119,6 +126,11 @@ must be **repository** variables, not `cloud-tests` environment variables.
 | `MONGOSHIELD_TEST_SFTP_HOST_FINGERPRINT` | variable | SFTP | `SHA256:…` of the host key (comma-separated for several) |
 | `MONGOSHIELD_TEST_SFTP_PATH` | variable | SFTP | writable directory, e.g. `/upload` |
 | `MONGOSHIELD_TEST_SFTP_PRIVATE_KEY` | **secret** | SFTP | the user's unencrypted private key (OpenSSH/PEM text) |
+| `MONGOSHIELD_TEST_GDRIVE_CLIENT_ID` | variable | Google Drive | OAuth client id (type "TVs and Limited Input devices"); enables the Google Drive job |
+| `MONGOSHIELD_TEST_GDRIVE_CLIENT_SECRET` | **secret** | Google Drive | that client's secret |
+| `MONGOSHIELD_TEST_GDRIVE_TOKEN` | **secret** | Google Drive | refresh token from `mongoshield login gdrive` with that client |
+| `MONGOSHIELD_TEST_DROPBOX_CLIENT_ID` | variable | Dropbox | the test app's app key; enables the Dropbox job |
+| `MONGOSHIELD_TEST_DROPBOX_TOKEN` | **secret** | Dropbox | a refresh token for that app (`mongoshield login dropbox`) |
 | `MONGOSHIELD_TEST_PREFIX` | variable (optional) | all | top-level prefix, default `mongoshield-ci` |
 
 In the tables and commands below, replace `ShamalRathnayake/mongoshield` with your
@@ -130,7 +142,7 @@ fork if you run this elsewhere.
    Every job in `cloud.yml` uses it, and the cloud trust policies below accept only
    tokens issued for it, so no other workflow (and no pull request) can assume the
    test roles. Optionally add a required reviewer or restrict it to `main`.
-2. **Secrets** (R2 and SFTP only): add them as environment secrets of `cloud-tests`
+2. **Secrets** (R2, B2, SFTP, Google Drive and Dropbox only): add them as environment secrets of `cloud-tests`
    (or repository secrets).
 3. **Variables:** add the repository variables from the table for the providers you
    set up. A provider without its gate variable shows up as *skipped*.
@@ -323,10 +335,25 @@ delegates to IAM, so the role policy below is enough.
    page) and `MONGOSHIELD_TEST_R2_BUCKET`; secrets
    `MONGOSHIELD_TEST_R2_ACCESS_KEY_ID` and `MONGOSHIELD_TEST_R2_SECRET_ACCESS_KEY`.
 
-The tests use the S3 adapter exactly as the docs recommend for R2:
+The tests use the `r2Storage` preset that `r2://` URLs use:
 `endpoint: https://<account>.r2.cloudflarestorage.com`, `region: "auto"`,
 `requestChecksumCalculation: "WHEN_REQUIRED"`. R2's bucket locks are not the S3
 Object Lock API, so the R2 target checks that retained writes are refused.
+
+## Backblaze B2
+
+1. Buckets → *Create a Bucket* → private, `mongoshield-cloud-tests`, *Object Lock*
+   disabled. Note the region from its endpoint `s3.<region>.backblazeb2.com`.
+2. Bucket → *Lifecycle Settings* → custom: prefix `mongoshield-ci/`, hide after 1
+   day, delete 1 day after hiding.
+3. Application Keys → *Add a New Application Key*: allow access to the test bucket
+   only, **Read and Write**. Copy the keyID and the applicationKey (shown once).
+4. Variables `MONGOSHIELD_TEST_B2_BUCKET` and `MONGOSHIELD_TEST_B2_REGION`; secrets
+   `MONGOSHIELD_TEST_B2_KEY_ID` and `MONGOSHIELD_TEST_B2_APPLICATION_KEY`.
+
+The tests use the `b2Storage` preset that `b2://` URLs use (path-style requests,
+`WHEN_REQUIRED` checksums). Conditional writes go through the adapter's one-time
+probe, so this target is where a change in B2's `If-None-Match` support shows.
 
 ## Google Cloud: GCS, object retention and Cloud KMS
 
@@ -575,6 +602,60 @@ the server:
 ```sh
 find /srv/sftp/upload/mongoshield-ci -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} +
 ```
+
+## Google Drive
+
+Use a **dedicated Google account** for the tests, never a personal one: the tests write
+and delete files in its drive, and its refresh token is stored as a CI secret.
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create a project
+   (e.g. `mongoshield-cloud-tests`) and enable the **Google Drive API**.
+2. **Google Auth Platform**: fill in the branding, Audience **External**, add the test
+   account as a test user, and add the scope
+   `https://www.googleapis.com/auth/drive.file`. Then set the publishing status to
+   **In production**: while an app is in Testing, Google expires its refresh tokens after
+   7 days and the weekly job would fail every other run. (`drive.file` is non-sensitive,
+   so an unverified app in production only shows a warning on the consent screen, which
+   is fine for a test account.)
+3. **Clients → Create client**, type **TVs and Limited Input devices**. Note the client
+   id and secret.
+4. Log in once as the test account with that client:
+
+   ```sh
+   export MONGOSHIELD_GDRIVE_CLIENT_ID=….apps.googleusercontent.com
+   export MONGOSHIELD_GDRIVE_CLIENT_SECRET=…
+   npx mongoshield login gdrive
+   ```
+
+5. Variable `MONGOSHIELD_TEST_GDRIVE_CLIENT_ID`; secrets
+   `MONGOSHIELD_TEST_GDRIVE_CLIENT_SECRET` and `MONGOSHIELD_TEST_GDRIVE_TOKEN` (the token
+   login printed). The job runs when the variable is set.
+
+Each run writes into its own folder, `MongoShield/mongoshield-ci/<yyyymmdd>-<random>/`
+in the account's My Drive, and deletes the files it wrote. Drive has no lifecycle
+rules; empty per-run folders can be left behind by a killed run, so delete old ones
+from drive.google.com now and then. The token is used weekly, so it never reaches
+Google's six-month expiry for unused tokens.
+
+## Dropbox
+
+Use a separate Dropbox account for the tests (a free Basic account is enough), so a
+broken test can never touch real files.
+
+1. [App Console](https://www.dropbox.com/developers/apps) → *Create app* → *Scoped
+   access* → *App folder*, named e.g. `mongoshield-cloud-tests`. Give it the scopes and
+   settings from [the Dropbox guide](guides/dropbox.md#use-your-own-dropbox-app)
+   (`files.metadata.read`, `files.content.read`, `files.content.write`,
+   `account_info.read`; public clients on; both redirect URIs).
+2. Get a refresh token while signed in as the test account:
+   `MONGOSHIELD_DROPBOX_CLIENT_ID=<app key> npx mongoshield login dropbox`.
+3. Variable `MONGOSHIELD_TEST_DROPBOX_CLIENT_ID` (the app key) and secret
+   `MONGOSHIELD_TEST_DROPBOX_TOKEN` (the refresh token).
+
+Everything goes under `Apps/<app>/mongoshield-ci/<run>/`. The tests delete their files,
+and the run's folder is deleted at the end (the adapter itself never deletes folders).
+Deleted files stay in the account's *Deleted files* for 30 days but do not count
+against its quota. The 2 GB of a Basic account is plenty: a run writes a few MB.
 
 ## When a cloud test fails
 

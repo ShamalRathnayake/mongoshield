@@ -10,8 +10,12 @@ export default defineConfig({
     "storage/gcs": "src/storage/gcs.ts",
     "storage/azure": "src/storage/azure.ts",
     "storage/sftp": "src/storage/sftp.ts",
+    "storage/gdrive": "src/storage/gdrive.ts",
+    "storage/dropbox": "src/storage/dropbox.ts",
     kms: "src/crypto/kms/index.ts",
     testing: "src/testing/index.ts",
+    // The storage adapter contract test kit, for community adapters.
+    "testing/storage": "src/testing/storage-conformance.ts",
   },
   format: "esm",
   platform: "node",

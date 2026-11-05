@@ -12,6 +12,11 @@
  *   5. When a target already holds documents, every backup file is checksummed before
  *      the first write (`verifyFirst`, see `shouldVerifyFirst`).
  *
+ * Without --identity-file, --passphrase-env or a decryption config, an encrypted
+ * backup is opened with the recovery kit in the storage location when there is one
+ * (`_state/recovery-kit.age`, passphrase from MONGOSHIELD_RECOVERY_PASSPHRASE or a
+ * prompt; see src/cli/recovery-kit.ts).
+ *
  * An incremental backup is restored through its chain: the plan shows the base full
  * backup's namespaces and names the incrementals replayed after it. `--at` with an
  * incremental's id stops inside its chain; `--at` alone uses the change journal, or an
@@ -50,6 +55,7 @@ import { confirmOrThrow } from "../confirm.ts";
 import { formatCount, formatDuration, plural } from "../format.ts";
 import type { Output } from "../io.ts";
 import { ProgressDisplay } from "../progress.ts";
+import { decryptionFromRecoveryKit } from "../recovery-kit.ts";
 import {
   type CliShield,
   createCliShield,
@@ -260,7 +266,12 @@ async function restoreOptions(
   const include = listOrUndefined(context, "include");
   const exclude = listOrUndefined(context, "exclude");
   const rename = parseKeyValues(context, NAME, "rename");
-  const decryption = await decryptionFromConfig(context, cli.config);
+  // No key given anywhere: fall back to the recovery kit, if the location has one.
+  const decryption =
+    (await decryptionFromConfig(context, cli.config)) ??
+    (await decryptionFromRecoveryKit(context, cli.shield.storage, () =>
+      selectedBackupIsEncrypted(context, cli),
+    ));
 
   const at = parseAt(context);
   return {
@@ -279,6 +290,31 @@ async function restoreOptions(
     ...(rename ? { rename } : {}),
     ...(decryption ? { decryption } : {}),
   };
+}
+
+/**
+ * Whether the backup being restored is encrypted, so the recovery kit is only opened
+ * (and its passphrase asked for) when a key is needed. When the selection cannot be
+ * made here (for example `--at`, decided later), it answers yes: asking once too often
+ * beats failing for want of a key.
+ */
+async function selectedBackupIsEncrypted(
+  context: CommandContext,
+  cli: CliShield,
+): Promise<boolean> {
+  try {
+    const entries = await cli.shield.list({ signal: context.signal });
+    if (context.flags.string("at") !== undefined)
+      return entries.some((entry) => isEncrypted(entry.manifest));
+    return isEncrypted(selectBackup(entries, backupSelectorArgument(context)).manifest);
+  } catch {
+    return true;
+  }
+}
+
+/** A manifest records `encryption: null` for unencrypted backups. */
+function isEncrypted(manifest: { readonly encryption?: unknown } | undefined): boolean {
+  return manifest?.encryption !== null && manifest?.encryption !== undefined;
 }
 
 /**

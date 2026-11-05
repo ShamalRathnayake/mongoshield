@@ -50,7 +50,7 @@ inputs:
     required: false
     default: ""
   packages:
-    description: Extra npm packages to install next to mongoshield, space-separated (e.g. `@aws-sdk/client-kms@3` for AWS KMS). Cloud SDKs for s3://, gs://, az:// and sftp:// storage, set in the `storage` input, MONGOSHIELD_STORAGE or the config file, are added automatically.
+    description: Extra npm packages to install next to mongoshield, space-separated (e.g. `@aws-sdk/client-kms@3` for AWS KMS). Cloud SDKs for s3://, b2://, r2://, gs://, az:// and sftp:// storage, set in the `storage` input, MONGOSHIELD_STORAGE or the config file, are added automatically.
     required: false
     default: ""
   version:

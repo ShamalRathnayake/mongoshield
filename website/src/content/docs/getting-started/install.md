@@ -50,13 +50,15 @@ them lazily and tells you which package is missing if one is needed.
 | Azure Key Vault | `@azure/keyvault-keys @azure/identity` |
 | OpenTelemetry traces and metrics | `@opentelemetry/api` |
 
-Local directories (and the in-memory storage used in tests) need nothing extra.
+Local directories, Google Drive (`gdrive://`, plain `fetch`) and the in-memory storage
+used in tests need nothing extra.
 
 ## Storage URLs
 
 The CLI and config file name storage with a URL. Credentials never go in the URL; each
 service uses its usual credential chain (AWS environment and profiles, Google
-Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or agent).
+Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or agent,
+a Dropbox refresh token in `MONGOSHIELD_DROPBOX_TOKEN`).
 
 | URL | Storage |
 |---|---|
@@ -65,6 +67,8 @@ Application Default Credentials, Azure `DefaultAzureCredential`, an SSH key or a
 | `gs://bucket/prefix` | Google Cloud Storage |
 | `az://account/container/prefix` | Azure Blob Storage |
 | `sftp://user@host:port/path?fingerprint=SHA256:…` | SFTP |
+| `gdrive://folder` | Google Drive (token in `MONGOSHIELD_GDRIVE_TOKEN`, from `mongoshield login gdrive`) |
+| `dropbox://folder` | Dropbox (App folder; token from `mongoshield login dropbox` in `MONGOSHIELD_DROPBOX_TOKEN`) |
 
 An `endpoint=…` parameter is a plain `https://host[:port]`: one with user info or a query
 string (an Azure SAS token, presigned S3 parameters) is refused, because those are

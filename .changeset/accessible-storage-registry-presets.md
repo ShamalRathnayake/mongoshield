@@ -1,0 +1,13 @@
+---
+"mongoshield": minor
+"@mongoshield/console": minor
+---
+
+Storage for everyone: a storage-scheme registry, B2 and R2 presets, a free-space check and a new `init` menu.
+
+- **Storage-scheme registry.** `registerStorageScheme(scheme, factory, { owner?, replace? })` adds `<scheme>://` URLs that `resolveStorage`, the CLI, config files and the console understand. The first-party schemes use the same registry; registering an existing scheme fails unless `replace: true`. `registeredStorageSchemes()` and `isStorageSchemeRegistered()` list and check them, and `resolveStorage(url, { env })` injects the environment factories read credentials from. `assertValidKey`, `assertValidPrefix` and `throwIfAborted` are exported for adapter authors.
+- **Contract test kit.** `mongoshield/testing/storage` exports `describeStorageConformance(name, setup, { describe, it, beforeEach, afterEach })`, the storage conformance suite every built-in adapter passes. It works with Vitest, Jest and node:test and adds no dependency. See `docs/guides/community-storage-adapters.md` and `examples/community-storage-adapter`.
+- **Backblaze B2 and Cloudflare R2.** `b2://bucket/prefix?region=us-west-004` and `r2://<accountId>/bucket/prefix` (and `b2Storage` / `r2Storage` from `mongoshield/storage/s3`) configure the S3 adapter with each service's endpoint, region, addressing style and `WHEN_REQUIRED` checksums. B2 credentials are an application key (`AWS_ACCESS_KEY_ID` = keyID, `AWS_SECRET_ACCESS_KEY` = applicationKey). The GitHub Action installs the S3 SDK for them, and the console accepts them with stored keys.
+- **Free-space check.** Adapters may implement `space()` (total, used, free and trash bytes); the file adapter does. Before the first write, a backup refuses with `MS_STORAGE_INSUFFICIENT_SPACE` when the previous full backup would not fit, warns past 80% full (logs, `warnings` and a `storage:space` progress event), counts the trash as used, and skips the check when the storage reports nothing.
+- **`mongoshield init` asks where backups go**: Google Drive, Dropbox, GitHub artifacts, Backblaze B2, Cloudflare R2, then a directory and every storage URL, with the next steps and secrets for each choice. `--destination` picks one without the menu.
+- **`mongoshield login <provider>`** signs in to Google Drive (a device code) or Dropbox (a browser sign-in with PKCE), prints the refresh token once with the secret it belongs in, and `--gh` stores it with `gh secret set` instead. MongoShield ships its own Google and Dropbox OAuth apps, so no app of your own is needed; `MONGOSHIELD_<PROVIDER>_CLIENT_ID` (and `_CLIENT_SECRET`) still override them.

@@ -474,7 +474,8 @@ mongoshield export --output ./dump && mongorestore --dir ./dump
 
 | Command | What it does |
 |:--|:--|
-| `init` · `keygen` | Create `mongoshield.config.ts`; generate an age key pair |
+| `init` · `keygen` | Create `mongoshield.config.ts` (asks where backups go); generate an age key pair |
+| `login <provider>` | Sign in to Google Drive or Dropbox and get the token for backups (`--gh` stores it as a repository secret) |
 | `backup` | Back up. `--incremental` for only the changes, `--max-duration` to split and resume, `--retain-days` for immutable backups |
 | `restore [id]` | Restore, with `--rename`, `--mode`, `--dry-run`, or `--at <time>` for a point in time |
 | `list` · `inspect <id>` | Backups with their verification, drills, holds and locks |
@@ -511,7 +512,7 @@ npm install mongoshield mongodb
 
 | For | Also install |
 |:--|:--|
-| S3 and S3-compatible storage | `@aws-sdk/client-s3` `@aws-sdk/lib-storage` |
+| S3 and S3-compatible storage (also B2 and R2) | `@aws-sdk/client-s3` `@aws-sdk/lib-storage` |
 | Google Cloud Storage | `@google-cloud/storage` |
 | Azure Blob Storage | `@azure/storage-blob` (and `@azure/identity` for managed identities) |
 | SFTP | `ssh2` |
@@ -659,14 +660,27 @@ version in every manifest, and newer releases keep reading older backups
 | | Storage | URL | Install |
 |:-:|:--|:--|:--|
 | 📁 | Local folder, NFS, SMB | `./backups` | built in |
+| 🟢 | Google Drive (15 GB free) | `gdrive://mongoshield-backups` | built in; `mongoshield login gdrive` |
+| 📦 | Dropbox (2 GB free) | `dropbox://mongoshield-backups` | built in; `mongoshield login dropbox` |
 | 🟠 | AWS S3 | `s3://bucket/prefix?region=eu-west-1` | `npm i @aws-sdk/client-s3 @aws-sdk/lib-storage` |
-| 🪣 | R2, B2, MinIO, Wasabi, Spaces | `s3://bucket/prefix?endpoint=https://…` | same as S3 |
+| 🔥 | Backblaze B2 (10 GB free, no card) | `b2://bucket/prefix?region=us-west-004` | same as S3 |
+| ☁️ | Cloudflare R2 (10 GB free, needs a card) | `r2://<accountId>/bucket/prefix` | same as S3 |
+| 🪣 | MinIO, Wasabi, Spaces, other S3-compatible | `s3://bucket/prefix?endpoint=https://…` | same as S3 |
 | 🔵 | Google Cloud Storage | `gs://bucket/prefix` | `npm i @google-cloud/storage` |
 | 🔷 | Azure Blob Storage | `az://account/container/prefix` | `npm i @azure/storage-blob` |
 | 🔐 | SFTP | `sftp://user@host:22/path` | `npm i ssh2` |
+| 🧩 | Anything else | `<scheme>://…` from a community package | see [writing a storage adapter](./docs/guides/community-storage-adapters.md) |
 
-The console image includes every SDK and the CLI image includes S3. The GitHub Action installs
-the SDK that its `storage` input needs.
+`npx mongoshield init` asks where backups go, with the free options first, and prints the
+next steps for the choice. `npx mongoshield init --github` goes all the way: it signs in to
+the drive, writes a nightly GitHub Actions workflow, sets the repository secrets and runs the
+first backup ([Atlas Free + Netlify in 10 minutes](./docs/guides/atlas-free-netlify.md)).
+Guides: [Google Drive](./docs/guides/google-drive.md) · [Dropbox](./docs/guides/dropbox.md) ·
+[B2 and R2](./docs/guides/b2-and-r2.md). The drives need no SDK: MongoShield only sees its
+own folder (Google: only the files it created), and the token stays in your secrets.
+Before each backup, storage that knows its size (a local disk, the drives) is checked: a
+backup that clearly will not fit is refused, and one past 80% full warns. The console image includes every SDK and
+the CLI image includes S3. The GitHub Action installs the SDK that its `storage` input needs.
 
 Encryption uses [age](https://age-encryption.org): public keys (`age1…`), a passphrase, a key
 the console keeps, or a cloud KMS. Make a key pair with `npx mongoshield keygen`.
@@ -909,7 +923,7 @@ The newest backup, held backups and write-once backups are never deleted.
 For the CLI and storage URLs.
 
 <details>
-<summary><b>&nbsp;👉&nbsp; Show all 19 environment variables</b>&nbsp; <sub><i>click to expand</i></sub></summary>
+<summary><b>&nbsp;👉&nbsp; Show all 20 environment variables</b>&nbsp; <sub><i>click to expand</i></sub></summary>
 <br>
 
 | Variable | Same as | What it does |
@@ -932,6 +946,7 @@ For the CLI and storage URLs.
 | `MONGOSHIELD_SFTP_KNOWN_HOSTS` | | known_hosts file for SFTP (default `~/.ssh/known_hosts`) |
 | `SSH_AUTH_SOCK` | | Use the SSH agent for `sftp://` URLs |
 | `AZURE_STORAGE_CONNECTION_STRING` | | Credentials for `az://` URLs (its account must match the URL) |
+| `MONGOSHIELD_GDRIVE_CLIENT_ID` · `_CLIENT_SECRET` (also `DROPBOX`) | | Your own OAuth app for `mongoshield login` and the drives, instead of MongoShield's |
 | `NO_COLOR` · `FORCE_COLOR` · `TERM=dumb` | | Turn colors off, or on when output is piped |
 | `CI` | | When set, the CLI never asks questions (use `--yes`) |
 
@@ -951,9 +966,13 @@ Schemes, parameters and credentials.
 |:--|:--|:--|:--|
 | Path | `./backups`, `/var/backups`, `file:///abs/path` | none | file permissions; relative paths use the working directory |
 | S3 | `s3://bucket/prefix` | `region`, `endpoint`, `forcePathStyle`, `requestChecksumCalculation`, `exactLastModified`, `retention` | AWS SDK default chain: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE`, instance and IRSA roles |
+| Backblaze B2 | `b2://bucket/prefix?region=us-west-004` | `region` (required), and S3's own: `partSizeMiB`, `queueSize`, checksums, `conditionalWrites`, `exactLastModified`, `retention` | `AWS_ACCESS_KEY_ID` = the application key's keyID, `AWS_SECRET_ACCESS_KEY` = its applicationKey |
+| Cloudflare R2 | `r2://<accountId>/bucket/prefix` | `jurisdiction` (`eu`, `fedramp`), and S3's own as for B2 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` = an R2 API token's keys |
 | Google Cloud Storage | `gs://bucket/prefix` | `projectId`, `retention` | Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default login`, the metadata server |
 | Azure Blob | `az://account/container/prefix` | `endpoint`, `retention` | `AZURE_STORAGE_CONNECTION_STRING`, else `DefaultAzureCredential` (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, …, managed identity, `az login`) |
 | SFTP | `sftp://user@host:22/path` (`/~/path` = from the login directory) | `fingerprint` (repeatable), `allowUnknownHostKey` | `MONGOSHIELD_SFTP_KEY_FILE` and/or `SSH_AUTH_SOCK` |
+| Google Drive | `gdrive://<folder>` (inside a `MongoShield` folder in My Drive) | `chunkSizeMiB` | `MONGOSHIELD_GDRIVE_TOKEN` from `mongoshield login gdrive`; no storage lock (Drive allows duplicate names), so `schedule.lock` defaults to `none` |
+| Dropbox | `dropbox://<folder>` (inside `Apps/MongoShield`) | none | `MONGOSHIELD_DROPBOX_TOKEN` from `mongoshield login dropbox` |
 | Memory | `memory://name` | none | none: one store per name per process (for tests) |
 
 | Parameter | Values | What it does |
@@ -968,7 +987,9 @@ Schemes, parameters and credentials.
 | `fingerprint` | `SHA256:…` | The SFTP host key to trust. Without it, known_hosts is used |
 | `allowUnknownHostKey` | `true` · `false` | Skip SFTP host key checks. Test setups only |
 
-Passwords and keys in a URL are refused, and so are unknown parameters.
+Passwords and keys in a URL are refused, and so are unknown parameters. Other schemes come
+from packages that call `registerStorageScheme` (see
+[writing a storage adapter](./docs/guides/community-storage-adapters.md)).
 
 </details>
 
@@ -1261,17 +1282,22 @@ Durations take `ms` `s` `m` `h`, e.g. `90s` or `1h30m`. Flags marked "repeatable
 | `--include` | `<pattern>` | `erasures`: only these namespaces |
 | `--dry-run` | | `erasures apply`: count, delete nothing |
 
-**`keygen`** · **`init`** · **`version`**
+**`keygen`** · **`init`** · **`login`** · **`version`**
 
 | Flag | Value | What it does |
 |:--|:--|:--|
 | `-o`, `--output` | `<path>` | `keygen`: write the private key to this file (mode 0600; never overwrites) |
 | `--preset` | `atlas-free` · `atlas-flex` | `init`: start from a preset |
-| `--storage` | `<storage-url>` | `init`: where backups will go (default `./backups`) |
+| `--destination` | `gdrive` · `dropbox` · `github-artifacts` · `b2` · `r2` · `directory` · `s3` · `gs` · `az` · `sftp` · `url` | `init`: the menu choice, without the menu (needs `--storage` unless it has a default) |
+| `--storage` | `<storage-url>` | `init`: where backups will go (default `./backups`); its scheme picks the next steps |
 | `--uri-env` | `<VAR>` | `init`: variable holding the connection string (default `MONGODB_URI`) |
 | `--keygen` | | `init`: make a key pair and encrypt with it |
 | `--recipient` | `<age1…>` | `init`: encrypt for an existing public key |
-| `--key-file` | `<path>` | `init`: where `--keygen` writes the private key (default `./mongoshield.key`) |
+| `--key-file` | `<path>` | `init`: where `--keygen` (or `--github`) writes the private key (default `./mongoshield.key`) |
+| `--github` | | `init`: set up nightly backups in GitHub Actions: sign in, key pair and recovery kit, config, workflow, repository secrets, first run |
+| `--gh` | | `login`: store the token as a repository secret with `gh secret set` instead of printing it |
+| `--repo` | `<owner/name>` | `login --gh`: the repository (default: the one in the current directory) |
+| `--port` | `<port>` | `login`: the local port for a browser sign-in (Dropbox) |
 
 `version` has only the global flags.
 
@@ -1448,7 +1474,9 @@ A backup selector (`backup`) is an id, `"latest"`, or `{ before: Date | string }
 | `startJournal(options)` · `journalStatus` · `pruneJournal` | `JournalOptions` | The change journal |
 | `suggestMasks(client, options?)` · `detectPii(documents, options?)` | `SuggestMasksOptions` · `DetectOptions` | Find personal data |
 | `notifyRun` · `sendWebhook` · `pingHeartbeat` | `NotifyTarget` | Notifications |
-| `resolveStorage(url)` · `validateConfig(input)` · `defineConfig(config)` | | Storage URLs and config files |
+| `resolveStorage(url, { env? })` · `validateConfig(input)` · `defineConfig(config)` | `ResolveStorageOptions` | Storage URLs and config files |
+| `registerStorageScheme(scheme, factory, options?)` · `registeredStorageSchemes()` · `isStorageSchemeRegistered()` | `StorageSchemeFactory` · `StorageSchemeContext` | Add `<scheme>://` URLs from your own or a community adapter |
+| `describeStorageConformance(name, setup, { describe, it, beforeEach, afterEach })` from `mongoshield/testing/storage` | `StorageConformanceFixture` | The contract test kit for storage adapters, for any test framework |
 | `generateIdentity()` · `identityToRecipient()` · `parseIdentityFile()` | | age keys |
 
 </details>
@@ -1458,11 +1486,25 @@ A backup selector (`backup`) is an id, `"latest"`, or `{ before: Date | string }
 Factory options for the library.
 
 <details>
-<summary><b>&nbsp;👉&nbsp; Show all 44 adapter options</b>&nbsp; <sub><i>click to expand</i></sub></summary>
+<summary><b>&nbsp;👉&nbsp; Show all 47 adapter options</b>&nbsp; <sub><i>click to expand</i></sub></summary>
 <br>
 
 Each adapter has its own entry point, so its SDK loads only when used.
-Write your own by implementing `StorageAdapter` ([`src/storage/types.ts`](./packages/mongoshield/src/storage/types.ts)).
+Write your own by implementing `StorageAdapter` ([`src/storage/types.ts`](./packages/mongoshield/src/storage/types.ts)),
+register it with `registerStorageScheme`, and check it with the contract test kit
+`mongoshield/testing/storage` ([guide](./docs/guides/community-storage-adapters.md)).
+
+**`b2Storage` and `r2Storage` from `mongoshield/storage/s3`**
+
+`s3Storage` with each service's endpoint, region, addressing and `WHEN_REQUIRED` checksums
+([guide](./docs/guides/b2-and-r2.md)). They take every `s3Storage` option below except
+`endpoint`, `region`, `forcePathStyle` and `client`, plus:
+
+| Option | Type | Default | What it does |
+|:--|:--|:--|:--|
+| `region` (B2) | string | required | e.g. `us-west-004`, from the endpoint `s3.<region>.backblazeb2.com` |
+| `accountId` (R2) | 32 hex characters | required | The Cloudflare account; names the endpoint host |
+| `jurisdiction` (R2) | `eu` · `fedramp` | none | Buckets created in a jurisdiction |
 
 **`fileStorage` from `mongoshield/storage/file`**
 

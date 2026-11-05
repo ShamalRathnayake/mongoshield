@@ -1,13 +1,33 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+/** A path in this package, for the aliases below. */
+const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
 export default defineConfig({
   test: {
     projects: [
       {
         extends: true,
+        // The example community adapter (examples/community-storage-adapter) imports
+        // `mongoshield` like any third-party package. Inside the repository that name
+        // resolves to this package's source, so its contract test runs with the unit
+        // tests and proves the published kit and registry work from the outside.
+        resolve: {
+          alias: [
+            { find: /^mongoshield$/, replacement: here("./src/index.ts") },
+            {
+              find: /^mongoshield\/testing\/storage$/,
+              replacement: here("./src/testing/storage-conformance.ts"),
+            },
+          ],
+        },
         test: {
           name: "unit",
-          include: ["src/**/*.test.ts"],
+          include: [
+            "src/**/*.test.ts",
+            "../../examples/community-storage-adapter/test/**/*.test.mjs",
+          ],
           environment: "node",
         },
       },
