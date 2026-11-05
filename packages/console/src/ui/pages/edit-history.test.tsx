@@ -96,6 +96,19 @@ describe("namespace helpers", () => {
   });
 });
 
+/**
+ * The Connection select, once it lists `value`. The select renders before the
+ * connections arrive from the API, and selecting an option that is not there yet
+ * fails ("Value not found in options") on a slow runner.
+ */
+async function connectionOption(value: string): Promise<HTMLElement> {
+  const select = await screen.findByLabelText("Connection");
+  await waitFor(() => {
+    expect(select.querySelector(`option[value="${value}"]`)).not.toBeNull();
+  });
+  return select;
+}
+
 describe("edit history", () => {
   it("is empty at first and is in the navigation for operators", async () => {
     renderApp({ signedInAs: "maya", hash: "#/edit-history" });
@@ -119,7 +132,7 @@ describe("edit history", () => {
     });
     await editFirstUser(backend, "enterprise");
     // Reload the page's data: switch the connection filter back and forth.
-    await user.selectOptions(await screen.findByLabelText("Connection"), "conn-staging");
+    await user.selectOptions(await connectionOption("conn-staging"), "conn-staging");
     const table = await screen.findByRole("table", { name: "Live edits" });
     expect(await within(table).findByText("Edit")).toBeTruthy();
     expect(within(table).getByText("Applied")).toBeTruthy();
@@ -148,7 +161,7 @@ describe("edit history", () => {
     await editFirstUser(backend, "enterprise");
     await insertInto(backend, "shop.orders");
     await insertInto(backend, "shop_restored.users");
-    await user.selectOptions(await screen.findByLabelText("Connection"), "conn-staging");
+    await user.selectOptions(await connectionOption("conn-staging"), "conn-staging");
     const table = await screen.findByRole("table", { name: "Live edits" });
     await within(table).findByText("shop_restored.users");
 
@@ -227,7 +240,7 @@ describe("edit history", () => {
     admin.permissions = ["data:write"];
     await editFirstUser(backend, "enterprise");
     admin.permissions = [];
-    await user.selectOptions(await screen.findByLabelText("Connection"), "conn-staging");
+    await user.selectOptions(await connectionOption("conn-staging"), "conn-staging");
     const table = await screen.findByRole("table", { name: "Live edits" });
     await within(table).findByText("Edit");
     expect(within(table).queryByRole("button", { name: /^Undo/ })).toBeNull();
