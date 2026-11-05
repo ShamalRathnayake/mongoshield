@@ -44,8 +44,48 @@ export interface StorageAdapter {
   /** Deletes objects. Missing keys are ignored. */
   delete(keys: readonly string[], options?: SignalOptions): Promise<void>;
 
+  /**
+   * Optional: how much space the storage has, for the free-space check before each
+   * backup (it refuses a backup that clearly will not fit and warns past 80% full).
+   * Implement it when the backend can say cheaply (one request): a disk's statfs, a
+   * drive's quota endpoint. Return `undefined`, or leave the method out, when it
+   * cannot (S3, GCS and Azure buckets have no fixed size); the check is then skipped
+   * quietly. See {@link StorageSpace} for what each field must mean.
+   *
+   * Never throw for "not known"; throw `MongoShieldError` (`MS_STORAGE_*`) only for
+   * real failures, which the backup logs and ignores (the check is advisory), and
+   * `MS_ABORTED` when `options.signal` fires.
+   */
+  space?(options?: SignalOptions): Promise<StorageSpace | undefined>;
+
   /** Releases resources (connections, file handles). Safe to call more than once. */
   close?(): Promise<void>;
+}
+
+/**
+ * What `StorageAdapter.space()` reports, in bytes. Every field is optional because
+ * backends know different things; give what the backend says and leave the rest out
+ * (never guess). The free-space check works from `freeBytes` when present, else from
+ * `totalBytes - usedBytes`, and needs `totalBytes` for the "% full" warning.
+ *
+ * Drive providers keep deleted files in a recycle bin / trash that still counts
+ * against the quota until it is emptied (OneDrive's `deleted`, Google Drive's
+ * `usageInDriveTrash`), and prune's deletes may land there. So:
+ * - `usedBytes` is everything counted against the quota, the trash INCLUDED;
+ * - `trashBytes` is the part of `usedBytes` sitting in the trash, so messages can say
+ *   that emptying it frees space;
+ * - `freeBytes` is what can still be written right now (after the trash), e.g. a
+ *   disk's space available to this process or OneDrive's `remaining`.
+ */
+export interface StorageSpace {
+  /** The quota or the size of the volume. */
+  readonly totalBytes?: number;
+  /** Everything counted against `totalBytes`, including the trash. */
+  readonly usedBytes?: number;
+  /** What can still be written. Wins over `totalBytes - usedBytes` when both are given. */
+  readonly freeBytes?: number;
+  /** The part of `usedBytes` in a recycle bin or trash (0 when known to be empty). */
+  readonly trashBytes?: number;
 }
 
 export interface StorageCapabilities {

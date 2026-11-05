@@ -311,6 +311,32 @@ describe("StorageRegistry", () => {
     await registry.closeAll();
   });
 
+  it("builds Backblaze B2 and Cloudflare R2 locations from the library's presets with stored keys", async () => {
+    const keys = { AWS_ACCESS_KEY_ID: "keyID", AWS_SECRET_ACCESS_KEY: "applicationKey" };
+    const registry = new StorageRegistry({ dataDir, credentialsOf: () => keys });
+    const b2 = await registry.adapterFor(
+      record("b2://acme/prod?region=us-west-004", undefined, "b2"),
+    );
+    const r2 = await registry.adapterFor(
+      record(`r2://${"a".repeat(32)}/acme/prod?jurisdiction=eu`, undefined, "r2"),
+    );
+    expect([b2.kind, b2.location, r2.kind, r2.location]).toEqual([
+      "s3",
+      "s3://acme/prod/",
+      "s3",
+      "s3://acme/prod/",
+    ]);
+    // A bad region is the library's MS_CONFIG_INVALID, not a crash.
+    await expect(
+      registry.adapterFor(record("b2://acme?region=us-west-2", undefined, "bad")),
+    ).rejects.toThrow(/Backblaze B2 region/);
+    await registry.closeAll();
+    expect(storageSchemeOf("B2://acme")).toBe("b2");
+    expect(() =>
+      checkStorageInput("r2://acct/bucket", { AWS_SESSION_TOKEN: "x" }, dataDir),
+    ).toThrow(/not a credential for r2 storage/);
+  });
+
   it("builds cloud adapters from the default credential chain when none are stored", async () => {
     const registry = new StorageRegistry({ dataDir, credentialsOf: noCredentials });
     expect((await registry.adapterFor(record("s3://bucket"))).kind).toBe("s3");

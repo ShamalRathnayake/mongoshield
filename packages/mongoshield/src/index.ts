@@ -8,7 +8,7 @@
  * their dependencies load only when used:
  *   mongoshield/storage/file   mongoshield/storage/s3     mongoshield/storage/gcs
  *   mongoshield/storage/azure  mongoshield/storage/sftp   mongoshield/storage/memory
- *   mongoshield/kms            mongoshield/testing
+ *   mongoshield/kms            mongoshield/testing        mongoshield/testing/storage
  */
 
 // The main class.
@@ -297,13 +297,29 @@ export { defaultCompression, isZstdAvailable } from "./compression/index.ts";
 // Logging.
 export { fromPino, type LogFields, type Logger, type PinoLike, silentLogger } from "./logger.ts";
 
-// Opening storage from a URL (`s3://…`, `gs://…`, `az://…`, `sftp://…`, paths).
-export { resolveStorage, SUPPORTED_STORAGE_SCHEMES } from "./storage/resolve.ts";
+// Opening storage from a URL (`s3://…`, `b2://…`, `gs://…`, `az://…`, `sftp://…`, paths).
+export {
+  type ResolveStorageOptions,
+  resolveStorage,
+  SUPPORTED_STORAGE_SCHEMES,
+} from "./storage/resolve.ts";
+
+// Adding storage URL schemes (`pcloud://…`) from your own or a community package.
+export {
+  isStorageSchemeRegistered,
+  type RegisterStorageSchemeOptions,
+  registeredStorageSchemes,
+  registerStorageScheme,
+  type StorageEnvironment,
+  type StorageSchemeContext,
+  type StorageSchemeFactory,
+  type UnregisterStorageScheme,
+} from "./storage/registry.ts";
 
 // Keeping secrets out of logs and messages.
 export { redactMongoUri, redactSecrets } from "./redact.ts";
 
-// Writing your own storage adapter.
+// Writing your own storage adapter (test it with `mongoshield/testing/storage`).
 export type {
   GetOptions,
   ObjectInfo,
@@ -312,6 +328,9 @@ export type {
   RetentionOptions,
   StorageAdapter,
   StorageCapabilities,
+  StorageSpace,
 } from "./storage/types.ts";
+export { assertValidKey, assertValidPrefix } from "./storage/keys.ts";
+export { throwIfAborted } from "./errors.ts";
 
 export { version } from "./version.ts";

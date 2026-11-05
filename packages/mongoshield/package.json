@@ -41,6 +41,7 @@
     "./storage/sftp": "./dist/storage/sftp.mjs",
     "./kms": "./dist/kms.mjs",
     "./testing": "./dist/testing.mjs",
+    "./testing/storage": "./dist/testing/storage.mjs",
     "./package.json": "./package.json"
   },
   "files": [

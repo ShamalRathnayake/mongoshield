@@ -31,6 +31,7 @@
  *   rate-limit.ts          maxDocumentsPerSecond / maxBytesPerSecond
  *   atlas-adapt.ts         Atlas Free/Flex: gentler reads, refusing what the tier cannot do
  *   backup-budget.ts       the time budget of maxDurationMs
+ *   backup-space.ts        the free-space check before the first write
  *   backup-checkpoint.ts   the checkpoint format
  *   backup-resume.ts       finding, checking and saving checkpoints
  *   backup-write.ts        stream wiring from a source into storage
@@ -116,6 +117,7 @@ import { deleteOrphans } from "./backup-orphans.ts";
 import { queryableEncryptionWarnings } from "./backup-qe.ts";
 import { resolveReadPreference } from "./backup-reads.ts";
 import { CheckpointSaver, findCheckpointToResume, resumeFileEncryption } from "./backup-resume.ts";
+import { checkStorageSpace } from "./backup-space.ts";
 import type { BackupContext } from "./context.ts";
 import { type ChangeCapture, startChangeCapture } from "./converge-capture.ts";
 import { readClusterTime } from "./converge-time.ts";
@@ -238,6 +240,19 @@ export async function runBackup(
     ...(options.maxDurationMs === undefined ? {} : { maxDurationMs: options.maxDurationMs }),
   });
 
+  // Free space (storage that reports it, e.g. a disk or a drive): refuse a backup that
+  // clearly will not fit before anything is written, warn past 80% full (backup-space.ts).
+  const progress = new ProgressTracker({ onProgress: options.onProgress, logger });
+  const spaceReport = await checkStorageSpace(storage, { logger, signal });
+  if (spaceReport !== undefined) {
+    progress.storageSpace({
+      space: spaceReport.space,
+      usedFraction: spaceReport.usedFraction,
+      estimatedBytes: spaceReport.estimatedBytes,
+      warning: spaceReport.warning,
+    });
+  }
+
   // 3. Consistency: for snapshot mode this opens the session every read goes through.
   const consistency = await openReadConsistency(client, mode, specs, logger);
   const readPreference = resolveReadPreference(options, mode);
@@ -246,7 +261,6 @@ export async function runBackup(
       ? undefined
       : new Date(origin.startedAt.getTime() + options.retainDays * MS_PER_DAY);
 
-  const progress = new ProgressTracker({ onProgress: options.onProgress, logger });
   const writtenKeys = new Set<string>();
   let manifestAttempted = false;
   let refusedBeforeCommit = false;
@@ -456,6 +470,7 @@ export async function runBackup(
       ...(manifest.consistency.warning === undefined ? [] : [manifest.consistency.warning]),
       ...encryptionWarnings,
       ...adapterWarnings,
+      ...(spaceReport?.warning === undefined ? [] : [spaceReport.warning]),
     ];
     return {
       status: "complete",

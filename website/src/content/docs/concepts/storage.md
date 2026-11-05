@@ -18,6 +18,19 @@ backups/
       orders.001.bson.zst.age
 ```
 
+## Where backups can go
+
+The same layout goes into every kind of storage: a local directory, Amazon S3 and
+S3-compatible services (Backblaze B2 with `b2://bucket/prefix?region=…` and Cloudflare R2
+with `r2://<accountId>/bucket/prefix` are presets), Google Cloud Storage, Azure Blob
+Storage and SFTP. `mongoshield init` asks where backups go and prints the next steps for
+the choice. Community packages add more URL schemes with `registerStorageScheme`, and
+prove their adapter with the contract test kit `mongoshield/testing/storage`.
+
+Storage that knows its size (a local disk) is checked before each backup: a backup that
+clearly will not fit (judged by the previous full backup) is refused before anything is
+written, and storage more than 80% full gives a warning.
+
 ## The pipeline
 
 Every file except the manifest goes through the same steps:

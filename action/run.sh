@@ -139,7 +139,11 @@ detect_storage() {
   local text
   text="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   if [[ "$text" == *s3://* || "$text" == *s3storage* ]]; then need_s3=true; fi
-  if [[ "$text" == *gs://* || "$text" == *gcsstorage* ]]; then need_gcs=true; fi
+  # Backblaze B2 and Cloudflare R2 (b2://, r2://, b2Storage, r2Storage) are presets
+  # on the S3 adapter, so they need the S3 SDK too.
+  if [[ "$text" == *b2://* || "$text" == *b2storage* ]]; then need_s3=true; fi
+  if [[ "$text" == *r2://* || "$text" == *r2storage* ]]; then need_s3=true; fi
+  if [[ "$text" == *gs://*|| "$text" == *gcsstorage* ]]; then need_gcs=true; fi
   if [[ "$text" == *az://* || "$text" == *azurestorage* ]]; then need_azure=true; fi
   if [[ "$text" == *sftp://* || "$text" == *sftpstorage* ]]; then need_sftp=true; fi
 }

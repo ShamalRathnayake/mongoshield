@@ -13,14 +13,23 @@
  *   an `endpoint`; `responseChecksumValidation`; `exactLastModified=true`;
  *   `conditionalWrites=true|false|probe`; and `partSizeMiB` / `queueSize`, which
  *   bound upload memory; see the s3Storage options)
+ * - `b2://bucket/prefix?region=us-west-004`  Backblaze B2 through the S3 adapter
+ *   (endpoint `https://s3.<region>.backblazeb2.com`, path-style; see s3-presets.ts)
+ * - `r2://<accountId>/bucket/prefix?jurisdiction=eu`  Cloudflare R2 through the S3
+ *   adapter (endpoint `https://<accountId>.r2.cloudflarestorage.com`, region `auto`).
+ *   `b2://` and `r2://` take the S3 adapter's own parameters too (`retention`,
+ *   `partSizeMiB`, `queueSize`, the checksum settings, `conditionalWrites`,
+ *   `exactLastModified`), but not `endpoint`, `forcePathStyle` or (R2) `region`.
  * - `gs://bucket/prefix?projectId=…&chunkSizeMiB=…`   Google Cloud Storage
  * - `az://account/container/prefix?endpoint=…&blockSizeMiB=…&uploadConcurrency=…`   Azure Blob Storage
  * - `sftp://user@host:port/path?fingerprint=SHA256:…`   SFTP (`/~/path` = relative to the login directory)
  * - `memory://name`                    in-process store, shared by every URL with the same name
+ * - any scheme a package registered with `registerStorageScheme` (registry.ts)
  *
  * Credentials never go in the URL; URLs that contain a password are rejected.
- * - S3 uses the AWS SDK's default credential chain (environment variables,
- *   profiles, instance roles).
+ * - S3, B2 and R2 use the AWS SDK's default credential chain (environment variables,
+ *   profiles, instance roles). For B2, `AWS_ACCESS_KEY_ID` is the application key's
+ *   keyID and `AWS_SECRET_ACCESS_KEY` its applicationKey; for R2, an API token's keys.
  * - GCS uses Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`,
  *   `gcloud auth application-default login`, the metadata server).
  * - Azure uses the connection string in `AZURE_STORAGE_CONNECTION_STRING` when
@@ -40,493 +49,67 @@
  *   must be listed in the known_hosts file named by `MONGOSHIELD_SFTP_KNOWN_HOSTS`
  *   (default `~/.ssh/known_hosts`), and hosts not listed there are refused. Only
  *   `allowUnknownHostKey=true` skips host key verification.
- * - `s3://`, `gs://` and `az://` accept `retention=compliance|governance`: the
- *   write-once retention mode used for immutable backups (`retainDays`). Default
+ * - `s3://`, `b2://`, `r2://`, `gs://` and `az://` accept `retention=compliance|governance`:
+ *   the write-once retention mode used for immutable backups (`retainDays`). Default
  *   `compliance`. See docs/guides/immutable-backups.md.
+ *
+ * The first-party factories live in schemes.ts; the registry (registry.ts) serves them
+ * next to registered ones. Each factory receives the parsed URL and the environment to
+ * read credentials from (`resolveStorage(url, { env })` injects one, e.g. in tests).
  * Pass the adapter factories (`s3Storage`, `gcsStorage`, …) directly for anything else.
  */
 
-import { fileURLToPath } from "node:url";
 import { MongoShieldError } from "../errors.ts";
-import { azureStorage } from "./azure.ts";
 import { fileStorage } from "./file.ts";
-import { gcsStorage } from "./gcs.ts";
-import { type MemoryStorage, memoryStorage } from "./memory.ts";
-import { s3Storage } from "./s3.ts";
-import { sftpStorage } from "./sftp.ts";
-import type { RetentionOptions, StorageAdapter } from "./types.ts";
+import {
+  registeredStorageSchemes,
+  type StorageEnvironment,
+  storageSchemeFactory,
+} from "./registry.ts";
+import type { StorageAdapter } from "./types.ts";
+import { parseStorageUrl } from "./url-parameters.ts";
 
-/** The URL schemes `resolveStorage` understands, for error messages and docs. */
-export const SUPPORTED_STORAGE_SCHEMES = ["file", "s3", "gs", "az", "sftp", "memory"] as const;
+export { SUPPORTED_STORAGE_SCHEMES } from "./schemes.ts";
 
-/** Query parameters accepted on `s3://` URLs. Anything else is rejected to catch typos. */
-const S3_QUERY_PARAMETERS = new Set([
-  "region",
-  "endpoint",
-  "forcePathStyle",
-  "retention",
-  "requestChecksumCalculation",
-  "responseChecksumValidation",
-  "exactLastModified",
-  "conditionalWrites",
-  "partSizeMiB",
-  "queueSize",
-]);
-/** Query parameters accepted on `gs://` URLs. */
-const GCS_QUERY_PARAMETERS = new Set(["projectId", "retention", "chunkSizeMiB"]);
-/** Query parameters accepted on `az://` URLs. */
-const AZURE_QUERY_PARAMETERS = new Set([
-  "endpoint",
-  "retention",
-  "allowCustomEndpoint",
-  "blockSizeMiB",
-  "uploadConcurrency",
-]);
-
-/** Bytes in one MiB, for the `…SizeMiB` URL parameters. */
-const MIB = 1024 * 1024;
-
-/**
- * Host name suffixes of Azure's storage endpoints, in the public cloud and the
- * sovereign clouds (China, US Government, the retired Germany cloud). Private Link
- * hosts (`<account>.privatelink.blob.core.windows.net`) end the same way.
- * `DefaultAzureCredential` attaches a bearer token for the storage account to every
- * request, so it must only go to hosts like these unless the user says otherwise.
- */
-const AZURE_STORAGE_HOST_SUFFIXES = [
-  ".core.windows.net",
-  ".core.chinacloudapi.cn",
-  ".core.usgovcloudapi.net",
-  ".core.cloudapi.de",
-] as const;
-/** Query parameters accepted on `sftp://` URLs. */
-const SFTP_QUERY_PARAMETERS = new Set(["fingerprint", "allowUnknownHostKey"]);
-
-/** Environment variables read for `az://` and `sftp://` URLs (see the header comment). */
-const ENV = {
-  azureConnectionString: "AZURE_STORAGE_CONNECTION_STRING",
-  sftpKeyFile: "MONGOSHIELD_SFTP_KEY_FILE",
-  sftpKeyPassphrase: "MONGOSHIELD_SFTP_KEY_PASSPHRASE",
-  sftpHostFingerprint: "MONGOSHIELD_SFTP_HOST_FINGERPRINT",
-  sftpKnownHosts: "MONGOSHIELD_SFTP_KNOWN_HOSTS",
-  sshAgent: "SSH_AUTH_SOCK",
-} as const;
-
-/** The known_hosts file `sftp://` URLs use when no fingerprint is given, like `ssh` itself. */
-const DEFAULT_KNOWN_HOSTS = "~/.ssh/known_hosts";
-
-/**
- * Named in-memory stores. `memory://x` must mean the same store every time it is
- * resolved in a process, or a backup written to it could never be restored from it.
- */
-const memoryStores = new Map<string, MemoryStorage>();
+/** Options for {@link resolveStorage}. */
+export interface ResolveStorageOptions {
+  /**
+   * Where scheme factories read credentials from (`AZURE_STORAGE_CONNECTION_STRING`,
+   * `MONGOSHIELD_SFTP_KEY_FILE`, a drive token, …). Defaults to `process.env`. The
+   * AWS, Google Cloud and Azure SDKs' own credential chains still read the process
+   * environment themselves.
+   */
+  readonly env?: StorageEnvironment;
+}
 
 /** A scheme is letters/digits/`+.-` followed by `://`. Windows paths (`C:\…`) never match. */
 const SCHEME_PATTERN = /^([a-z][a-z0-9+.-]*):\/\//i;
 
-/** Creates the adapter a storage URL or bare path points to. */
-export async function resolveStorage(url: string): Promise<StorageAdapter> {
+/**
+ * Creates the adapter a storage URL or bare path points to. Bare paths become the
+ * file adapter; `<scheme>://` URLs go to the scheme's factory in the registry.
+ *
+ * @throws MS_CONFIG_INVALID for an empty location, an unknown scheme (the hint lists
+ *   every registered one), or whatever the scheme's factory refuses.
+ */
+export async function resolveStorage(
+  url: string,
+  options: ResolveStorageOptions = {},
+): Promise<StorageAdapter> {
   if (typeof url !== "string" || url.trim() === "") {
-    throw configError("The storage location is empty.");
+    throw new MongoShieldError("MS_CONFIG_INVALID", "The storage location is empty.");
   }
   const scheme = SCHEME_PATTERN.exec(url)?.[1]?.toLowerCase();
-  switch (scheme) {
-    case undefined:
-      return fileStorage({ path: url });
-    case "file":
-      return fileStorage({ path: filePathOf(url) });
-    case "s3":
-      return s3StorageOf(url);
-    case "gs":
-      return gcsStorageOf(url);
-    case "az":
-      return azureStorageOf(url);
-    case "sftp":
-      return sftpStorageOf(url);
-    case "memory":
-      return memoryStorageOf(url);
-    default:
-      throw configError(`Unsupported storage scheme "${scheme}://".`, {
-        hint: `Use one of ${SUPPORTED_STORAGE_SCHEMES.map((name) => `${name}://`).join(", ")}, or a plain directory path.`,
-      });
-  }
-}
+  if (scheme === undefined) return fileStorage({ path: url });
 
-/** `file:///abs/path` → `/abs/path`. Only absolute, local file URLs are accepted. */
-function filePathOf(url: string): string {
-  try {
-    return fileURLToPath(url);
-  } catch (error) {
-    throw configError(`Invalid file URL "${url}".`, {
-      cause: error,
-      hint: "Use file:///absolute/path, or just give the directory path without a scheme.",
-    });
-  }
-}
-
-/** `s3://bucket/some/prefix?region=…` → `s3Storage({ bucket, prefix, … })`. */
-function s3StorageOf(url: string): StorageAdapter {
-  const parsed = parseUrl(url);
-  if (parsed.username || parsed.password) {
-    throw configError("S3 URLs must not contain credentials.", {
-      hint: "Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or AWS_PROFILE instead.",
-    });
-  }
-  const bucket = parsed.hostname;
-  if (!bucket) {
-    throw configError(`The S3 URL "${url}" has no bucket.`, {
-      hint: "Use s3://<bucket>/<optional/prefix>.",
-    });
-  }
-
-  for (const name of parsed.searchParams.keys()) {
-    if (!S3_QUERY_PARAMETERS.has(name)) {
-      throw configError(`Unknown S3 URL parameter "${name}".`, {
-        hint: `Supported parameters: ${[...S3_QUERY_PARAMETERS].join(", ")}.`,
-      });
-    }
-  }
-  const region = parsed.searchParams.get("region");
-  const endpoint = parsed.searchParams.get("endpoint");
-  const forcePathStyle = parsed.searchParams.get("forcePathStyle");
-  const exactLastModified = parsed.searchParams.get("exactLastModified");
-  // Only checked, not restricted to AWS hosts: SigV4 signs requests and never sends
-  // the secret key, and a custom endpoint (MinIO, R2, B2, …) is the normal case for S3.
-  if (endpoint !== null) checkEndpoint(endpoint, "S3");
-
-  return s3Storage({
-    bucket,
-    prefix: decodeURIComponent(parsed.pathname),
-    ...(region ? { region } : {}),
-    ...(endpoint ? { endpoint } : {}),
-    ...(forcePathStyle === null ? {} : { forcePathStyle: parseBoolean(forcePathStyle) }),
-    ...(exactLastModified === null ? {} : { exactLastModified: parseBoolean(exactLastModified) }),
-    ...checksumParameter(parsed, "requestChecksumCalculation"),
-    ...checksumParameter(parsed, "responseChecksumValidation"),
-    ...conditionalWritesParameter(parsed),
-    ...sizeParameter(parsed, "partSizeMiB", "partSize", MIB),
-    ...sizeParameter(parsed, "queueSize", "queueSize", 1),
-    ...retentionParameter(parsed),
-  });
-}
-
-/**
- * `?requestChecksumCalculation=WHEN_REQUIRED` or `?responseChecksumValidation=…`
- * (values case-insensitive) → the s3Storage option of the same name.
- */
-function checksumParameter<
-  Name extends "requestChecksumCalculation" | "responseChecksumValidation",
->(parsed: URL, name: Name): { [Key in Name]?: "WHEN_SUPPORTED" | "WHEN_REQUIRED" } {
-  const value = parsed.searchParams.get(name);
-  if (value === null) return {};
-  const normalized = value.toUpperCase();
-  if (normalized === "WHEN_SUPPORTED" || normalized === "WHEN_REQUIRED") {
-    return { [name]: normalized } as { [Key in Name]?: "WHEN_SUPPORTED" | "WHEN_REQUIRED" };
-  }
-  throw configError(`Invalid ${name} "${value}" in storage URL.`, {
-    hint: `Use ${name}=WHEN_REQUIRED or WHEN_SUPPORTED.`,
-  });
-}
-
-/** `?conditionalWrites=true|false|probe` → the s3Storage option (see its docs). */
-function conditionalWritesParameter(parsed: URL): { conditionalWrites?: boolean | "probe" } {
-  const value = parsed.searchParams.get("conditionalWrites");
-  if (value === null) return {};
-  if (value.toLowerCase() === "probe") return { conditionalWrites: "probe" };
-  return { conditionalWrites: parseBoolean(value) };
-}
-
-/**
- * A positive whole-number URL parameter, multiplied by `unit` (`MIB` for sizes given
- * in MiB, 1 for counts), as the adapter option `option`. The adapter checks its own
- * limits (S3's 5 MiB minimum part size, GCS's 256 KiB chunk granularity).
- */
-function sizeParameter<Option extends string>(
-  parsed: URL,
-  name: string,
-  option: Option,
-  unit: number,
-): { [Key in Option]?: number } {
-  const value = parsed.searchParams.get(name);
-  if (value === null) return {};
-  if (!/^[1-9]\d{0,5}$/.test(value)) {
-    throw configError(`Invalid ${name} "${value}" in storage URL.`, {
-      hint: `Use a positive whole number, e.g. ${name}=${unit === MIB ? 8 : 2}.`,
-    });
-  }
-  return { [option]: Number(value) * unit } as { [Key in Option]?: number };
-}
-
-/** `gs://bucket/some/prefix?projectId=…` → `gcsStorage({ bucket, prefix, … })`. */
-function gcsStorageOf(url: string): StorageAdapter {
-  const parsed = parseUrl(url);
-  rejectCredentials(
-    parsed,
-    "GCS",
-    "Use GOOGLE_APPLICATION_CREDENTIALS or gcloud application-default login instead.",
-  );
-  rejectUnknownParameters(parsed, GCS_QUERY_PARAMETERS, "GCS");
-  const bucket = parsed.hostname;
-  if (!bucket) {
-    throw configError(`The GCS URL "${url}" has no bucket.`, {
-      hint: "Use gs://<bucket>/<optional/prefix>.",
-    });
-  }
-  const projectId = parsed.searchParams.get("projectId");
-  return gcsStorage({
-    bucket,
-    prefix: decodeURIComponent(parsed.pathname),
-    ...(projectId ? { projectId } : {}),
-    ...sizeParameter(parsed, "chunkSizeMiB", "chunkSize", MIB),
-    ...retentionParameter(parsed),
-  });
-}
-
-/**
- * `az://account/container/some/prefix` → `azureStorage(…)`, authenticated with
- * `AZURE_STORAGE_CONNECTION_STRING` if set, else `DefaultAzureCredential`.
- */
-function azureStorageOf(url: string): StorageAdapter {
-  const parsed = parseUrl(url);
-  rejectCredentials(
-    parsed,
-    "Azure",
-    `Set ${ENV.azureConnectionString}, or use Microsoft Entra ID (DefaultAzureCredential).`,
-  );
-  rejectUnknownParameters(parsed, AZURE_QUERY_PARAMETERS, "Azure");
-  const account = parsed.hostname;
-  const [container = "", ...rest] = decodeURIComponent(parsed.pathname)
-    .split("/")
-    .filter((segment) => segment.length > 0);
-  if (!account || !container) {
-    throw configError(`The Azure URL "${url}" needs an account and a container.`, {
-      hint: "Use az://<account>/<container>/<optional/prefix>.",
-    });
-  }
-  const prefix = rest.join("/");
-
-  const connectionString = process.env[ENV.azureConnectionString];
-  if (connectionString) {
-    const storage = azureStorage({
-      connectionString,
-      container,
-      prefix,
-      ...azureUploadParameters(parsed),
-      ...retentionParameter(parsed),
-    });
-    // A connection string for another account would silently send backups elsewhere.
-    if (!storage.location.startsWith(`az://${account}/`)) {
-      throw configError(
-        `${ENV.azureConnectionString} is for a different storage account than "${account}".`,
-        {
-          hint: `Unset it to use DefaultAzureCredential, or use the matching az://<account>/ URL.`,
-        },
-      );
-    }
-    return storage;
-  }
-  const endpoint = parsed.searchParams.get("endpoint");
-  if (endpoint !== null) checkAzureEndpoint(endpoint, parsed);
-  return azureStorage({
-    accountUrl: endpoint ?? `https://${account}.blob.core.windows.net`,
-    container,
-    prefix,
-    ...azureUploadParameters(parsed),
-    ...retentionParameter(parsed),
-  });
-}
-
-/** `?blockSizeMiB=…&uploadConcurrency=…` → the azureStorage options bounding upload memory. */
-function azureUploadParameters(parsed: URL): { blockSize?: number; uploadConcurrency?: number } {
-  return {
-    ...sizeParameter(parsed, "blockSizeMiB", "blockSize", MIB),
-    ...sizeParameter(parsed, "uploadConcurrency", "uploadConcurrency", 1),
-  };
-}
-
-/**
- * `sftp://user@host:2222/srv/backups?fingerprint=SHA256:…` → `sftpStorage(…)`.
- * The key comes from `MONGOSHIELD_SFTP_KEY_FILE` and/or the SSH agent.
- */
-function sftpStorageOf(url: string): StorageAdapter {
-  const parsed = parseUrl(url);
-  if (parsed.password) {
-    throw configError("SFTP URLs must not contain a password.", {
-      hint: `Use key authentication: set ${ENV.sftpKeyFile} or start ssh-agent.`,
-    });
-  }
-  rejectUnknownParameters(parsed, SFTP_QUERY_PARAMETERS, "SFTP");
-  const username = decodeURIComponent(parsed.username);
-  // IPv6 literals come back as "[::1]"; ssh2 wants them bare.
-  const host = parsed.hostname.replace(/^\[(.*)\]$/, "$1");
-  if (!username || !host) {
-    throw configError(`The SFTP URL "${url}" needs a user and a host.`, {
-      hint: "Use sftp://<user>@<host>[:port]/<path>.",
-    });
-  }
-  const pathname = decodeURIComponent(parsed.pathname);
-  // "/~/backups" means "backups" relative to the login directory, as in curl.
-  const path = pathname.startsWith("/~/") ? pathname.slice(3) : pathname;
-  if (path === "" || path === "/~") {
-    throw configError(`The SFTP URL "${url}" has no path.`, {
-      hint: "Add the backup directory, e.g. sftp://backup@host/srv/backups or sftp://backup@host/~/backups.",
-    });
-  }
-
-  const keyFile = process.env[ENV.sftpKeyFile];
-  const passphrase = process.env[ENV.sftpKeyPassphrase];
-  const hasAgent = Boolean(process.env[ENV.sshAgent]);
-  if (!keyFile && !hasAgent) {
-    throw configError(`No SSH key for ${url.split("?")[0]}.`, {
-      hint: `Set ${ENV.sftpKeyFile} to a private key file, or start ssh-agent (SSH_AUTH_SOCK).`,
-    });
-  }
-
-  // URLSearchParams decodes "+" as a space, but base64 fingerprints contain "+".
-  const fromUrl = parsed.searchParams
-    .getAll("fingerprint")
-    .map((value) => value.replaceAll(" ", "+"));
-  const fromEnv = (process.env[ENV.sftpHostFingerprint] ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-  const fingerprints = fromUrl.length > 0 ? fromUrl : fromEnv;
-  const allowUnknown = parsed.searchParams.get("allowUnknownHostKey");
-  const allowUnknownHostKey = allowUnknown === null ? undefined : parseBoolean(allowUnknown);
-  // Without a fingerprint, trust what `ssh` would trust: the user's known_hosts.
-  // allowUnknownHostKey=true keeps its meaning of "verify nothing".
-  const knownHostsPath =
-    fingerprints.length === 0 && allowUnknownHostKey !== true
-      ? process.env[ENV.sftpKnownHosts] || DEFAULT_KNOWN_HOSTS
-      : undefined;
-
-  return sftpStorage({
-    host,
-    ...(parsed.port ? { port: Number(parsed.port) } : {}),
-    username,
-    path,
-    ...(keyFile ? { privateKeyPath: keyFile } : {}),
-    ...(passphrase ? { passphrase } : {}),
-    ...(hasAgent ? { agent: true as const } : {}),
-    ...(fingerprints.length > 0 ? { hostFingerprint: fingerprints } : {}),
-    ...(knownHostsPath === undefined ? {} : { knownHostsPath }),
-    ...(allowUnknownHostKey === undefined ? {} : { allowUnknownHostKey }),
-  });
-}
-
-/**
- * Checks an `endpoint` parameter and returns it parsed. Neither the error message
- * nor its cause repeats the endpoint text, which may hold the very secret it refuses.
- *
- * @throws MS_CONFIG_INVALID when it is not a URL, or carries user info, a query
- *   string or a fragment (where SAS tokens and presigned parameters live).
- */
-function checkEndpoint(endpoint: string, label: "S3" | "Azure"): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(endpoint);
-  } catch {
-    throw configError(`The ${label} endpoint parameter is not a valid URL.`, {
-      hint: "Use endpoint=https://host[:port], percent-encoded inside the storage URL.",
-    });
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw configError(`The ${label} endpoint must not contain credentials or a query string.`, {
+  const factory = storageSchemeFactory(scheme);
+  if (factory === undefined) {
+    const known = registeredStorageSchemes().map((name) => `${name}://`);
+    throw new MongoShieldError("MS_CONFIG_INVALID", `Unsupported storage scheme "${scheme}://".`, {
       hint:
-        label === "Azure"
-          ? `A SAS token (sv=…&sig=…) is a credential: put it in ${ENV.azureConnectionString} ` +
-            "(BlobEndpoint=…;SharedAccessSignature=…) instead of the storage URL."
-          : "Use endpoint=https://host[:port]; credentials come from the environment.",
+        `Use one of ${known.join(", ")}, or a plain directory path. ` +
+        "Other schemes come from packages that register them (registerStorageScheme).",
     });
   }
-  return parsed;
-}
-
-/**
- * Checks the `endpoint` of an `az://` URL that will use `DefaultAzureCredential`.
- * That credential attaches a bearer token for the storage account to every request,
- * so a host outside Azure Storage's domains could collect it (managed identity,
- * workload identity). Such hosts need an explicit `allowCustomEndpoint=true`.
- */
-function checkAzureEndpoint(endpoint: string, azureUrl: URL): void {
-  const endpointUrl = checkEndpoint(endpoint, "Azure");
-  const allowCustom = azureUrl.searchParams.get("allowCustomEndpoint");
-  const allowed = allowCustom !== null && parseBoolean(allowCustom);
-  if (allowed || isAzureStorageHost(endpointUrl.hostname)) return;
-  throw configError(
-    `The Azure endpoint host "${endpointUrl.hostname}" is not an Azure Storage domain.`,
-    {
-      hint:
-        "DefaultAzureCredential would send it a bearer token for your storage account. " +
-        "If you trust this host (Azurite, a proxy you run), add allowCustomEndpoint=true " +
-        `to the storage URL, or set ${ENV.azureConnectionString} instead.`,
-    },
-  );
-}
-
-/** True when `hostname` is one of Azure Storage's own hosts (see the suffix list). */
-function isAzureStorageHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  return AZURE_STORAGE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
-}
-
-function rejectCredentials(parsed: URL, label: string, hint: string): void {
-  if (parsed.username || parsed.password) {
-    throw configError(`${label} URLs must not contain credentials.`, { hint });
-  }
-}
-
-function rejectUnknownParameters(parsed: URL, allowed: ReadonlySet<string>, label: string): void {
-  for (const name of parsed.searchParams.keys()) {
-    if (!allowed.has(name)) {
-      throw configError(`Unknown ${label} URL parameter "${name}".`, {
-        hint: `Supported parameters: ${[...allowed].join(", ")}.`,
-      });
-    }
-  }
-}
-
-/** `memory://name` → the process-wide store with that name (default `"default"`). */
-function memoryStorageOf(url: string): StorageAdapter {
-  const name = parseUrl(url).hostname || "default";
-  let store = memoryStores.get(name);
-  if (!store) {
-    store = memoryStorage({ name });
-    memoryStores.set(name, store);
-  }
-  return store;
-}
-
-function parseUrl(url: string): URL {
-  try {
-    return new URL(url);
-  } catch (error) {
-    throw configError(`Invalid URL "${url}".`, { cause: error });
-  }
-}
-
-/** `?retention=governance` → `{ retention: { mode: "governance" } }`; absent → `{}`. */
-function retentionParameter(parsed: URL): { retention?: RetentionOptions } {
-  const mode = parsed.searchParams.get("retention");
-  if (mode === null) return {};
-  if (mode === "compliance" || mode === "governance") return { retention: { mode } };
-  throw configError(`Invalid retention mode "${mode}" in storage URL.`, {
-    hint: "Use retention=compliance or retention=governance.",
-  });
-}
-
-function parseBoolean(value: string): boolean {
-  const normalized = value.toLowerCase();
-  if (normalized === "true" || normalized === "1" || normalized === "") return true;
-  if (normalized === "false" || normalized === "0") return false;
-  throw configError(`Invalid boolean "${value}" in storage URL.`, {
-    hint: "Use true or false.",
-  });
-}
-
-function configError(
-  message: string,
-  options: { hint?: string; cause?: unknown } = {},
-): MongoShieldError {
-  return new MongoShieldError("MS_CONFIG_INVALID", message, options);
+  return factory({ url, parsed: parseStorageUrl(url), scheme, env: options.env ?? process.env });
 }

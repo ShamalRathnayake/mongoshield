@@ -80,6 +80,32 @@ describe("resolveStorage", () => {
   });
 });
 
+describe("resolveStorage with an injected environment", () => {
+  const fingerprint = `SHA256:${"A".repeat(43)}`;
+
+  it("reads sftp credentials from options.env instead of process.env", async () => {
+    const url = `sftp://backup@example.com/data?fingerprint=${fingerprint}`;
+    const sftp = await resolveStorage(url, {
+      env: { MONGOSHIELD_SFTP_KEY_FILE: "/run/secrets/id_ed25519" },
+    });
+    expect(sftp.kind).toBe("sftp");
+    const missingKey = await resolveStorage(url, { env: {} }).catch((reason: unknown) => reason);
+    expect(isMongoShieldError(missingKey, "MS_CONFIG_INVALID")).toBe(true);
+  });
+
+  it("reads the Azure connection string from options.env", async () => {
+    const env = {
+      AZURE_STORAGE_CONNECTION_STRING:
+        "DefaultEndpointsProtocol=https;AccountName=other;AccountKey=c2VjcmV0",
+    };
+    // The injected connection string is for another account, so it is refused.
+    const error = await resolveStorage("az://myaccount/backups", { env }).catch(
+      (reason: unknown) => reason,
+    );
+    expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
+  });
+});
+
 describe("resolveStorage retention parameter", () => {
   it.each([
     "s3://bucket/p?retention=governance",
