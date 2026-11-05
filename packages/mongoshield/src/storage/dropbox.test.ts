@@ -13,6 +13,7 @@ import {
   type FakeDropboxServer,
   startFakeDropboxServer,
 } from "../../test/helpers/fake-dropbox-server.ts";
+import { withoutShippedClient } from "../../test/helpers/no-shipped-client.ts";
 import { describeStorageConformance } from "../../test/helpers/storage-conformance.ts";
 import { isMongoShieldError } from "../errors.ts";
 import {
@@ -616,9 +617,12 @@ describe("dropbox storage", () => {
       expect(isMongoShieldError(error) && error.hint).toMatch(/mongoshield login dropbox/);
     });
 
-    it("fails with a hint when no app key is configured", () => {
+    it("fails with a hint when no app key is shipped or configured", async () => {
+      const fresh = await withoutShippedClient("dropbox", () => import("./dropbox.ts"));
       expect(() =>
-        dropboxStorageFromUrl(new URL("dropbox://backups"), { MONGOSHIELD_DROPBOX_TOKEN: "t" }),
+        fresh.dropboxStorageFromUrl(new URL("dropbox://backups"), {
+          MONGOSHIELD_DROPBOX_TOKEN: "t",
+        }),
       ).toThrow(/No Dropbox app key/);
     });
 

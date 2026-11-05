@@ -11,6 +11,7 @@ import {
   type FakeGdriveServer,
   startFakeGdriveServer,
 } from "../../test/helpers/fake-gdrive-server.ts";
+import { withoutShippedClient } from "../../test/helpers/no-shipped-client.ts";
 import { describeStorageConformance } from "../../test/helpers/storage-conformance.ts";
 import { isMongoShieldError } from "../errors.ts";
 import { isConditionalWritesUnsupported } from "./conditional-writes.ts";
@@ -492,6 +493,14 @@ describe("gdrive storage", () => {
       server.failNext({ status: 429, retryAfter: "0" });
       server.failNext({ status: 500 });
       expect(await storageFor().head("missing")).toBeUndefined();
+    });
+
+    it("retries a 408 request timeout, including on an upload chunk", async () => {
+      server.failNext({ status: 408 });
+      expect(await storageFor().head("missing")).toBeUndefined();
+      server.failNext({ status: 408 });
+      await storageFor().put("big.bin", Buffer.alloc(6 * 1024 * 1024, 1));
+      expect(filesNamed("big.bin")).toHaveLength(1);
     });
 
     it("gives up after `retries` attempts with the rate-limit hint", async () => {
@@ -1897,9 +1906,10 @@ describe("gdriveStorageFromUrl", () => {
     expect((error as { hint?: string }).hint).toMatch(/mongoshield login gdrive/);
   });
 
-  it("fails clearly when no OAuth client is configured", () => {
+  it("fails clearly when no OAuth client is shipped or configured", async () => {
+    const fresh = await withoutShippedClient("gdrive", () => import("./gdrive.ts"));
     expect(() =>
-      gdriveStorageFromUrl(new URL("gdrive://a"), { MONGOSHIELD_GDRIVE_TOKEN: "1//refresh" }),
+      fresh.gdriveStorageFromUrl(new URL("gdrive://a"), { MONGOSHIELD_GDRIVE_TOKEN: "1//refresh" }),
     ).toThrow(/No Google OAuth client/);
   });
 });

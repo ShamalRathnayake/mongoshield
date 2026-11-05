@@ -9,6 +9,7 @@ import {
   type FakeGdriveServer,
   startFakeGdriveServer,
 } from "../../test/helpers/fake-gdrive-server.ts";
+import { withoutShippedClient } from "../../test/helpers/no-shipped-client.ts";
 import { isMongoShieldError } from "../errors.ts";
 import {
   abortableSleep,
@@ -530,16 +531,33 @@ describe("gdriveClientCredentials", () => {
     ).toEqual({ clientId: "my-id", clientSecret: "my-secret" });
   });
 
-  it("fails with a hint while no client is shipped or configured", () => {
+  it("fails with a hint while no client is shipped or configured", async () => {
+    const fresh = await withoutShippedClient("gdrive", () => import("./gdrive-auth.ts"));
     const error = (() => {
       try {
-        gdriveClientCredentials({});
+        fresh.gdriveClientCredentials({});
       } catch (caught) {
         return caught;
       }
       return undefined;
     })();
-    expect(isMongoShieldError(error, "MS_CONFIG_INVALID")).toBe(true);
+    // The fresh module graph has its own MongoShieldError class, so check the shape.
+    expect(error).toMatchObject({ code: "MS_CONFIG_INVALID" });
     expect((error as { hint?: string }).hint).toMatch(/MONGOSHIELD_GDRIVE_CLIENT_ID/);
+  });
+
+  it("uses MongoShield's shipped client when no override is set", async () => {
+    const shipped = await import("./oauth/apps.ts");
+    if (shipped.OAUTH_APPS.gdrive.clientId === "") return; // nothing shipped yet
+    expect(gdriveClientCredentials({})).toEqual({
+      clientId: shipped.OAUTH_APPS.gdrive.clientId,
+      clientSecret: shipped.OAUTH_APPS.gdrive.clientSecret,
+    });
+    expect(
+      gdriveClientCredentials({
+        MONGOSHIELD_GDRIVE_CLIENT_ID: "own-id",
+        MONGOSHIELD_GDRIVE_CLIENT_SECRET: "own-secret",
+      }),
+    ).toEqual({ clientId: "own-id", clientSecret: "own-secret" });
   });
 });

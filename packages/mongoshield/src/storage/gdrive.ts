@@ -1483,7 +1483,9 @@ async function errorBody(response: Response): Promise<DriveErrorBody> {
 
 /** 429, 5xx, and 403 with a rate-limit reason are worth retrying. */
 async function isRetryable(response: Response): Promise<boolean> {
-  if (response.status === 429 || response.status >= 500) return true;
+  // 408: the request timed out on Google's side (it happens on slow chunk uploads);
+  // like a 5xx, the same request can simply be sent again.
+  if (response.status === 408 || response.status === 429 || response.status >= 500) return true;
   if (response.status !== 403) return false;
   const { reasons } = await errorBody(response);
   return reasons.some((reason) => RATE_LIMIT_REASONS.has(reason));
