@@ -62,6 +62,9 @@ const COLLECTIONS: readonly Collection[] = [
       "atlas",
       "atlas-free-tier",
       "bun-and-deno",
+      // Where to store them.
+      "b2-and-r2",
+      "community-storage-adapters",
       // Operating them.
       "observability",
       "immutable-backups",

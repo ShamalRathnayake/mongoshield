@@ -12,6 +12,7 @@ README; the matching guides are in [`docs/guides`](../docs/guides/).
 | [`vercel-cron`](./vercel-cron/) | Next.js route handler called by Vercel Cron |
 | [`nestjs`](./nestjs/) | a NestJS module providing `MongoShield`, with a scheduled job |
 | [`express-admin`](./express-admin/) | a protected "back up now" endpoint, with a security checklist |
+| [`community-storage-adapter`](./community-storage-adapter/) | a third-party storage adapter (`flatdir://`) registered under its own scheme and passing the contract test kit |
 
 Kubernetes lives in [`deploy/`](../deploy/): a Helm chart and a plain CronJob manifest.
 
