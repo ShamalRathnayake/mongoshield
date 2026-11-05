@@ -617,15 +617,22 @@ export function dropboxStorage(options: DropboxStorageOptions): DropboxStorage {
       const name = stringField(entry, "name");
       if (!name || lowerSegments.length <= baseDepth + 1) continue;
       const segments: string[] = [];
+      let complete = true;
       for (let depth = baseDepth + 1; depth < lowerSegments.length - 1; depth++) {
         const folderLower = lowerSegments.slice(0, depth + 1).join("/");
         const segment =
           depth < listSegments.length
             ? listSegments[depth]
             : (folderNames.get(folderLower) ?? displaySegments[depth]);
-        if (segment === undefined) break;
+        // A folder name we cannot recover: skip the entry rather than list the file
+        // under a shorter, wrong key (`sub/deep.bin` as `deep.bin`).
+        if (segment === undefined) {
+          complete = false;
+          break;
+        }
         segments.push(segment);
       }
+      if (!complete) continue;
       segments.push(name);
       const key = segments.join("/");
       if (!isValidKey(key)) continue;
@@ -810,8 +817,12 @@ export function dropboxStorage(options: DropboxStorageOptions): DropboxStorage {
         },
       );
     }
-    if (error.has("lookup_failed")) {
-      // The upload session is gone or out of step: an I/O problem, not a missing object.
+    if (
+      error.has("lookup_failed") ||
+      (error.endpoint.startsWith("files/upload_session/") && error.has("not_found"))
+    ) {
+      // The upload session is gone or out of step (`finish` says lookup_failed,
+      // `append_v2` says not_found): an I/O problem, not a missing object.
       return new MongoShieldError("MS_STORAGE_IO", `${what}.`, { details });
     }
     if (error.has("not_found") || error.has("not_file")) {

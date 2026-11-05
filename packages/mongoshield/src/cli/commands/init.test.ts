@@ -807,6 +807,13 @@ describe("init --github", () => {
       firstRun: { status: "not-started" },
     });
     expect(run.json<{ recipient: string }>().recipient).toMatch(/^age1/);
+    // The copy-paste commands are in the JSON, since --json prints no text lines.
+    const { commands } = run.json<{ commands: string[] }>();
+    expect(commands).toContain("gh secret set MONGODB_URI");
+    expect(commands.some((line) => line.startsWith("gh variable set MONGOSHIELD_RECIPIENTS"))).toBe(
+      true,
+    );
+    expect(commands.at(-1)).toBe("gh workflow run mongoshield-backup.yml");
     expect(await exists(join(cwd, ".github/workflows/mongoshield-backup.yml"))).toBe(true);
     expect(JSON.parse(await readFile(join(cwd, "mongoshield.config.json"), "utf8"))).toMatchObject({
       storage: "./backups",

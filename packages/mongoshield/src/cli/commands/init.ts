@@ -559,6 +559,20 @@ async function runInitGithubCommand(context: CommandContext): Promise<number> {
     nonEmpty(env[uriEnv]) ?? (interactive ? await askConnectionString(common) : undefined);
   if (mongodbUri !== undefined) context.addSecret(mongodbUri);
 
+  // With --json the copy-paste commands (`gh secret set NAME < /tmp/…`) would be
+  // dropped like every other text line, so they are collected for the JSON instead.
+  const commands: string[] = [];
+  const { out } = context;
+  const output = out.settings.json
+    ? {
+        info: (text: string) => out.info(text),
+        success: (text: string) => out.success(text),
+        warn: (text: string) => out.warn(text),
+        result: (text: string) => {
+          commands.push(text);
+        },
+      }
+    : out;
   const result = await initGithub({
     cwd: context.io.cwd,
     storage: githubStorageChoice(destination, storage, setup, env, token),
@@ -572,7 +586,7 @@ async function runInitGithubCommand(context: CommandContext): Promise<number> {
       }),
     openStorage: () => resolveStorage(storage, { env }),
     ...(interactive ? { confirm: (question: string) => askYesNo(common, question) } : {}),
-    out: context.out,
+    out: output,
     env,
     signal: context.signal,
   });
@@ -588,6 +602,7 @@ async function runInitGithubCommand(context: CommandContext): Promise<number> {
       recoveryKit: result.recoveryKit,
       github: result.github,
       firstRun: result.firstRun,
+      ...(commands.length === 0 ? {} : { commands }),
     });
   } else if (interactive) {
     outro(

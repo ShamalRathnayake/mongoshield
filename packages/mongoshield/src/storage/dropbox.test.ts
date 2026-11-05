@@ -648,6 +648,16 @@ describe("dropbox storage", () => {
       expect(codeOf(error)).toBe("MS_STORAGE_IO");
     });
 
+    it("maps an append that finds no session to MS_STORAGE_IO, not NOT_FOUND", async () => {
+      const storage = adapterOn(server, { chunkSize: 4 * MiB });
+      server.fail("files/upload_session/append_v2", {
+        status: 409,
+        body: { error_summary: "not_found/..", error: { ".tag": "not_found" } },
+      });
+      const error = await rejectionOf(storage.put("expired.bin", Buffer.alloc(9 * MiB)));
+      expect(codeOf(error)).toBe("MS_STORAGE_IO");
+    });
+
     it("maps a write without permission to MS_STORAGE_FORBIDDEN", async () => {
       const storage = adapterOn(server);
       server.fail("files/upload", {
