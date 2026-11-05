@@ -90,6 +90,56 @@ runs:
         # no cache from the caller's project: off, or any pnpm/yarn repo would break.
         package-manager-cache: false
 
+    # --- OneDrive only: carry the rotated sign-in token from run to run ----------------
+    # Microsoft refresh tokens stop working 90 days after they were issued, and every
+    # refresh returns a new one. mongoshield writes the newest to a token state file
+    # (MONGOSHIELD_ONEDRIVE_TOKEN_STATE), encrypted with a key derived from the
+    # MONGOSHIELD_ONEDRIVE_TOKEN secret, and these steps keep that file in the Actions
+    # cache, so the cache only ever holds ciphertext. Nothing here prints a secret.
+    # The steps are skipped unless the storage is onedrive:// (the `storage` input,
+    # MONGOSHIELD_STORAGE or the config file). See docs/guides/onedrive.md.
+    - name: Check for OneDrive storage
+      id: onedrive
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_STORAGE: ${{ inputs.storage }}
+        INPUT_CONFIG: ${{ inputs.config }}
+      run: |
+        # The same places run.sh looks for the storage, searched for onedrive:// or
+        # onedriveStorage( (lower-cased, as schemes are case-insensitive).
+        text="${INPUT_STORAGE:-} ${MONGOSHIELD_STORAGE:-}"
+        config="${INPUT_CONFIG:-}"
+        if [[ -z "$config" ]]; then
+          for name in mongoshield.config.ts mongoshield.config.mts mongoshield.config.js \
+            mongoshield.config.mjs mongoshield.config.json; do
+            if [[ -f "$name" ]]; then config="$name"; break; fi
+          done
+        fi
+        if [[ -n "$config" && -f "$config" ]]; then text="$text $(cat "$config")"; fi
+        text="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$text" == *onedrive://* || "$text" == *onedrivestorage* ]]; then
+          # A path the caller chose themselves is kept; otherwise one in the runner's
+          # temp folder, outside the workspace, so it can never be committed or uploaded.
+          path="${MONGOSHIELD_ONEDRIVE_TOKEN_STATE:-${RUNNER_TEMP}/mongoshield-onedrive/token-state.json}"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+        else
+          # Not OneDrive: pass on whatever the caller set (usually nothing), untouched.
+          echo "path=${MONGOSHIELD_ONEDRIVE_TOKEN_STATE:-}" >> "$GITHUB_OUTPUT"
+        fi
+
+    # The newest token state: restore-keys matches the most recent entry saved by this
+    # workflow's job (each run saves under a key of its own, below).
+    - name: Restore the OneDrive token state
+      if: steps.onedrive.outputs.enabled == 'true'
+      # Pinned to a full commit SHA, like setup-node above.
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ steps.onedrive.outputs.path }}
+        key: mongoshield-onedrive-token-${{ github.workflow }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: mongoshield-onedrive-token-${{ github.workflow }}-${{ github.job }}-
+
     # Inputs are passed as environment variables, never pasted into the script text:
     # `${{ inputs.x }}` inside `run:` would let a crafted value inject shell commands.
     - name: Run mongoshield ${{ inputs.command }}
@@ -97,6 +147,9 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
+        # The token state file for onedrive:// storage; otherwise the caller's own value
+        # (an empty value counts as unset).
+        MONGOSHIELD_ONEDRIVE_TOKEN_STATE: ${{ steps.onedrive.outputs.path }}
         INPUT_COMMAND: ${{ inputs.command }}
         INPUT_URI: ${{ inputs.uri }}
         INPUT_STORAGE: ${{ inputs.storage }}
@@ -107,3 +160,13 @@ runs:
         INPUT_PACKAGES: ${{ inputs.packages }}
         INPUT_VERSION: ${{ inputs.version }}
       run: bash "${GITHUB_ACTION_PATH}/run.sh"
+
+    # Saved even when the run failed: the token may have rotated before the failure,
+    # and the old one could already be past its 90 days. A unique key per run attempt,
+    # because cache entries are immutable. No entry is made if the file does not exist.
+    - name: Save the OneDrive token state
+      if: always() && steps.onedrive.outputs.enabled == 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ steps.onedrive.outputs.path }}
+        key: mongoshield-onedrive-token-${{ github.workflow }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
