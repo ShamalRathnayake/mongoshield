@@ -63,6 +63,7 @@ import {
 } from "../mongo/index.ts";
 import { compileNamespaceRules, explicitlyNamedDatabases } from "../mongo/namespace-filter.ts";
 import type { StorageAdapter } from "../storage/types.ts";
+import { storageWarnings } from "../storage/warnings.ts";
 import type {
   BackupOptions,
   BackupResult,
@@ -446,10 +447,15 @@ export async function runBackup(
       bytesStored: manifest.totals.bytesStored,
       durationMs,
     });
+    // Warnings the storage reports about itself (an expiring OneDrive sign-in), known
+    // only now that it has been used; logged here because adapters have no logger.
+    const adapterWarnings = storageWarnings(storage);
+    for (const warning of adapterWarnings) logger.warn(warning);
     // The consistency warning (e.g. `auto` used `none`) and the rest, for the caller.
     const warnings = [
       ...(manifest.consistency.warning === undefined ? [] : [manifest.consistency.warning]),
       ...encryptionWarnings,
+      ...adapterWarnings,
     ];
     return {
       status: "complete",

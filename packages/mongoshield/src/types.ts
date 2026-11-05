@@ -214,7 +214,8 @@ export interface CompletedBackupResult {
    * consistency `auto` fell back to `none` (the manifest's `consistency.warning`), an
    * incremental fell back to a full backup for a reason that repeats on every run
    * (`MS_SNAPSHOT_TOO_OLD` on large time series), a Queryable Encryption collection
-   * backed up without its state collections. Absent when there is nothing to report.
+   * backed up without its state collections, a storage sign-in about to expire (OneDrive,
+   * from day 75). Absent when there is nothing to report.
    * Scheduled runs copy them into the run report (`backup.warnings`).
    */
   readonly warnings?: readonly string[];
