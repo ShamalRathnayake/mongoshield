@@ -267,7 +267,11 @@ BEFORE="$(secret_key_fingerprint)"
 docker restart "${CONSOLE}" >/dev/null
 wait_healthz
 [[ "$(secret_key_fingerprint)" == "${BEFORE}" ]] || fail "secret.key changed across a restart"
-docker logs "${CONSOLE}" 2>&1 | grep -q "Using the generated secret key" || fail "the restarted console did not reuse the key"
+# The logs are read into a variable first: with pipefail, `docker logs … | grep -q`
+# fails at random, because grep exits on the first match and docker logs then dies
+# writing into the closed pipe.
+CONSOLE_LOGS="$(docker logs "${CONSOLE}" 2>&1)"
+grep -q "Using the generated secret key" <<<"${CONSOLE_LOGS}" || fail "the restarted console did not reuse the key"
 COOKIE="" CSRF=""
 api POST /api/session "$(jq -n --arg u "${ADMIN_USER}" --arg p "${ADMIN_PASSWORD}" '{username: $u, password: $p}')" >/dev/null
 remember_session
@@ -329,7 +333,8 @@ log "An explicit MONGOSHIELD_SECRET still works; a short one is refused"
 docker run -d --name "${CONSOLE}-explicit" -p "127.0.0.1:${PORT}:8080" -v "${VOLUME_EXPLICIT}:/data" \
   -e MONGOSHIELD_SECRET="$(openssl rand -hex 32)" "${IMAGE}" >/dev/null
 wait_healthz
-if docker logs "${CONSOLE}-explicit" 2>&1 | grep -q "generated a new secret key"; then
+EXPLICIT_LOGS="$(docker logs "${CONSOLE}-explicit" 2>&1)"
+if grep -q "generated a new secret key" <<<"${EXPLICIT_LOGS}"; then
   fail "a key was generated although MONGOSHIELD_SECRET was set"
 fi
 docker rm -f "${CONSOLE}-explicit" >/dev/null
