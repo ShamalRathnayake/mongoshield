@@ -12,8 +12,6 @@ import {
   assertValidChunkSize,
   DROPBOX_MAX_CHUNK,
   GOOGLE_DRIVE_CHUNK_MULTIPLE,
-  ONEDRIVE_FRAGMENT_MULTIPLE,
-  ONEDRIVE_MAX_FRAGMENT,
   readChunks,
   type UploadChunk,
 } from "./chunks.ts";
@@ -143,11 +141,6 @@ describe("assertValidChunkSize", () => {
       chunkSize: 32 * GOOGLE_DRIVE_CHUNK_MULTIPLE,
       multipleOf: GOOGLE_DRIVE_CHUNK_MULTIPLE,
     });
-    assertValidChunkSize({
-      chunkSize: 30 * ONEDRIVE_FRAGMENT_MULTIPLE,
-      multipleOf: ONEDRIVE_FRAGMENT_MULTIPLE,
-      maxChunkSize: ONEDRIVE_MAX_FRAGMENT,
-    });
     assertValidChunkSize({ chunkSize: DROPBOX_MAX_CHUNK, maxChunkSize: DROPBOX_MAX_CHUNK });
   });
 
@@ -155,7 +148,6 @@ describe("assertValidChunkSize", () => {
     [{ chunkSize: 0 }, "a positive whole number"],
     [{ chunkSize: 1.5 }, "a positive whole number"],
     [{ chunkSize: 1000, multipleOf: GOOGLE_DRIVE_CHUNK_MULTIPLE }, "a multiple of 256 KiB"],
-    [{ chunkSize: 256 * 1024, multipleOf: ONEDRIVE_FRAGMENT_MULTIPLE }, "a multiple of 320 KiB"],
     [{ chunkSize: DROPBOX_MAX_CHUNK + 1, maxChunkSize: DROPBOX_MAX_CHUNK }, "at most 150 MiB"],
   ])("refuses %j", (options, hint) => {
     let caught: unknown;

@@ -67,9 +67,10 @@ mask_uri "${MONGOSHIELD_URI:-}"
 mask_uri "${MONGOSHIELD_DRILL_URI:-}"
 mask "${MONGOSHIELD_IDENTITY:-}"
 mask "${MONGOSHIELD_PASSPHRASE:-}"
-# The OneDrive sign-in (onedrive:// storage). Usually straight from `secrets.*`, which
-# GitHub masks already, but not when it was built from other values.
-mask "${MONGOSHIELD_ONEDRIVE_TOKEN:-}"
+# The drive sign-ins (gdrive://, dropbox:// storage). Usually straight from `secrets.*`,
+# which GitHub masks already, but not when they were built from other values.
+mask "${MONGOSHIELD_GDRIVE_TOKEN:-}"
+mask "${MONGOSHIELD_DROPBOX_TOKEN:-}"
 
 # --- Command ----------------------------------------------------------------
 command="${INPUT_COMMAND:-backup}"

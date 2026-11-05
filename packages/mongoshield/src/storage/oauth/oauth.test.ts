@@ -85,15 +85,13 @@ describe("resolveOAuthClient", () => {
       clientSecret: "MONGOSHIELD_GDRIVE_CLIENT_SECRET",
       token: "MONGOSHIELD_GDRIVE_TOKEN",
     });
-    expect(OAUTH_APPS.onedrive.env.token).toBe("MONGOSHIELD_ONEDRIVE_TOKEN");
     expect(OAUTH_APPS.dropbox.env.token).toBe("MONGOSHIELD_DROPBOX_TOKEN");
-    expect(oauthSecretEnvNames()).toContain("MONGOSHIELD_ONEDRIVE_TOKEN");
+    expect(oauthSecretEnvNames()).toContain("MONGOSHIELD_DROPBOX_TOKEN");
     expect(oauthSecretEnvNames()).toContain("MONGOSHIELD_GDRIVE_CLIENT_SECRET");
   });
 
   it("asks only for least-privilege scopes", () => {
     expect(OAUTH_APPS.gdrive.scopes).toEqual(["https://www.googleapis.com/auth/drive.file"]);
-    expect(OAUTH_APPS.onedrive.scopes).toContain("Files.ReadWrite.AppFolder");
     expect(OAUTH_APPS.dropbox.flow).toBe("browser");
   });
 });

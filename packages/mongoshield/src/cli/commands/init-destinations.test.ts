@@ -69,7 +69,6 @@ function verdicts(
 describe("the drive destinations of mongoshield init", () => {
   it.each([
     ["gdrive", "Google Drive", "a folder MongoShield creates in your Google Drive"],
-    ["onedrive", "OneDrive", "MongoShield's own app folder in your OneDrive"],
     ["dropbox", "Dropbox", "MongoShield's own app folder in your Dropbox"],
   ] as const)("%s asks for a folder and builds %s's URL from it", async (id, name, where) => {
     const fresh = await ask(id, ["/Prod Backups/mongo/"]);
@@ -104,7 +103,6 @@ describe("the drive destinations of mongoshield init", () => {
 
   it.each([
     ["gdrive", "MONGOSHIELD_GDRIVE_TOKEN"],
-    ["onedrive", "MONGOSHIELD_ONEDRIVE_TOKEN"],
     ["dropbox", "MONGOSHIELD_DROPBOX_TOKEN"],
   ] as const)("%s needs a login and its token secret %s", (id, secret) => {
     const drive = destination(id);
@@ -363,7 +361,7 @@ describe("finding a destination", () => {
 
   it.each([
     ["gdrive://folder", "gdrive"],
-    ["OneDrive://folder", "onedrive"],
+    ["Dropbox://folder", "dropbox"],
     ["dropbox://folder", "dropbox"],
     ["B2://acme?region=us-west-004", "b2"],
     [`r2://${"a".repeat(32)}/acme`, "r2"],

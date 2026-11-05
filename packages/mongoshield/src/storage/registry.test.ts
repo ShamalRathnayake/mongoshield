@@ -142,7 +142,6 @@ describe("registerStorageScheme", () => {
 
   it.each([
     ["gdrive://mongoshield-backups", "gdrive", "GDRIVE"],
-    ["onedrive://backups", "onedrive", "ONEDRIVE"],
     ["dropbox://backups", "dropbox", "DROPBOX"],
   ])(
     "resolves %s to the first-party drive adapter, which no package can replace",
@@ -160,7 +159,7 @@ describe("registerStorageScheme", () => {
     },
   );
 
-  it.each(["gdrive://backups", "onedrive://backups", "dropbox://backups"])(
+  it.each(["gdrive://backups", "dropbox://backups"])(
     "refuses %s without its token, naming the login command",
     async (url) => {
       const error = await resolveStorage(url, { env: {} }).catch((reason: unknown) => reason);

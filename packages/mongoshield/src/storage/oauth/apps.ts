@@ -14,8 +14,6 @@
  *
  *   provider   app type                                 what to register
  *   gdrive     Google "TVs and Limited Input devices"    drive.file scope (non-sensitive)
- *   onedrive   Microsoft Entra "personal accounts",       Files.ReadWrite.AppFolder + offline_access,
- *              public client flows enabled               device code flow allowed
  *   dropbox    Dropbox "App folder" app, PKCE            files.* scopes, redirect
  *                                                        http://127.0.0.1/ (see the login provider)
  *
@@ -32,10 +30,10 @@
 import { MongoShieldError } from "../../errors.ts";
 
 /** The providers with an OAuth app. Also the `mongoshield login <provider>` names. */
-export type OAuthProviderId = "gdrive" | "onedrive" | "dropbox";
+export type OAuthProviderId = "gdrive" | "dropbox";
 
 /** Every provider id, in the order menus and help list them. */
-export const OAUTH_PROVIDER_IDS: readonly OAuthProviderId[] = ["gdrive", "onedrive", "dropbox"];
+export const OAUTH_PROVIDER_IDS: readonly OAuthProviderId[] = ["gdrive", "dropbox"];
 
 /** Everything about one provider's OAuth app. */
 export interface OAuthApp {
@@ -90,10 +88,11 @@ export const OAUTH_APPS: Readonly<Record<OAuthProviderId, OAuthApp>> = {
   gdrive: {
     provider: "gdrive",
     displayName: "Google Drive",
-    // TODO(maintainer): the client id of MongoShield's Google OAuth app (TV / limited input).
-    clientId: "",
-    // TODO(maintainer): its client secret (not confidential for this app type, see above).
-    clientSecret: "",
+    // MongoShield's Google OAuth client ("MongoShield CLI", TV / limited input), in the
+    // Google Cloud project `mongoshield`.
+    clientId: "795590775448-hp5uifobp96siel0278b6a4k6dl5ku8o.apps.googleusercontent.com",
+    // Not confidential for this app type (see the header comment).
+    clientSecret: "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",
     flow: "device",
     endpoints: {
       deviceAuthorization: "https://oauth2.googleapis.com/device/code",
@@ -104,28 +103,12 @@ export const OAUTH_APPS: Readonly<Record<OAuthProviderId, OAuthApp>> = {
     env: envNames("gdrive"),
   },
 
-  onedrive: {
-    provider: "onedrive",
-    displayName: "OneDrive",
-    // TODO(maintainer): the application (client) id of MongoShield's Microsoft Entra app.
-    clientId: "",
-    clientSecret: "",
-    flow: "device",
-    endpoints: {
-      // "consumers": personal Microsoft accounts (work and school accounts stay experimental).
-      deviceAuthorization: "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
-      token: "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-    },
-    // The app's own folder only; offline_access returns a refresh token.
-    scopes: ["Files.ReadWrite.AppFolder", "offline_access"],
-    env: envNames("onedrive"),
-  },
-
   dropbox: {
     provider: "dropbox",
     displayName: "Dropbox",
-    // TODO(maintainer): the app key of MongoShield's Dropbox app ("App folder" access).
-    clientId: "",
+    // The app key of MongoShield's Dropbox app ("MongoShield", App folder access, PKCE,
+    // redirects http://127.0.0.1:53917/callback and :53918/callback).
+    clientId: "4eztt2dgf90i279",
     clientSecret: "",
     // Dropbox has no device flow: a local browser redirect with PKCE.
     flow: "browser",
@@ -159,7 +142,6 @@ export interface OAuthClient {
 /** Each provider's guide, under docs/guides/ (named for people, not by scheme). */
 const GUIDES: Readonly<Record<OAuthProviderId, string>> = {
   gdrive: "google-drive.md",
-  onedrive: "onedrive.md",
   dropbox: "dropbox.md",
 };
 

@@ -1,7 +1,7 @@
 /**
  * Login providers built from a shipped OAuth app (src/storage/oauth/apps.ts): the
- * device flow for Google Drive and OneDrive, the browser flow with PKCE for Dropbox.
- * The provider modules (gdrive.ts, onedrive.ts, dropbox.ts) start from these and add
+ * device flow for Google Drive, the browser flow with PKCE for Dropbox.
+ * The provider modules (gdrive.ts, dropbox.ts) start from these and add
  * whatever their provider needs on top.
  *
  *   export const gdriveLoginProvider = deviceLoginProvider(OAUTH_APPS.gdrive);

@@ -3,9 +3,8 @@
  * to `BackupResult.warnings`.
  *
  * The StorageAdapter contract has no warnings method, so this is an optional extra
- * an adapter may provide: `warnings(): readonly string[]`. The OneDrive adapter uses
- * it for the day-75 sign-in warning (see onedrive-token-state.ts). Adapters without
- * it report nothing.
+ * an adapter may provide: `warnings(): readonly string[]` (e.g. a sign-in about to
+ * expire). Adapters without it report nothing.
  */
 
 import type { StorageAdapter } from "./types.ts";

@@ -98,14 +98,13 @@ describe("mongoshield login", () => {
   it("lists the providers when none or an unknown one is named", async () => {
     const none = await runTestCli(["login"]);
     expect(none.code).toBe(2);
-    expect(none.stderr).toContain("gdrive, onedrive, dropbox");
+    expect(none.stderr).toContain("gdrive, dropbox");
     const unknown = await runTestCli(["login", "icloud"]);
     expect(unknown.code).toBe(2);
     expect(unknown.stderr).toContain('Unknown provider "icloud"');
   });
 
   it.each([
-    [["login", "fakedrive", "--business"], "--business only applies to onedrive"],
     [["login", "fakedrive", "--repo", "acme/web"], "--repo only applies with --gh"],
     [["login", "fakedrive", "--port", "70000"], "--port must be a whole number"],
     [["login", "fakedrive", "extra"], "Unexpected argument: extra"],
@@ -159,7 +158,7 @@ describe("mongoshield login", () => {
 
   it("is listed in the help", async () => {
     const run = await runTestCli(["--help"]);
-    expect(plain(run.stdout)).toMatch(/login\s+Sign in to Google Drive, OneDrive or Dropbox/);
+    expect(plain(run.stdout)).toMatch(/login\s+Sign in to Google Drive or Dropbox/);
   });
 });
 

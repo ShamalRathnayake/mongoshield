@@ -1,5 +1,5 @@
 /**
- * `mongoshield login <provider>`: sign in to a drive provider (Google Drive, OneDrive,
+ * `mongoshield login <provider>`: sign in to a drive provider (Google Drive or
  * Dropbox) and get the refresh token that unattended backups use.
  *
  *   mongoshield login gdrive          # shows a code to approve on any device
@@ -26,16 +26,16 @@ const NAME = "login";
 
 export const loginCommand: CommandSpec = {
   name: NAME,
-  summary: "Sign in to Google Drive, OneDrive or Dropbox and get the token for backups",
+  summary: "Sign in to Google Drive or Dropbox and get the token for backups",
   description: [
     "Runs the provider's sign-in and prints the refresh token once, with the name of",
-    "the secret it belongs in (MONGOSHIELD_<PROVIDER>_TOKEN). Google Drive and OneDrive",
-    "show a code to approve on any device, which works over SSH too; Dropbox opens a",
+    "the secret it belongs in (MONGOSHIELD_<PROVIDER>_TOKEN). Google Drive shows a code",
+    "to approve on any device, which works over SSH too; Dropbox opens a",
     "sign-in link in a browser on this machine. MongoShield only gets access to its own",
     "folder (Google: only the files it created).",
     "With --gh the token is stored as a GitHub Actions secret with the gh CLI instead.",
   ].join("\n"),
-  positionals: [{ name: "provider", description: "gdrive, onedrive or dropbox" }],
+  positionals: [{ name: "provider", description: "gdrive or dropbox" }],
   options: {
     gh: {
       type: "boolean",
@@ -51,10 +51,6 @@ export const loginCommand: CommandSpec = {
       valueName: "<port>",
       description: "Browser sign-in (Dropbox): the local port to receive the answer on",
     },
-    business: {
-      type: "boolean",
-      description: "OneDrive: also allow work and school accounts (experimental)",
-    },
   },
   examples: [
     { description: "Sign in to Google Drive", command: "mongoshield login gdrive" },
@@ -64,7 +60,7 @@ export const loginCommand: CommandSpec = {
     },
     {
       description: "Machine-readable output",
-      command: "mongoshield login onedrive --json",
+      command: "mongoshield login dropbox --json",
     },
   ],
   run: runLoginCommand,
@@ -134,9 +130,6 @@ export async function runLogin(
   provider: LoginProvider,
 ): Promise<LoginResult> {
   const port = context.flags.integer("port", { min: 1, max: 65_535 });
-  if (context.flags.boolean("business") && provider.id !== "onedrive") {
-    throw usageError("--business only applies to onedrive.", NAME);
-  }
   const readCode = pastedCodeReader(context);
   const result = await provider.login({
     env: context.io.env,
@@ -144,7 +137,6 @@ export async function runLogin(
     show: (instructions) => showInstructions(context, provider, instructions),
     ...(port === undefined ? {} : { port }),
     ...(readCode === undefined ? {} : { readCode }),
-    ...(context.flags.boolean("business") ? { business: true } : {}),
   });
   context.addSecret(result.refreshToken);
   return result;

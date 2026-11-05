@@ -48,7 +48,7 @@ npx mongoshield init --github
 It asks a few questions and does the rest. Step by step:
 
 1. **Where backups go.** Choose **Google Drive** (the first entry). The menu also offers
-   OneDrive, Dropbox, GitHub artifacts, Backblaze B2, Cloudflare R2 and any storage URL.
+   Dropbox, GitHub artifacts, Backblaze B2, Cloudflare R2 and any storage URL.
 2. **Google sign-in.** It shows a code and the link `https://www.google.com/device`.
    Open it on any device, sign in to the Google account that should hold the backups,
    enter the code and choose **Allow**. MongoShield only gets access to the files it

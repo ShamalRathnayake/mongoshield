@@ -16,8 +16,7 @@
  * which is why a chunk is only handed out once more data (or the end) has been seen.
  *
  * Provider rules, as constants below: Google Drive wants chunks in multiples of
- * 256 KiB, OneDrive fragments in multiples of 320 KiB (at most 60 MiB), Dropbox at most
- * 150 MiB per request.
+ * 256 KiB, Dropbox at most 150 MiB per request.
  */
 
 import type { Readable } from "node:stream";
@@ -28,10 +27,6 @@ const MIB = 1024 * KIB;
 
 /** Google Drive resumable uploads: every chunk but the last is a multiple of 256 KiB. */
 export const GOOGLE_DRIVE_CHUNK_MULTIPLE = 256 * KIB;
-/** OneDrive upload sessions: fragments are multiples of 320 KiB. */
-export const ONEDRIVE_FRAGMENT_MULTIPLE = 320 * KIB;
-/** OneDrive upload sessions: at most 60 MiB per fragment request. */
-export const ONEDRIVE_MAX_FRAGMENT = 60 * MIB;
 /** Dropbox upload sessions: at most 150 MiB per request. */
 export const DROPBOX_MAX_CHUNK = 150 * MIB;
 
@@ -39,9 +34,9 @@ export const DROPBOX_MAX_CHUNK = 150 * MIB;
 export interface ChunkOptions {
   /** Bytes per chunk (all but the last). */
   readonly chunkSize: number;
-  /** `chunkSize` must be a multiple of this (Drive: 256 KiB, OneDrive: 320 KiB). */
+  /** `chunkSize` must be a multiple of this (Google Drive: 256 KiB). */
   readonly multipleOf?: number;
-  /** `chunkSize` must not exceed this (Dropbox: 150 MiB, OneDrive: 60 MiB). */
+  /** `chunkSize` must not exceed this (Dropbox: 150 MiB). */
   readonly maxChunkSize?: number;
   /** Checked before each read; an abort ends the iteration with MS_ABORTED. */
   readonly signal?: AbortSignal | undefined;

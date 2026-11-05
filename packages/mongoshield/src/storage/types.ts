@@ -69,13 +69,13 @@ export interface StorageAdapter {
  * `totalBytes - usedBytes`, and needs `totalBytes` for the "% full" warning.
  *
  * Drive providers keep deleted files in a recycle bin / trash that still counts
- * against the quota until it is emptied (OneDrive's `deleted`, Google Drive's
+ * against the quota until it is emptied (Google Drive's
  * `usageInDriveTrash`), and prune's deletes may land there. So:
  * - `usedBytes` is everything counted against the quota, the trash INCLUDED;
  * - `trashBytes` is the part of `usedBytes` sitting in the trash, so messages can say
  *   that emptying it frees space;
  * - `freeBytes` is what can still be written right now (after the trash), e.g. a
- *   disk's space available to this process or OneDrive's `remaining`.
+ *   disk's space available to this process.
  */
 export interface StorageSpace {
   /** The quota or the size of the volume. */

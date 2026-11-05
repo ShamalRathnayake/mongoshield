@@ -461,7 +461,7 @@ export async function runBackup(
       bytesStored: manifest.totals.bytesStored,
       durationMs,
     });
-    // Warnings the storage reports about itself (an expiring OneDrive sign-in), known
+    // Warnings the storage reports about itself (e.g. an expiring sign-in), known
     // only now that it has been used; logged here because adapters have no logger.
     const adapterWarnings = storageWarnings(storage);
     for (const warning of adapterWarnings) logger.warn(warning);

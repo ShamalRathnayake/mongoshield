@@ -26,7 +26,6 @@ restore round trip, and KMS round trips against real services:
 | SFTP (a remote server) | conformance + round trip |
 | Google Drive | conformance + round trip (`gdrive://`, a real Google account) |
 | Dropbox (an App folder app) | conformance + round trip |
-| OneDrive (a personal account) | conformance + round trip + token rotation through the Actions cache |
 
 The tests live in `packages/mongoshield/test/cloud/` (one file per provider) and
 the workflow in `.github/workflows/cloud.yml`.
@@ -87,7 +86,7 @@ R2, B2 and SFTP take their keys from the variables below.
 
 Variables are not secret (bucket names, key ids, URLs); in GitHub they are
 **repository variables** (Settings → Secrets and variables → Actions → *Variables*).
-Only R2, B2, SFTP, Google Drive, Dropbox and OneDrive need **secrets**. Locally, everything is an environment variable
+Only R2, B2, SFTP, Google Drive and Dropbox need **secrets**. Locally, everything is an environment variable
 with the same name.
 
 The jobs in `cloud.yml` decide whether to run with a job-level `if:` on a variable.
@@ -132,10 +131,6 @@ must be **repository** variables, not `cloud-tests` environment variables.
 | `MONGOSHIELD_TEST_GDRIVE_TOKEN` | **secret** | Google Drive | refresh token from `mongoshield login gdrive` with that client |
 | `MONGOSHIELD_TEST_DROPBOX_CLIENT_ID` | variable | Dropbox | the test app's app key; enables the Dropbox job |
 | `MONGOSHIELD_TEST_DROPBOX_TOKEN` | **secret** | Dropbox | a refresh token for that app (`mongoshield login dropbox`) |
-| `MONGOSHIELD_TEST_ONEDRIVE` | variable (CI only) | OneDrive job | any value, e.g. `personal`; enables the OneDrive job |
-| `MONGOSHIELD_TEST_ONEDRIVE_TOKEN` | **secret** | OneDrive | what `mongoshield login onedrive` printed for the test account |
-| `MONGOSHIELD_TEST_ONEDRIVE_TOKEN_STATE` | variable (local) | OneDrive | optional token state file; CI keeps one in the Actions cache |
-| `MONGOSHIELD_ONEDRIVE_CLIENT_ID` | variable (optional) | OneDrive | client id, only for a token that does not record it |
 | `MONGOSHIELD_TEST_PREFIX` | variable (optional) | all | top-level prefix, default `mongoshield-ci` |
 
 In the tables and commands below, replace `ShamalRathnayake/mongoshield` with your
@@ -147,7 +142,7 @@ fork if you run this elsewhere.
    Every job in `cloud.yml` uses it, and the cloud trust policies below accept only
    tokens issued for it, so no other workflow (and no pull request) can assume the
    test roles. Optionally add a required reviewer or restrict it to `main`.
-2. **Secrets** (R2, B2, SFTP, Google Drive, Dropbox and OneDrive only): add them as environment secrets of `cloud-tests`
+2. **Secrets** (R2, B2, SFTP, Google Drive and Dropbox only): add them as environment secrets of `cloud-tests`
    (or repository secrets).
 3. **Variables:** add the repository variables from the table for the providers you
    set up. A provider without its gate variable shows up as *skipped*.
@@ -661,25 +656,6 @@ Everything goes under `Apps/<app>/mongoshield-ci/<run>/`. The tests delete their
 and the run's folder is deleted at the end (the adapter itself never deletes folders).
 Deleted files stay in the account's *Deleted files* for 30 days but do not count
 against its quota. The 2 GB of a Basic account is plenty: a run writes a few MB.
-
-## OneDrive
-
-A personal Microsoft account dedicated to the tests (a free one is enough: 5 GB).
-
-1. Sign in once, from any machine: `npx mongoshield login onedrive` (with
-   `MONGOSHIELD_ONEDRIVE_CLIENT_ID` set while MongoShield's own app id is not shipped).
-2. Secret `MONGOSHIELD_TEST_ONEDRIVE_TOKEN` = the printed value; variable
-   `MONGOSHIELD_TEST_ONEDRIVE` = `personal` to enable the job.
-
-The sign-in rotates on every use and the job keeps the newest token in the Actions
-cache (`onedrive-test-token-*`, ciphertext only), so the weekly runs keep it alive.
-If the job did not run for 90 days, sign in again and replace the secret; see
-[the OneDrive guide](guides/onedrive.md#token-rotation).
-
-Everything is written to `Apps/<app name>/mongoshield-ci/<run>/` and deleted after.
-Deleted files sit in the account's recycle bin for 30 days (the app-folder permission
-cannot delete permanently) and count against its quota; the empty per-run folders stay.
-Empty the recycle bin and remove old run folders now and then at onedrive.live.com.
 
 ## When a cloud test fails
 

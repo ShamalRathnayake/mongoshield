@@ -3,7 +3,7 @@
  * then GitHub artifacts, the S3-compatible services that need no bucket of your own
  * to be paid for, and finally every storage URL.
  *
- *   Google Drive · OneDrive · Dropbox · GitHub artifacts · Backblaze B2 · Cloudflare R2
+ *   Google Drive · Dropbox · GitHub artifacts · Backblaze B2 · Cloudflare R2
  *   · a local directory · s3:// · gs:// · az:// · sftp:// · any other URL
  *
  * Each destination knows three things:
@@ -22,7 +22,6 @@ import { ghSecretSetCommand } from "../github/secrets.ts";
 /** Every destination id, also the values of `init --destination`. */
 export const INIT_DESTINATION_IDS = [
   "gdrive",
-  "onedrive",
   "dropbox",
   "github-artifacts",
   "b2",
@@ -170,7 +169,7 @@ function pathSuffix(prefix: string): string {
   return trimmed === "" ? "" : `/${trimmed.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/** Google Drive, OneDrive and Dropbox: a folder inside the app's own space, and a login. */
+/** Google Drive and Dropbox: a folder inside the app's own space, and a login. */
 function driveDestination(provider: OAuthProviderId, freeSpace: string): InitDestination {
   const app = OAUTH_APPS[provider];
   const where =
@@ -219,9 +218,6 @@ function driveDestination(provider: OAuthProviderId, freeSpace: string): InitDes
 
 /** Google Drive (15 GB free, shared with Gmail and Photos). */
 const gdrive: InitDestination = driveDestination("gdrive", "15 GB");
-
-/** OneDrive (5 GB free). */
-const onedrive: InitDestination = driveDestination("onedrive", "5 GB");
 
 /** Dropbox (2 GB free). */
 const dropbox: InitDestination = driveDestination("dropbox", "2 GB");
@@ -431,7 +427,6 @@ const otherUrl: InitDestination = {
 /** The menu, in order (see the file header). */
 export const INIT_DESTINATIONS: readonly InitDestination[] = [
   gdrive,
-  onedrive,
   dropbox,
   githubArtifacts,
   b2,

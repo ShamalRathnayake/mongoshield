@@ -367,7 +367,6 @@ describe("the destination menu of mongoshield init", () => {
   it("offers the drives first, then GitHub artifacts, B2, R2 and every URL, in that order", () => {
     expect(INIT_DESTINATIONS.map((destination) => destination.id)).toEqual([
       "gdrive",
-      "onedrive",
       "dropbox",
       "github-artifacts",
       "b2",
@@ -409,10 +408,7 @@ describe("the destination menu of mongoshield init", () => {
     expect(run.stdout).toContain("gh secret set MONGOSHIELD_GDRIVE_TOKEN");
   });
 
-  it.each([
-    ["onedrive", "onedrive://mongoshield-backups", "MONGOSHIELD_ONEDRIVE_TOKEN"],
-    ["dropbox", "dropbox://mongoshield-backups", "MONGOSHIELD_DROPBOX_TOKEN"],
-  ] as const)(
+  it.each([["dropbox", "dropbox://mongoshield-backups", "MONGOSHIELD_DROPBOX_TOKEN"]] as const)(
     "writes the %s setup with --destination, and names its token secret in --json",
     async (id, storage, secret) => {
       const run = await runTestCli(["init", "--destination", id, "--json"], { cwd });
@@ -431,7 +427,7 @@ describe("the destination menu of mongoshield init", () => {
     const run = await runTestCli(["init"], {
       cwd,
       terminal: [
-        { when: MENU, keys: choose("onedrive") },
+        { when: MENU, keys: choose("dropbox") },
         {
           when: "Which folder should backups go in?",
           keys: `${KEYS.clearLine}../up${KEYS.enter}`,
@@ -442,7 +438,7 @@ describe("the destination menu of mongoshield init", () => {
       ],
     });
     expect(run.code, plain(run.stderr)).toBe(0);
-    expect(await configText()).toContain('storage: "onedrive://prod/mongo",');
+    expect(await configText()).toContain('storage: "dropbox://prod/mongo",');
   });
 
   it("writes a GitHub artifacts setup: a directory, the upload step and the 90-day warning", async () => {

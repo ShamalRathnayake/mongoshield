@@ -11,12 +11,12 @@ describe("storageWarnings", () => {
     const base = memoryStorage();
     const adapter = {
       ...base,
-      prefix: "OneDrive: ",
+      prefix: "Drive: ",
       warnings(this: { prefix: string }) {
         return [`${this.prefix}sign-in is 80 days old`, 42];
       },
     };
-    expect(storageWarnings(adapter)).toEqual(["OneDrive: sign-in is 80 days old"]);
+    expect(storageWarnings(adapter)).toEqual(["Drive: sign-in is 80 days old"]);
   });
 
   it("ignores a warnings method that does not return an array", () => {

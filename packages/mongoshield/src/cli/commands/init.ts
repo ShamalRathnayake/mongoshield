@@ -80,8 +80,8 @@ export const initCommand: CommandSpec = {
   name: NAME,
   summary: "Create mongoshield.config.ts (interactive)",
   description: [
-    "Asks where to store backups (Google Drive, OneDrive, Dropbox, GitHub artifacts,",
-    "Backblaze B2, Cloudflare R2 or any storage URL), which environment variable holds",
+    "Asks where to store backups (Google Drive, Dropbox, GitHub artifacts, Backblaze B2,",
+    "Cloudflare R2 or any storage URL), which environment variable holds",
     "the connection string, and whether to encrypt (optionally generating a key pair),",
     "then prints the next steps for that destination. With --yes or without a terminal",
     "it uses the flags below and their defaults.",

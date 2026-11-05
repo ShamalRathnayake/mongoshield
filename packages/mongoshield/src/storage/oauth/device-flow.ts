@@ -1,6 +1,6 @@
 /**
  * The OAuth 2.0 device authorization grant (RFC 8628), used by `mongoshield login`
- * for Google Drive and OneDrive: it works over SSH and in Codespaces, because the
+ * for Google Drive: it works over SSH and in Codespaces, because the
  * person approves on any other device.
  *
  *   1. POST the device authorization endpoint → device_code, user_code, verification URL
@@ -10,7 +10,7 @@
  *      (`expired_token`); `authorization_pending` means "keep polling", and
  *      `slow_down` adds 5 seconds to the interval for good (RFC 8628 §3.5).
  *
- * Google names the URL `verification_url`, the RFC (and Microsoft) `verification_uri`;
+ * Google names the URL `verification_url`, the RFC `verification_uri`;
  * both are read.
  */
 

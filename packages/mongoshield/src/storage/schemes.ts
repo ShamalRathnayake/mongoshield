@@ -12,7 +12,6 @@
  *   b2      b2://bucket/prefix?region=us-west-004   Backblaze B2 (S3 preset)
  *   r2      r2://<accountId>/bucket/prefix          Cloudflare R2 (S3 preset)
  *   gdrive  gdrive://<folder>                       Google Drive (MONGOSHIELD_GDRIVE_TOKEN)
- *   onedrive onedrive://<folder>                    OneDrive (MONGOSHIELD_ONEDRIVE_TOKEN)
  *   dropbox dropbox://<folder>                      Dropbox (MONGOSHIELD_DROPBOX_TOKEN)
  *
  * New schemes are appended, so the order of the older ones (and every hint that
@@ -21,7 +20,7 @@
  * resolve.ts documents every parameter and credential. Each factory receives the
  * parsed URL and the environment to read credentials from (StorageSchemeContext).
  *
- * The drive schemes (gdrive, onedrive, dropbox) call their providers' REST APIs with
+ * The drive schemes (gdrive, dropbox) call their providers' REST APIs with
  * `fetch` and need no SDK; each adapter documents its own URL parameters.
  *
  * Adding a first-party scheme: write its factory, add it to SUPPORTED_STORAGE_SCHEMES
@@ -36,7 +35,6 @@ import { fileStorage } from "./file.ts";
 import { gcsStorage } from "./gcs.ts";
 import { gdriveStorageFromUrl } from "./gdrive.ts";
 import { type MemoryStorage, memoryStorage } from "./memory.ts";
-import { onedriveStorageFromUrl } from "./onedrive.ts";
 import type { StorageSchemeContext, StorageSchemeFactory } from "./registry.ts";
 import { s3Storage } from "./s3.ts";
 import { b2Storage, R2_JURISDICTIONS, type R2Jurisdiction, r2Storage } from "./s3-presets.ts";
@@ -70,7 +68,6 @@ export const SUPPORTED_STORAGE_SCHEMES = [
   "b2",
   "r2",
   "gdrive",
-  "onedrive",
   "dropbox",
 ] as const;
 
@@ -519,8 +516,6 @@ export const FIRST_PARTY_STORAGE_SCHEMES = {
   // The drive adapters read their tokens from the environment (copied: they take a
   // mutable ProcessEnv, the registry hands out a read-only view).
   gdrive: ({ parsed, env }) => gdriveStorageFromUrl(parsed, { ...env }),
-
-  onedrive: ({ parsed, env }) => onedriveStorageFromUrl(parsed, { ...env }),
 
   dropbox: ({ parsed, env }) => dropboxStorageFromUrl(parsed, { ...env }),
 } as const satisfies Record<FirstPartyStorageScheme, StorageSchemeFactory>;

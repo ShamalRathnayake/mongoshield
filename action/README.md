@@ -24,7 +24,7 @@ A complete nightly workflow (with AWS OIDC, no stored AWS keys) is in
 |---|---|---|
 | `command` | `backup` | `backup`, `run` (backup + verify + prune + notify, from the config file), `verify` or `restore` |
 | `uri` | | MongoDB connection string. Use a secret; it is masked, including the password on its own |
-| `storage` | | `s3://bucket/prefix?region=…`, `onedrive://folder`, or a directory path |
+| `storage` | | `s3://bucket/prefix?region=…`, `gdrive://folder`, or a directory path |
 | `recipients` | | Comma-separated age public keys (`age1…`) to encrypt for |
 | `identity` | | age secret key (`AGE-SECRET-KEY-1…`) for `restore` and `verify --deep`. Use a secret |
 | `config` | | Path to a `mongoshield.config.{ts,js,json}` |
@@ -66,11 +66,5 @@ the outputs are still set, so a later `if: failure()` step can report the error.
   backup; keep the secret key out of the backup workflow entirely.
 - The action passes `--yes` because nobody can answer a prompt in CI. `restore` still
   refuses to overwrite existing data unless you pass `--mode drop|insert|upsert` in `args`.
-- `onedrive://` storage: Microsoft sign-ins expire 90 days after issue and rotate on every
-  use, so the Action keeps the newest one in the Actions cache (`actions/cache` restore and
-  save steps, pinned by SHA, skipped for every other storage). The cached file is encrypted
-  with a key derived from the `MONGOSHIELD_ONEDRIVE_TOKEN` secret, so the cache holds only
-  ciphertext. Pass the secret as `env: MONGOSHIELD_ONEDRIVE_TOKEN: ${{ secrets.MONGOSHIELD_ONEDRIVE_TOKEN }}`.
-  See [docs/guides/onedrive.md](../docs/guides/onedrive.md).
 - Cloud credentials come from the SDK's usual sources. For AWS, prefer
   `aws-actions/configure-aws-credentials` with OIDC over long-lived access keys.

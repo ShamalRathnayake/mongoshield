@@ -1,6 +1,6 @@
 /**
  * The contract between `mongoshield login <provider>` (commands/login.ts) and the
- * provider modules (gdrive.ts, onedrive.ts, dropbox.ts): a provider runs its OAuth
+ * provider modules (gdrive.ts, dropbox.ts): a provider runs its OAuth
  * flow and returns the long-lived refresh token; the command shows the person what
  * to do, prints the token once and says which secret it belongs in.
  *
@@ -49,8 +49,6 @@ export interface LoginContext {
    * signal fires once the answer is no longer needed. Absent without a terminal.
    */
   readonly readCode?: (options: { readonly signal: AbortSignal }) => Promise<string>;
-  /** OneDrive only: also allow work and school accounts (experimental, `--business`). */
-  readonly business?: boolean;
 }
 
 /** What a successful login produces. */
@@ -63,7 +61,7 @@ export interface LoginResult {
 
 /** One provider of `mongoshield login`. */
 export interface LoginProvider {
-  /** The name on the command line and in storage URLs: `gdrive`, `onedrive`, `dropbox`. */
+  /** The name on the command line and in storage URLs: `gdrive`, `dropbox`. */
   readonly id: string;
   /** For people: `"Google Drive"`. */
   readonly displayName: string;

@@ -13,10 +13,8 @@
  *   before it expires, so a request never goes out with a token about to lapse.
  *   Concurrent callers share one refresh. Nothing is written anywhere: adapters stay
  *   stateless across runs, and every run starts with one refresh.
- * - Providers that rotate refresh tokens (Microsoft returns a new one on every
- *   refresh, and the old one expires 90 days after issue) hand the new one to
- *   `onRefreshTokenRotated`, which the OneDrive adapter uses to persist it; later
- *   refreshes in this process use the new one too.
+ * - Providers that rotate refresh tokens (return a new one on a refresh) hand the
+ *   new one to `onRefreshTokenRotated`; later refreshes in this process use it too.
  * - A revoked or expired refresh token (`invalid_grant`) becomes MS_STORAGE_FORBIDDEN
  *   with `authHint` (run `mongoshield login <provider>` again).
  */
@@ -39,7 +37,7 @@ export interface AccessTokenSourceOptions extends Omit<TokenEndpointOptions, "si
   readonly client: OAuthClient;
   /** The long-lived refresh token (`MONGOSHIELD_<PROVIDER>_TOKEN`). A secret. */
   readonly refreshToken: string;
-  /** Scopes to ask for on refresh; providers that need them (Microsoft) list them here. */
+  /** Scopes to ask for on refresh; for providers that need them. */
   readonly scopes?: readonly string[];
   /** Replace the cached token this long before it expires. Default 60 s. */
   readonly refreshMarginMs?: number;

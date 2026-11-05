@@ -129,18 +129,18 @@ describe("deviceLoginProvider", () => {
         : { json: { access_token: "only-an-access-token" } },
     );
     const provider = deviceLoginProvider({
-      ...OAUTH_APPS.onedrive,
+      ...OAUTH_APPS.gdrive,
       endpoints: { deviceAuthorization: `${server.url}/device`, token: `${server.url}/token` },
     });
     const error = await failure(
       provider.login({
-        env: { MONGOSHIELD_ONEDRIVE_CLIENT_ID: "own" },
+        env: { MONGOSHIELD_GDRIVE_CLIENT_ID: "own" },
         signal: new AbortController().signal,
         show: () => {},
       }),
     );
     expect(isMongoShieldError(error, "MS_STORAGE_FORBIDDEN")).toBe(true);
-    expect(isMongoShieldError(error) && error.hint).toContain("mongoshield login onedrive");
+    expect(isMongoShieldError(error) && error.hint).toContain("mongoshield login gdrive");
   });
 
   it("refuses an app without a device authorization endpoint", () => {

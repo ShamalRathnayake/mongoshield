@@ -1,6 +1,6 @@
 # Registering MongoShield's OAuth apps
 
-This is a maintainer guide. `gdrive://`, `onedrive://` and `dropbox://` storage sign users in
+This is a maintainer guide. `gdrive://` and `dropbox://` storage sign users in
 through OAuth apps that MongoShield registers once and ships the public client IDs for, so a
 user only runs `mongoshield login <provider>` and never creates an app of their own.
 
@@ -12,7 +12,6 @@ filled in, that provider works only for people who register their own app and se
 |:--|:--|:--|:--|:--|
 | Google Drive | ~20 min + brand review (days) | no | brand verification only (`drive.file` is non-sensitive) | yes: tokens expire after 7 days until the app is published |
 | Dropbox | ~10 min | no | production approval after 50 linked users | no, but apply in launch week |
-| OneDrive | ~15 min | possibly, for the Microsoft tenant (see below) | none for personal accounts | no |
 
 Use a shared project mailbox (not a personal address) as the support and developer contact
 on every console: users see it on the consent screens.
@@ -23,9 +22,10 @@ Google (and Dropbox's production review) require a public **home page** and **pr
 policy** on a domain you control. The docs site works:
 
 - Home page: `https://shamalrathnayake.github.io/mongoshield/`
-- Privacy policy: a page on the docs site stating MongoShield has no servers and no
-  telemetry, that tokens stay on the user's machine or in their CI secrets, and that the app
-  only reads and writes files it created in the user's own drive.
+- Privacy policy: `https://shamalrathnayake.github.io/mongoshield/privacy/`
+  (`website/src/content/docs/privacy.md`, linked from every page's footer). It says
+  MongoShield has no servers and no telemetry, that tokens stay on the user's machine or
+  in their CI secrets, and what each provider's scopes let the app reach.
 
 Google must be able to verify the domain in [Google Search Console](https://search.google.com/search-console).
 `shamalrathnayake.github.io` is its own registrable domain (github.io is on the public
@@ -91,40 +91,13 @@ Console: [Dropbox App Console](https://www.dropbox.com/developers/apps).
    Apply during launch week: Settings → **Apply for production**. The form asks what the
    app does and for the privacy policy URL.
 
-## OneDrive (Microsoft)
-
-Console: [Microsoft Entra admin center](https://entra.microsoft.com) → Entra ID → App registrations.
-
-**You need a tenant (directory).** Microsoft no longer lets a personal account create app
-registrations outside a directory. Sign in with the project's Microsoft account. If the
-admin centre has no directory, create one by signing up for a free Azure account, which
-creates a *Default Directory*. Microsoft may ask for a card to verify identity; registering
-apps is free. Users still sign in with ordinary personal accounts: the tenant is only where
-the app's registration lives.
-
-1. **New registration**: name `MongoShield`. Under *Supported account types*, choose
-   **Personal accounts only**. Work and school accounts are experimental in MongoShield.
-   Supporting them later means switching to *Any Entra ID tenant + Personal Microsoft
-   accounts*, plus publisher verification (that needs a Microsoft partner account).
-   Leave *Redirect URI* empty: the device-code flow needs none. Register.
-2. Copy the **Application (client) ID** from the Overview page.
-3. **Authentication** → Advanced settings → **Allow public client flows**: *Yes* → Save.
-   Without this, device-code sign-in fails with `AADSTS7000218`.
-4. **API permissions** → Add a permission → Microsoft Graph → *Delegated* → add
-   `Files.ReadWrite.AppFolder` and `offline_access`. Keep or remove the default `User.Read`.
-   No admin consent is needed, because personal accounts consent for themselves.
-5. **Certificates & secrets**: create nothing. The CLI is a public client and ships no secret.
-
-Users' files go to `Apps/MongoShield` in their OneDrive. Microsoft refresh tokens expire 90
-days after they're issued, even when used. MongoShield rotates them through the Actions
-cache and warns from day 75 (see `docs/guides/onedrive.md`).
-
 ## Shipping the IDs
 
-1. Put the values in `packages/mongoshield/src/storage/oauth/apps.ts` (`OAUTH_APPS`, each
-   empty value is marked `TODO(maintainer)`): the Google client ID and secret, the
-   Microsoft Application (client) ID and the Dropbox App key. Every adapter and
-   `mongoshield login` read them from there.
+1. Put the values in `packages/mongoshield/src/storage/oauth/apps.ts` (`OAUTH_APPS`): the
+   Google client ID and secret and the Dropbox App key. Every adapter and
+   `mongoshield login` read them from there. Both are filled in: the Google client
+   `MongoShield CLI` in the Cloud project `mongoshield`, and the Dropbox app
+   `MongoShield` (app key `4eztt2dgf90i279`).
 2. Run `pnpm --filter mongoshield test`.
 3. Add the real-account test variables from `docs/testing-real-clouds.md` and run the Cloud
    workflow once (Actions → Cloud → Run workflow).

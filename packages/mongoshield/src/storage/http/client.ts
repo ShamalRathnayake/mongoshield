@@ -1,6 +1,6 @@
 /**
  * A small HTTP client for the storage adapters that talk to a REST API with plain
- * `fetch` (Google Drive, OneDrive, Dropbox): timeouts, cancellation, retries with
+ * `fetch` (Google Drive, Dropbox): timeouts, cancellation, retries with
  * backoff, OAuth bearer tokens, and failures turned into MongoShieldError codes.
  *
  *   const http = createHttpClient({ service: "Google Drive", auth: tokens });

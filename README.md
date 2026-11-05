@@ -475,7 +475,7 @@ mongoshield export --output ./dump && mongorestore --dir ./dump
 | Command | What it does |
 |:--|:--|
 | `init` · `keygen` | Create `mongoshield.config.ts` (asks where backups go); generate an age key pair |
-| `login <provider>` | Sign in to Google Drive, OneDrive or Dropbox and get the token for backups (`--gh` stores it as a repository secret) |
+| `login <provider>` | Sign in to Google Drive or Dropbox and get the token for backups (`--gh` stores it as a repository secret) |
 | `backup` | Back up. `--incremental` for only the changes, `--max-duration` to split and resume, `--retain-days` for immutable backups |
 | `restore [id]` | Restore, with `--rename`, `--mode`, `--dry-run`, or `--at <time>` for a point in time |
 | `list` · `inspect <id>` | Backups with their verification, drills, holds and locks |
@@ -661,7 +661,6 @@ version in every manifest, and newer releases keep reading older backups
 |:-:|:--|:--|:--|
 | 📁 | Local folder, NFS, SMB | `./backups` | built in |
 | 🟢 | Google Drive (15 GB free) | `gdrive://mongoshield-backups` | built in; `mongoshield login gdrive` |
-| 🔵 | OneDrive (5 GB free, personal accounts) | `onedrive://mongoshield-backups` | built in; `mongoshield login onedrive` |
 | 📦 | Dropbox (2 GB free) | `dropbox://mongoshield-backups` | built in; `mongoshield login dropbox` |
 | 🟠 | AWS S3 | `s3://bucket/prefix?region=eu-west-1` | `npm i @aws-sdk/client-s3 @aws-sdk/lib-storage` |
 | 🔥 | Backblaze B2 (10 GB free, no card) | `b2://bucket/prefix?region=us-west-004` | same as S3 |
@@ -676,8 +675,7 @@ version in every manifest, and newer releases keep reading older backups
 next steps for the choice. `npx mongoshield init --github` goes all the way: it signs in to
 the drive, writes a nightly GitHub Actions workflow, sets the repository secrets and runs the
 first backup ([Atlas Free + Netlify in 10 minutes](./docs/guides/atlas-free-netlify.md)).
-Guides: [Google Drive](./docs/guides/google-drive.md) ·
-[OneDrive](./docs/guides/onedrive.md) · [Dropbox](./docs/guides/dropbox.md) ·
+Guides: [Google Drive](./docs/guides/google-drive.md) · [Dropbox](./docs/guides/dropbox.md) ·
 [B2 and R2](./docs/guides/b2-and-r2.md). The drives need no SDK: MongoShield only sees its
 own folder (Google: only the files it created), and the token stays in your secrets.
 Before each backup, storage that knows its size (a local disk, the drives) is checked: a
@@ -948,7 +946,7 @@ For the CLI and storage URLs.
 | `MONGOSHIELD_SFTP_KNOWN_HOSTS` | | known_hosts file for SFTP (default `~/.ssh/known_hosts`) |
 | `SSH_AUTH_SOCK` | | Use the SSH agent for `sftp://` URLs |
 | `AZURE_STORAGE_CONNECTION_STRING` | | Credentials for `az://` URLs (its account must match the URL) |
-| `MONGOSHIELD_GDRIVE_CLIENT_ID` · `_CLIENT_SECRET` (also `ONEDRIVE`, `DROPBOX`) | | Your own OAuth app for `mongoshield login` and the drives, instead of MongoShield's |
+| `MONGOSHIELD_GDRIVE_CLIENT_ID` · `_CLIENT_SECRET` (also `DROPBOX`) | | Your own OAuth app for `mongoshield login` and the drives, instead of MongoShield's |
 | `NO_COLOR` · `FORCE_COLOR` · `TERM=dumb` | | Turn colors off, or on when output is piped |
 | `CI` | | When set, the CLI never asks questions (use `--yes`) |
 
@@ -974,7 +972,6 @@ Schemes, parameters and credentials.
 | Azure Blob | `az://account/container/prefix` | `endpoint`, `retention` | `AZURE_STORAGE_CONNECTION_STRING`, else `DefaultAzureCredential` (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, …, managed identity, `az login`) |
 | SFTP | `sftp://user@host:22/path` (`/~/path` = from the login directory) | `fingerprint` (repeatable), `allowUnknownHostKey` | `MONGOSHIELD_SFTP_KEY_FILE` and/or `SSH_AUTH_SOCK` |
 | Google Drive | `gdrive://<folder>` (inside a `MongoShield` folder in My Drive) | `chunkSizeMiB` | `MONGOSHIELD_GDRIVE_TOKEN` from `mongoshield login gdrive`; no storage lock (Drive allows duplicate names), so `schedule.lock` defaults to `none` |
-| OneDrive | `onedrive://<folder>` (inside `Apps/MongoShield`) | `fragmentSizeMiB`, `business=true` (work and school accounts, experimental) | `MONGOSHIELD_ONEDRIVE_TOKEN` from `mongoshield login onedrive`; optional `MONGOSHIELD_ONEDRIVE_TOKEN_STATE` (the Action keeps the rotated token there) |
 | Dropbox | `dropbox://<folder>` (inside `Apps/MongoShield`) | none | `MONGOSHIELD_DROPBOX_TOKEN` from `mongoshield login dropbox` |
 | Memory | `memory://name` | none | none: one store per name per process (for tests) |
 
@@ -1291,7 +1288,7 @@ Durations take `ms` `s` `m` `h`, e.g. `90s` or `1h30m`. Flags marked "repeatable
 |:--|:--|:--|
 | `-o`, `--output` | `<path>` | `keygen`: write the private key to this file (mode 0600; never overwrites) |
 | `--preset` | `atlas-free` · `atlas-flex` | `init`: start from a preset |
-| `--destination` | `gdrive` · `onedrive` · `dropbox` · `github-artifacts` · `b2` · `r2` · `directory` · `s3` · `gs` · `az` · `sftp` · `url` | `init`: the menu choice, without the menu (needs `--storage` unless it has a default) |
+| `--destination` | `gdrive` · `dropbox` · `github-artifacts` · `b2` · `r2` · `directory` · `s3` · `gs` · `az` · `sftp` · `url` | `init`: the menu choice, without the menu (needs `--storage` unless it has a default) |
 | `--storage` | `<storage-url>` | `init`: where backups will go (default `./backups`); its scheme picks the next steps |
 | `--uri-env` | `<VAR>` | `init`: variable holding the connection string (default `MONGODB_URI`) |
 | `--keygen` | | `init`: make a key pair and encrypt with it |
@@ -1301,7 +1298,6 @@ Durations take `ms` `s` `m` `h`, e.g. `90s` or `1h30m`. Flags marked "repeatable
 | `--gh` | | `login`: store the token as a repository secret with `gh secret set` instead of printing it |
 | `--repo` | `<owner/name>` | `login --gh`: the repository (default: the one in the current directory) |
 | `--port` | `<port>` | `login`: the local port for a browser sign-in (Dropbox) |
-| `--business` | | `login onedrive`: also allow work and school accounts (experimental) |
 
 `version` has only the global flags.
 

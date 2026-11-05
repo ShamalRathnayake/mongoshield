@@ -215,7 +215,7 @@ export interface CompletedBackupResult {
    * incremental fell back to a full backup for a reason that repeats on every run
    * (`MS_SNAPSHOT_TOO_OLD` on large time series), a Queryable Encryption collection
    * backed up without its state collections, the storage is more than 80% full (the
-   * free-space check), a storage sign-in about to expire (OneDrive, from day 75).
+   * free-space check), a storage sign-in about to expire.
    * Absent when there is nothing to report.
    * Scheduled runs copy them into the run report (`backup.warnings`).
    */

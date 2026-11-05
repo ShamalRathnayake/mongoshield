@@ -11,7 +11,6 @@ export default defineConfig({
     "storage/azure": "src/storage/azure.ts",
     "storage/sftp": "src/storage/sftp.ts",
     "storage/gdrive": "src/storage/gdrive.ts",
-    "storage/onedrive": "src/storage/onedrive.ts",
     "storage/dropbox": "src/storage/dropbox.ts",
     kms: "src/crypto/kms/index.ts",
     testing: "src/testing/index.ts",

@@ -1,7 +1,7 @@
 /**
  * The providers `mongoshield login <provider>` knows, in the order help lists them.
  *
- * Each provider lives in its own module (gdrive.ts, onedrive.ts, dropbox.ts) that its
+ * Each provider lives in its own module (gdrive.ts, dropbox.ts) that its
  * storage release owns, so this list never needs to change when one is improved.
  * Tests (and nothing else) add fakes with `registerLoginProvider`.
  */
@@ -9,15 +9,10 @@
 import { MongoShieldError } from "../../errors.ts";
 import { dropboxLoginProvider } from "./dropbox.ts";
 import { gdriveLoginProvider } from "./gdrive.ts";
-import { onedriveLoginProvider } from "./onedrive.ts";
 import type { LoginProvider } from "./types.ts";
 
 /** The built-in providers. */
-const BUILT_IN: readonly LoginProvider[] = [
-  gdriveLoginProvider,
-  onedriveLoginProvider,
-  dropboxLoginProvider,
-];
+const BUILT_IN: readonly LoginProvider[] = [gdriveLoginProvider, dropboxLoginProvider];
 
 /** Providers added at run time (tests). */
 const extra: LoginProvider[] = [];
