@@ -209,7 +209,7 @@ export async function initGithub(options: InitGithubOptions): Promise<InitGithub
   const settings = repositorySettings(options, recipient);
   const github = loggedIn
     ? await setWithGh(run, settings, out)
-    : await printManualSetup(settings, options, out);
+    : await printManualSetup(settings, configFile, out);
 
   // 6. The first run.
   const firstRun =
@@ -470,10 +470,11 @@ async function setWithGh(
 /**
  * Without `gh`: copy-paste lines. Secret values are written to 0600 files in a fresh
  * temporary directory and read from there with `<`, so the terminal never shows them.
+ * `configFile` is the config the workflow uses (an existing one, or the one written).
  */
 async function printManualSetup(
   settings: readonly RepositorySetting[],
-  options: InitGithubOptions,
+  configFile: string,
   out: InitGithubOutput,
 ): Promise<"manual"> {
   out.warn("The gh CLI is not logged in (gh auth status), so set these yourself:");
@@ -493,7 +494,7 @@ async function printManualSetup(
   }
   if (wroteSecret) out.result(`rm -r ${secretsDir}`);
   out.result(
-    `git add ${GITHUB_WORKFLOW_FILE} ${options.configFile ?? GITHUB_CONFIG_FILE} && git commit -m "ci: add MongoShield nightly backups" && git push`,
+    `git add ${GITHUB_WORKFLOW_FILE} ${configFile} && git commit -m "ci: add MongoShield nightly backups" && git push`,
   );
   out.result(`gh workflow run ${basenameOf(GITHUB_WORKFLOW_FILE)}`);
   return "manual";

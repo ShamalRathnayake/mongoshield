@@ -388,14 +388,16 @@ export function gdriveStorage(options: GdriveStorageOptions): GdriveStorage {
       `{ key=${quote(APP_FOLDER_MARKER.key)} and value=${quote(APP_FOLDER_MARKER.value)} }`;
     const found = await allFiles(query, location, signal);
     if (found.length > 0) return sortFoldersOldestFirst(found).map((folder) => folder.id);
-    await createFolder(appFolderName, "root", signal, {
+    const created = await createFolder(appFolderName, "root", signal, {
       [APP_FOLDER_MARKER.key]: APP_FOLDER_MARKER.value,
     });
     // Look again: if another process created one at the same moment, everyone
     // settles on the oldest, and both are read as one.
-    return sortFoldersOldestFirst(await allFiles(query, location, signal)).map(
+    const ids = sortFoldersOldestFirst(await allFiles(query, location, signal)).map(
       (folder) => folder.id,
     );
+    // A listing can lag behind a create; the folder just made exists either way.
+    return ids.length > 0 ? ids : [created.id];
   });
 
   /** Creates a folder and returns it. */
@@ -491,9 +493,11 @@ export function gdriveStorage(options: GdriveStorageOptions): GdriveStorage {
       if (existing.length > 0) return existing;
       const parentId = parents[0];
       if (parentId === undefined) throw new MongoShieldError("MS_INTERNAL", "No parent folder.");
-      await createFolder(name, parentId, signal);
+      const created = await createFolder(name, parentId, signal);
       // Re-read, so a folder another process created at the same moment is seen too.
-      return childFolders(parents, name, signal);
+      const ids = await childFolders(parents, name, signal);
+      // A listing can lag behind a create; the folder just made exists either way.
+      return ids.length > 0 ? ids : [created.id];
     })();
     creating.set(path, work);
     work.then(
