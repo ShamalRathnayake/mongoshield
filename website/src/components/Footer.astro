@@ -11,6 +11,8 @@ import Default from "@astrojs/starlight/components/Footer.astro";
 <p class="legal">
   MongoShield is MIT licensed and is not affiliated with, endorsed by or sponsored by
   MongoDB, Inc. MongoDB is a trademark of MongoDB, Inc.
+  <!-- The OAuth consent screens (Google, Dropbox) require a reachable privacy policy. -->
+  <a href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/privacy/`}>Privacy policy</a>
 </p>
 
 <style>
