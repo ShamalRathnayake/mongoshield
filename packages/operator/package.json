@@ -47,19 +47,19 @@
     "manifests:check": "node scripts/generate-manifests.ts --check"
   },
   "dependencies": {
-    "@kubernetes/client-node": "^2.0.1",
+    "@kubernetes/client-node": "^2.0.2",
     "croner": "^10.0.1",
-    "mongodb": "^7.7.0",
+    "mongodb": "^7.8.0",
     "mongoshield": "workspace:*",
-    "undici": "^8.12.3"
+    "undici": "^8.12.4"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "@vitest/coverage-v8": "^5.0.5",
+    "@vitest/coverage-v8": "^5.1.0",
     "js-yaml": "^5.5.0",
     "publint": "^0.3.25",
-    "tsdown": "^0.23.1",
+    "tsdown": "^0.23.7",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   }
 }
