@@ -23,7 +23,7 @@ ARG NPM_BEFORE=""
 # ---------------------------------------------------------------------------
 # Stage 1: build both packages and pack them as npm tarballs
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM node:24-trixie@sha256:8c761eca2bf7eec965f946cf47b8090143cb41f45f2f8699af0cc0298d2d2d19 AS build
+FROM --platform=$BUILDPLATFORM node:26-trixie@sha256:438603bbb5cda404b9416f0b5c8026f61501ab911760d861ec28c36b5d675725 AS build
 WORKDIR /repo
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
@@ -54,7 +54,7 @@ RUN pnpm --filter mongoshield build \
 # ---------------------------------------------------------------------------
 # Stage 2: install the tarballs like a user would (flat node_modules, no symlinks)
 # ---------------------------------------------------------------------------
-FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS deps
+FROM node:26-trixie-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS deps
 ARG NPM_BEFORE
 WORKDIR /app
 COPY --from=build /pack/mongoshield.tgz /pack/operator.tgz /tmp/

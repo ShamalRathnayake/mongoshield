@@ -53,7 +53,7 @@ ARG NPM_BEFORE=""
 # Runs on the builder's own CPU architecture ($BUILDPLATFORM) even for arm64 images:
 # its output (JavaScript and an npm tarball) is identical on every platform, and
 # running natively avoids slow QEMU emulation in multi-arch builds.
-FROM --platform=$BUILDPLATFORM node:24-trixie@sha256:8c761eca2bf7eec965f946cf47b8090143cb41f45f2f8699af0cc0298d2d2d19 AS build
+FROM --platform=$BUILDPLATFORM node:26-trixie@sha256:438603bbb5cda404b9416f0b5c8026f61501ab911760d861ec28c36b5d675725 AS build
 
 WORKDIR /repo
 
@@ -96,7 +96,7 @@ RUN pnpm --filter mongoshield build \
 # Runs on the *target* platform. All dependencies are pure JavaScript today, but
 # installing on the target means a future dependency with platform-specific
 # optional packages still gets the right ones.
-FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS deps
+FROM node:26-trixie-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS deps
 ARG CLOUD_SDKS
 ARG NPM_BEFORE
 
