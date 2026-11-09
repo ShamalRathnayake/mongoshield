@@ -129,20 +129,20 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
-    "@aws-sdk/client-kms": "^3.1155.0",
-    "@aws-sdk/client-s3": "^3.1155.0",
-    "@aws-sdk/lib-storage": "^3.1155.0",
+    "@aws-sdk/client-kms": "^3.1163.0",
+    "@aws-sdk/client-s3": "^3.1163.0",
+    "@aws-sdk/lib-storage": "^3.1163.0",
     "@testcontainers/minio": "^12.2.1",
     "@types/node": "^24.0.0",
-    "@vitest/coverage-v8": "^5.0.5",
+    "@vitest/coverage-v8": "^5.1.0",
     "aws-sdk-client-mock": "^4.1.0",
     "fast-check": "^4.10.2",
-    "mongodb": "^7.7.0",
+    "mongodb": "^7.8.0",
     "mongodb-memory-server": "^11.3.0",
     "publint": "^0.3.25",
     "testcontainers": "^12.2.1",
-    "tsdown": "^0.23.1",
+    "tsdown": "^0.23.7",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   }
 }
