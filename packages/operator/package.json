@@ -48,7 +48,7 @@
   },
   "dependencies": {
     "@kubernetes/client-node": "^2.0.2",
-    "croner": "^10.0.1",
+    "croner": "^11.0.0",
     "mongodb": "^7.8.0",
     "mongoshield": "workspace:*",
     "undici": "^8.12.4"
